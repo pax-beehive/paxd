@@ -218,7 +218,6 @@ func cmdRun(args []string) {
 	// Create subsystems
 	col := collector.New(hermesClient, cloudClient, db, agentState.AgentID)
 	exec := executor.New(hermesClient, cloudClient, db, agentState.AgentID)
-	pol := poller.New(cloudClient, exec, db)
 
 	// WebSocket: receive messages from Cloud in real-time
 	wsURL := wsURLFromHTTP(cfg.Cloud.APIURL)
@@ -226,6 +225,15 @@ func cmdRun(args []string) {
 	wsMsgCh, err := wsClient.Connect(sm.Context())
 	if err != nil {
 		log.Fatalf("ws connect: %v", err)
+	}
+
+	pol := poller.New(cloudClient, wsClient, exec, db)
+
+	// Wire real-time streaming: executor sends events to WS as they arrive
+	exec.OnEvent = func(ev any) {
+		if err := wsClient.SendJSON(ev); err != nil {
+			log.Printf("[executor] ws send event error: %v", err)
+		}
 	}
 
 	// Transition to RUNNING

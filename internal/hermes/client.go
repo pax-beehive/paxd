@@ -80,6 +80,7 @@ func (c *Client) GetSessions() ([]model.SessionInfo, error) {
 }
 
 // GetSessionStatus returns a single session's info.
+// Returns nil, nil if the session is not found (treated as idle).
 func (c *Client) GetSessionStatus(sessionID string) (*model.SessionInfo, error) {
 	req, err := http.NewRequest("GET", c.endpoint+"/api/sessions/"+sessionID, nil)
 	if err != nil {
@@ -93,6 +94,9 @@ func (c *Client) GetSessionStatus(sessionID string) (*model.SessionInfo, error) 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil // not found = idle
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("get session: status %d: %s", resp.StatusCode, string(body))
@@ -139,6 +143,13 @@ type Turn struct {
 
 // StreamTurn sends a prompt to Hermes and returns the full turn result.
 func (c *Client) StreamTurn(ctx context.Context, prevRespID, sessionID, prompt string) (*Turn, error) {
+	return c.StreamTurnLive(ctx, prevRespID, sessionID, prompt, nil)
+}
+
+// StreamTurnLive sends a prompt to Hermes, calling onEvent for each event
+// as it arrives (for real-time streaming). If onEvent is nil, events are
+// buffered into Turn.Events instead.
+func (c *Client) StreamTurnLive(ctx context.Context, prevRespID, sessionID, prompt string, onEvent func(any)) (*Turn, error) {
 	turn := &Turn{Status: "completed"}
 
 	events := make(chan any, 64)
@@ -150,7 +161,11 @@ func (c *Client) StreamTurn(ctx context.Context, prevRespID, sessionID, prompt s
 
 	var fileChanges []*model.FileChange
 	for ev := range events {
-		turn.Events = append(turn.Events, ev)
+		if onEvent != nil {
+			onEvent(ev)
+		} else {
+			turn.Events = append(turn.Events, ev)
+		}
 
 		switch e := ev.(type) {
 		case *model.TurnStarted:
@@ -178,21 +193,30 @@ func (c *Client) StreamTurn(ctx context.Context, prevRespID, sessionID, prompt s
 }
 
 // stream is the internal SSE parser that emits model.* events.
+// Uses Hermes' OpenAI-compatible /v1/chat/completions endpoint.
 func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt string, events chan<- any) error {
 	defer close(events)
 
-	body := struct {
-		Input              string `json:"input"`
-		PreviousResponseID string `json:"previous_response_id,omitempty"`
-		Stream             bool   `json:"stream"`
-		Store              bool   `json:"store"`
-	}{Input: prompt, PreviousResponseID: prevRespID, Stream: true, Store: true}
+	// Build OpenAI-compatible payload
+	type chatMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type chatRequest struct {
+		Model    string        `json:"model"`
+		Messages []chatMessage `json:"messages"`
+		Stream   bool          `json:"stream"`
+	}
+	payload, _ := json.Marshal(chatRequest{
+		Model:    "deepseek-v4-pro",
+		Messages: []chatMessage{{Role: "user", Content: prompt}},
+		Stream:   true,
+	})
 
-	payload, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint+"/v1/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		events <- model.NewAgentStatus("", "error", "Error", "❌", err.Error())
-		events <- model.NewTurnDone("", "", "error")
+		events <- model.NewAgentStatus(sessionID, "", "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone(sessionID, "", "", "error")
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -203,8 +227,8 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		events <- model.NewAgentStatus("", "error", "Error", "❌", err.Error())
-		events <- model.NewTurnDone("", "", "error")
+		events <- model.NewAgentStatus(sessionID, "", "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone(sessionID, "", "", "error")
 		return err
 	}
 	defer resp.Body.Close()
@@ -212,8 +236,8 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		msg := fmt.Sprintf("http %d: %s", resp.StatusCode, string(body))
-		events <- model.NewAgentStatus("", "error", "Error", "❌", msg)
-		events <- model.NewTurnDone("", "", "error")
+		events <- model.NewAgentStatus(sessionID, "", "error", "Error", "❌", msg)
+		events <- model.NewTurnDone(sessionID, "", "", "error")
 		return fmt.Errorf(msg)
 	}
 
@@ -224,10 +248,11 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 	var pendingText strings.Builder
 	turnStarted := false
 	var fileChanges []*model.FileChange
+	var currentEvent string // SSE event: field
 
 	flushText := func() {
 		if pendingText.Len() > 0 {
-			events <- model.NewMessageDelta(turnID, "assistant", pendingText.String())
+			events <- model.NewMessageDelta(sessionID, turnID, "assistant", pendingText.String())
 			pendingText.Reset()
 		}
 	}
@@ -236,17 +261,30 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 		select {
 		case <-ctx.Done():
 			flushText()
-			events <- model.NewAgentStatus(turnID, "cancelled", "Cancelled", "⏹️", "")
+			events <- model.NewAgentStatus(sessionID, turnID, "cancelled", "Cancelled", "⏹️", "")
 			if len(fileChanges) > 0 {
-				events <- model.NewFileChanged(turnID, fileChanges)
+				events <- model.NewFileChanged(sessionID, turnID, fileChanges)
 			}
-			events <- model.NewTurnDone(turnID, "", "cancelled")
+			events <- model.NewTurnDone(sessionID, turnID, "", "cancelled")
 			return ctx.Err()
 		default:
 		}
 
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "data: ") {
+
+		// Track event: field for custom SSE events
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+
+		// Empty line = event boundary, reset event type
+		if line == "" {
+			currentEvent = ""
+			continue
+		}
+
+		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
@@ -254,102 +292,135 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 			break
 		}
 
-		var sse hermesSSEvent
-		if err := json.Unmarshal([]byte(data), &sse); err != nil {
-			continue
-		}
-
-		switch sse.Type {
-		case "response.created":
-			turnID = sse.Response.ID
-			turnStarted = true
-			events <- model.NewTurnStarted(turnID)
-			events <- model.NewAgentStatus(turnID, "thinking", "Thinking…", "🧠", "")
-
-		case "response.output_text.delta":
-			pendingText.WriteString(sse.Delta)
-
-		case "response.output_item.added":
-			if sse.Item.Type == "function_call" {
+		// Hermes custom event: tool progress
+		if currentEvent == "hermes.tool.progress" {
+			var tp toolProgressEvent
+			if err := json.Unmarshal([]byte(data), &tp); err != nil {
+				currentEvent = ""
+				continue
+			}
+			switch tp.Status {
+			case "running":
 				flushText()
-				label := formatToolLabel(sse.Item.Name, sse.Item.Arguments)
-				events <- model.NewAgentStatus(turnID, "working", "Working…", "🔧", label)
-				events <- model.NewToolCall(turnID, sse.Item.CallID, sse.Item.Name, sse.Item.Arguments)
+				label := fmt.Sprintf("%s %s %s", tp.Emoji, tp.Tool, tp.Label)
+				events <- model.NewAgentStatus(sessionID, turnID, "working", "Working…", "🔧", label)
+				events <- model.NewToolCall(sessionID, turnID, tp.ToolCallID, tp.Tool, tp.Label)
 
-				// Track file changes from write_file / patch
-				fc := extractFileChange(sse.Item.Name, sse.Item.Arguments)
+				fc := extractFileChange(tp.Tool, tp.Label)
 				if fc != nil {
 					fileChanges = append(fileChanges, fc)
 				}
+
+			case "completed":
+				// Tool finished — no output details, just mark working → thinking
+				events <- model.NewAgentStatus(sessionID, turnID, "thinking", "Thinking…", "🧠", "")
+
+			case "failed":
+				events <- model.NewAgentStatus(sessionID, turnID, "thinking", "Thinking…", "🧠", "tool failed: "+tp.Tool)
 			}
-			if sse.Item.Type == "function_call_output" {
-				output := extractToolOutput(sse.Item.Output)
-				events <- model.NewToolResult(turnID, sse.Item.CallID, output)
-				events <- model.NewMessageDelta(turnID, "tool", "┊ "+truncate(output, 200))
-				events <- model.NewAgentStatus(turnID, "thinking", "Thinking…", "🧠", "")
+			currentEvent = ""
+			continue
+		}
+
+		// OpenAI-compatible chunk
+		var chunk openAIChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		// Start of turn on first chunk
+		if !turnStarted && chunk.ID != "" {
+			turnID = chunk.ID
+			turnStarted = true
+			events <- model.NewTurnStarted(sessionID, turnID)
+			events <- model.NewAgentStatus(sessionID, turnID, "thinking", "Thinking…", "🧠", "")
+		}
+
+		for _, choice := range chunk.Choices {
+			// Text delta — send immediately for real-time streaming
+			if choice.Delta.Content != "" {
+				events <- model.NewMessageDelta(sessionID, turnID, "assistant", choice.Delta.Content)
 			}
 
-		case "response.output_text.done":
-			flushText()
+			// OpenAI tool calls (fallback for non-Hermes backends)
+			if len(choice.Delta.ToolCalls) > 0 {
+				flushText()
+				for _, tc := range choice.Delta.ToolCalls {
+					if tc.Function.Name != "" {
+						label := formatToolLabel(tc.Function.Name, tc.Function.Arguments)
+						events <- model.NewAgentStatus(sessionID, turnID, "working", "Working…", "🔧", label)
+						events <- model.NewToolCall(sessionID, turnID, tc.ID, tc.Function.Name, tc.Function.Arguments)
 
-		case "response.completed":
-			// handled after loop
+						fc := extractFileChange(tc.Function.Name, tc.Function.Arguments)
+						if fc != nil {
+							fileChanges = append(fileChanges, fc)
+						}
+					}
+				}
+			}
+
+			// Finish reason
+			if choice.FinishReason == "tool_calls" {
+				flushText()
+			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		events <- model.NewAgentStatus(turnID, "error", "Error", "❌", err.Error())
-		events <- model.NewTurnDone(turnID, "", "error")
+		events <- model.NewAgentStatus(sessionID, turnID, "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone(sessionID, turnID, "", "error")
 		return err
 	}
 
 	flushText()
 
 	if turnStarted {
-		events <- model.NewAgentStatus(turnID, "done", "Done", "✅", "")
+		events <- model.NewAgentStatus(sessionID, turnID, "done", "Done", "✅", "")
 		if len(fileChanges) > 0 {
-			events <- model.NewFileChanged(turnID, fileChanges)
+			events <- model.NewFileChanged(sessionID, turnID, fileChanges)
 		}
-		events <- model.NewTurnDone(turnID, turnID, "completed")
+		events <- model.NewTurnDone(sessionID, turnID, turnID, "completed")
 	}
-	events <- model.NewAgentStatus("", "idle", "", "", "")
+	events <- model.NewAgentStatus(sessionID, "", "idle", "", "", "")
 
 	return nil
 }
 
-// ─── SSE internal types ───
+// ─── Hermes tool progress SSE types ───
 
-type hermesSSEvent struct {
-	Type     string `json:"type"`
-	Delta    string `json:"delta"`
-	Item     struct {
-		Type      string `json:"type"`
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-		CallID    string `json:"call_id"`
-		Output    []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"output"`
-	} `json:"item"`
-	Response struct {
-		ID string `json:"id"`
-	} `json:"response"`
+type toolProgressEvent struct {
+	Tool       string `json:"tool"`
+	Emoji      string `json:"emoji"`
+	Label      string `json:"label"`
+	ToolCallID string `json:"toolCallId"`
+	Status     string `json:"status"` // "running" | "completed" | "failed"
+}
+
+// ─── OpenAI SSE types ───
+
+type openAIChunk struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Choices []struct {
+		Index int `json:"index"`
+		Delta struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
 }
 
 // ─── Helpers ───
-
-func extractToolOutput(outputs []struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}) string {
-	for _, o := range outputs {
-		if o.Type == "input_text" {
-			return o.Text
-		}
-	}
-	return ""
-}
 
 func extractFileChange(toolName, rawArgs string) *model.FileChange {
 	if toolName != "write_file" && toolName != "patch" {

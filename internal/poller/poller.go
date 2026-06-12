@@ -16,14 +16,16 @@ import (
 // Poller processes Cloud messages arriving via WebSocket push.
 type Poller struct {
 	cloudClient *cloud.Client
+	wsClient    *cloud.WSClient
 	executor    *executor.Executor
 	store       *store.Store
 }
 
 // New creates a new Poller.
-func New(cloudClient *cloud.Client, exec *executor.Executor, s *store.Store) *Poller {
+func New(cloudClient *cloud.Client, wsClient *cloud.WSClient, exec *executor.Executor, s *store.Store) *Poller {
 	return &Poller{
 		cloudClient: cloudClient,
+		wsClient:    wsClient,
 		executor:    exec,
 		store:       s,
 	}
@@ -48,20 +50,12 @@ func (p *Poller) ProcessMessage(ctx context.Context, msg cloud.Message) error {
 		return nil
 	}
 
-	// Create structured outbound message with turn events
-	outbound := &cloud.OutboundMessage{
-		AgentID:     msg.AgentID,
-		SessionID:   msg.SessionID,
-		Type:        "turn_result",
-		ParentMsgID: msg.MessageID,
-		TurnID:      result.TurnID,
-		ResponseID:  result.ResponseID,
-		Status:      result.Status,
-		Events:      result.Events,
-		FileChanges: result.FileChanges,
-	}
-	if err := p.cloudClient.CreateOutbound(outbound); err != nil {
-		log.Printf("[poller] create outbound error: %v", err)
+	// Send each event directly via WebSocket as raw model.* JSON
+	// Skip if events were already sent via streaming (OnEvent callback)
+	for _, ev := range result.Events {
+		if err := p.wsClient.SendJSON(ev); err != nil {
+			log.Printf("[poller] ws send event error: %v", err)
+		}
 	}
 
 	if err := p.cloudClient.ReportCompleted(msg.MessageID, result.ResponseID); err != nil {

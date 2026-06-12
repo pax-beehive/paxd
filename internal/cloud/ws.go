@@ -8,19 +8,21 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 // WSClient maintains a WebSocket connection to the Cloud API for receiving
-// push events (new messages, steer commands, etc.).
+// push events (new messages, steer commands, etc.) and sending turn results.
 type WSClient struct {
-	url        string
-	headers    http.Header
-	dialer     *websocket.Dialer
-	conn       *websocket.Conn
-	msgCh      chan Message
+	url         string
+	headers     http.Header
+	dialer      *websocket.Dialer
+	conn        *websocket.Conn
+	writeMu     sync.Mutex
+	msgCh       chan Message
 	reconnectCh chan struct{}
 }
 
@@ -119,6 +121,21 @@ func (w *WSClient) dialAndRead(ctx context.Context) error {
 			log.Printf("[ws] message channel full, dropping message %s", msg.MessageID)
 		}
 	}
+}
+
+// SendJSON marshals v to JSON and writes it as a text message on the WS connection.
+// Thread-safe; returns an error if the connection is nil or the write fails.
+func (w *WSClient) SendJSON(v any) error {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	if w.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // Close closes the WebSocket connection.

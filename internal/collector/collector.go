@@ -38,10 +38,11 @@ func New(hermesClient *hermes.Client, cloudClient *cloud.Client, s *store.Store,
 // CollectAndReport gathers all session statuses and system metrics,
 // then POSTs the report to the Cloud API.
 func (c *Collector) CollectAndReport(ctx context.Context) error {
-	// Collect Hermes sessions
+	// Collect Hermes sessions (non-fatal: Hermes may not expose /api/sessions)
 	sessions, err := c.hermesClient.GetSessions()
 	if err != nil {
-		return fmt.Errorf("get sessions: %w", err)
+		log.Printf("[collector] get sessions (non-fatal): %v", err)
+		sessions = nil
 	}
 
 	var sessionStatuses []cloud.SessionStatus

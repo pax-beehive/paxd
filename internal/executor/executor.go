@@ -19,6 +19,7 @@ type Executor struct {
 	cloudClient  *cloud.Client
 	store        *store.Store
 	agentID      string
+	OnEvent      func(any) // called for each event as it arrives (nil = buffer all)
 }
 
 // New creates a new Executor.
@@ -63,8 +64,8 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnRes
 		return nil, fmt.Errorf("get session status: %w", err)
 	}
 
-	// Running → skip and orphan
-	if session.Status == "running" {
+	// nil session = not found → treat as idle and execute
+	if session != nil && session.Status == "running" {
 		log.Printf("[executor] session %s is running, orphaning chat message %s", msg.SessionID, msg.MessageID)
 		orphan := &store.OrphanedMessage{
 			MessageID: msg.MessageID,
@@ -80,7 +81,12 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnRes
 	}
 
 	// Idle → execute
-	turn, err := e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	var turn *hermes.Turn
+	if e.OnEvent != nil {
+		turn, err = e.hermesClient.StreamTurnLive(ctx, "", msg.SessionID, msg.Content, e.OnEvent)
+	} else {
+		turn, err = e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	}
 	if err != nil && turn == nil {
 		return nil, fmt.Errorf("stream turn: %w", err)
 	}
@@ -90,7 +96,7 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnRes
 		TurnID:      turn.TurnID,
 		ResponseID:  turn.ResponseID,
 		Status:      turn.Status,
-		Events:      turn.Events,
+		Events:      turn.Events, // nil when streaming via OnEvent
 		FileChanges: turn.FileChanges,
 	}, err
 }

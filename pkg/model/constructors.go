@@ -4,22 +4,24 @@ package model
 // Constructor helpers — ensure EntityType/EventType are always set.
 // ═══════════════════════════════════════════════════════════════════
 
-func NewTurnStarted(turnID string) *TurnStarted {
+func NewTurnStarted(sessionID, turnID string) *TurnStarted {
 	return &TurnStarted{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "turn", EventType: "started"},
+				Envelope:  Envelope{EntityType: "turn", EventType: "started"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
 	}
 }
 
-func NewTurnDone(turnID, responseID, status string) *TurnDone {
+func NewTurnDone(sessionID, turnID, responseID, status string) *TurnDone {
 	return &TurnDone{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "turn", EventType: "done"},
+				Envelope:  Envelope{EntityType: "turn", EventType: "done"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
@@ -28,10 +30,11 @@ func NewTurnDone(turnID, responseID, status string) *TurnDone {
 	}
 }
 
-func NewAgentStatus(turnID, status, label, icon, detail string) *AgentStatus {
+func NewAgentStatus(sessionID, turnID, status, label, icon, detail string) *AgentStatus {
 	return &AgentStatus{
 		SessionBase: SessionBase{
-			Envelope: Envelope{EntityType: "agent", EventType: "status"},
+			Envelope:  Envelope{EntityType: "agent", EventType: "status"},
+			SessionID: sessionID,
 		},
 		TurnID: turnID,
 		Status: status,
@@ -41,11 +44,12 @@ func NewAgentStatus(turnID, status, label, icon, detail string) *AgentStatus {
 	}
 }
 
-func NewMessageDelta(turnID, role, content string) *MessageDelta {
+func NewMessageDelta(sessionID, turnID, role, content string) *MessageDelta {
 	return &MessageDelta{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "message", EventType: "delta"},
+				Envelope:  Envelope{EntityType: "message", EventType: "delta"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
@@ -54,11 +58,12 @@ func NewMessageDelta(turnID, role, content string) *MessageDelta {
 	}
 }
 
-func NewToolCall(turnID, callID, name, args string) *ToolCall {
+func NewToolCall(sessionID, turnID, callID, name, args string) *ToolCall {
 	return &ToolCall{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "tool", EventType: "call"},
+				Envelope:  Envelope{EntityType: "tool", EventType: "call"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
@@ -68,11 +73,12 @@ func NewToolCall(turnID, callID, name, args string) *ToolCall {
 	}
 }
 
-func NewToolResult(turnID, callID, output string) *ToolResult {
+func NewToolResult(sessionID, turnID, callID, output string) *ToolResult {
 	return &ToolResult{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "tool", EventType: "result"},
+				Envelope:  Envelope{EntityType: "tool", EventType: "result"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
@@ -81,11 +87,12 @@ func NewToolResult(turnID, callID, output string) *ToolResult {
 	}
 }
 
-func NewFileChanged(turnID string, changes []*FileChange) *FileChanged {
+func NewFileChanged(sessionID, turnID string, changes []*FileChange) *FileChanged {
 	return &FileChanged{
 		TurnBase: TurnBase{
 			SessionBase: SessionBase{
-				Envelope: Envelope{EntityType: "file", EventType: "changed"},
+				Envelope:  Envelope{EntityType: "file", EventType: "changed"},
+				SessionID: sessionID,
 			},
 			TurnID: turnID,
 		},
