@@ -92,7 +92,7 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnRes
 	}
 
 	return &TurnResult{
-		SessionID:   msg.SessionID,
+		SessionID:   turn.SessionID,
 		TurnID:      turn.TurnID,
 		ResponseID:  turn.ResponseID,
 		Status:      turn.Status,
@@ -110,13 +110,19 @@ func (e *Executor) executeSteer(ctx context.Context, msg cloud.Message) (*TurnRe
 		log.Printf("[executor] stop run error (non-fatal): %v", err)
 	}
 
-	turn, err := e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	var turn *hermes.Turn
+	var err error
+	if e.OnEvent != nil {
+		turn, err = e.hermesClient.StreamTurnLive(ctx, "", msg.SessionID, msg.Content, e.OnEvent)
+	} else {
+		turn, err = e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	}
 	if err != nil && turn == nil {
 		return nil, fmt.Errorf("steer turn: %w", err)
 	}
 
 	return &TurnResult{
-		SessionID:   msg.SessionID,
+		SessionID:   turn.SessionID,
 		TurnID:      turn.TurnID,
 		ResponseID:  turn.ResponseID,
 		Status:      turn.Status,

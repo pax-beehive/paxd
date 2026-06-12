@@ -133,6 +133,7 @@ func (c *Client) StopRun(sessionID string) error {
 
 // Turn contains the full result of one Hermes turn.
 type Turn struct {
+	SessionID   string
 	TurnID      string
 	ResponseID  string
 	Events      []any            // []*model.TurnStarted | *model.MessageDelta | *model.ToolCall | ...
@@ -154,9 +155,10 @@ func (c *Client) StreamTurnLive(ctx context.Context, prevRespID, sessionID, prom
 
 	events := make(chan any, 64)
 	errCh := make(chan error, 1)
+	var realSessionID string
 
 	go func() {
-		errCh <- c.stream(ctx, prevRespID, sessionID, prompt, events)
+		errCh <- c.stream(ctx, prevRespID, sessionID, prompt, events, &realSessionID)
 	}()
 
 	var fileChanges []*model.FileChange
@@ -181,6 +183,7 @@ func (c *Client) StreamTurnLive(ctx context.Context, prevRespID, sessionID, prom
 		}
 	}
 	turn.FileChanges = fileChanges
+	turn.SessionID = realSessionID
 
 	if err := <-errCh; err != nil {
 		if turn.Status == "completed" {
@@ -194,7 +197,8 @@ func (c *Client) StreamTurnLive(ctx context.Context, prevRespID, sessionID, prom
 
 // stream is the internal SSE parser that emits model.* events.
 // Uses Hermes' OpenAI-compatible /v1/chat/completions endpoint.
-func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt string, events chan<- any) error {
+// Sets *realSessionID from X-Hermes-Session-Id response header.
+func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt string, events chan<- any, realSessionID *string) error {
 	defer close(events)
 
 	// Build OpenAI-compatible payload
@@ -232,6 +236,12 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Capture Hermes session ID from response header
+	if sid := resp.Header.Get("X-Hermes-Session-Id"); sid != "" {
+		*realSessionID = sid
+		sessionID = sid // use real session ID for all events
+	}
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
