@@ -1,22 +1,23 @@
 // paxd is the Pax Fleet Daemon — runs on every agent machine,
-// connects to the Fleet Cloud API, reports local Hermes session status,
-// and executes messages from the Cloud mailbox.
+// connects to the Fleet Cloud API via WebSocket, reports local Hermes
+// session status, and executes real-time messages from the Cloud mailbox.
+//
+// Architecture:
+//
+//	Cloud ──WebSocket──→ paxd (receive messages in real-time)
+//	paxd  ──HTTP POST──→ Cloud (status reports, results, registration)
 //
 // Usage:
 //
 //	paxd register --cloud-url https://fleet.example.com    # first-time registration
 //	paxd run                                                  # start the daemon loop
 //	paxd install-service                                      # install as macOS launchd service
+//	paxd --version                                            # print version
 package main
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -26,14 +27,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/toddzheng/paxd/internal/cloud"
-	"github.com/toddzheng/paxd/internal/collector"
-	"github.com/toddzheng/paxd/internal/config"
-	"github.com/toddzheng/paxd/internal/executor"
-	"github.com/toddzheng/paxd/internal/hermes"
-	"github.com/toddzheng/paxd/internal/poller"
-	"github.com/toddzheng/paxd/internal/state"
-	"github.com/toddzheng/paxd/internal/store"
+	"github.com/pax-beehive/paxd/internal/cloud"
+	"github.com/pax-beehive/paxd/internal/collector"
+	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/executor"
+	"github.com/pax-beehive/paxd/internal/hermes"
+	"github.com/pax-beehive/paxd/internal/poller"
+	"github.com/pax-beehive/paxd/internal/state"
+	"github.com/pax-beehive/paxd/internal/store"
 )
 
 var version = "0.1.0"
@@ -128,6 +129,11 @@ func cmdRegister(args []string) {
 }
 
 // cmdRun starts the main daemon loop.
+//
+// Three concurrent loops:
+//  1. WebSocket → receives messages from Cloud in real-time
+//  2. Status ticker → reports session + system status to Cloud (HTTP POST)
+//  3. Orphan ticker → reconciles orphaned messages
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "Config file path (default: ~/.pax/paxd.yaml)")
@@ -162,7 +168,6 @@ func cmdRun(args []string) {
 	}
 
 	if agentState == nil {
-		// Auto-register if config has API key
 		if cfg.Cloud.APIKey == "" {
 			log.Fatal("not registered. Run: paxd register --cloud-url <url>")
 		}
@@ -215,19 +220,27 @@ func cmdRun(args []string) {
 	exec := executor.New(hermesClient, cloudClient, db, agentState.AgentID)
 	pol := poller.New(cloudClient, exec, db)
 
+	// WebSocket: receive messages from Cloud in real-time
+	wsURL := wsURLFromHTTP(cfg.Cloud.APIURL)
+	wsClient := cloud.NewWSClient(wsURL, cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
+	wsMsgCh, err := wsClient.Connect(sm.Context())
+	if err != nil {
+		log.Fatalf("ws connect: %v", err)
+	}
+
 	// Transition to RUNNING
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
-	log.Printf("[paxd] RUNNING (poll=%s, status=%s)", cfg.Daemon.PollInterval, cfg.Daemon.StatusInterval)
+	log.Printf("[paxd] RUNNING (ws=%s, status=%s, orphan=%s)",
+		wsURL, cfg.Daemon.StatusInterval, cfg.Daemon.ReconcileInterval)
 
-	// Main loop
+	// Main loop: three concurrent sources
 	statusTicker := time.NewTicker(cfg.Daemon.StatusInterval)
-	pollTicker := time.NewTicker(cfg.Daemon.PollInterval)
+	orphanTicker := time.NewTicker(cfg.Daemon.ReconcileInterval)
 	defer statusTicker.Stop()
-	defer pollTicker.Stop()
+	defer orphanTicker.Stop()
 
-	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -235,22 +248,43 @@ func cmdRun(args []string) {
 		select {
 		case sig := <-sigCh:
 			log.Printf("[paxd] received signal: %v", sig)
+			wsClient.Close()
 			sm.Transition(state.STOPPING)
 			sm.Transition(state.STOPPED)
 			log.Printf("[paxd] STOPPED")
 			return
+
+		case msg, ok := <-wsMsgCh:
+			if !ok {
+				// WebSocket channel closed — will auto-reconnect
+				log.Printf("[paxd] ws disconnected, reconnecting...")
+				wsMsgCh, _ = wsClient.Connect(sm.Context())
+				continue
+			}
+			if err := pol.ProcessMessage(sm.Context(), msg); err != nil {
+				log.Printf("[paxd] process error: %v", err)
+			}
 
 		case <-statusTicker.C:
 			if err := col.CollectAndReport(sm.Context()); err != nil {
 				log.Printf("[paxd] status error: %v", err)
 			}
 
-		case <-pollTicker.C:
-			if err := pol.PollAndExecute(sm.Context()); err != nil {
-				log.Printf("[paxd] poll error: %v", err)
+		case <-orphanTicker.C:
+			if err := pol.ReconcileOrphans(sm.Context()); err != nil {
+				log.Printf("[paxd] orphan reconcile error: %v", err)
 			}
 		}
 	}
+}
+
+// wsURLFromHTTP derives the WebSocket URL from the HTTP Cloud URL.
+// https://fleet.example.com → wss://fleet.example.com/api/agent/ws
+func wsURLFromHTTP(httpURL string) string {
+	u := strings.TrimRight(httpURL, "/")
+	u = strings.Replace(u, "https://", "wss://", 1)
+	u = strings.Replace(u, "http://", "ws://", 1)
+	return u + "/api/agent/ws"
 }
 
 // cmdInstallService generates a macOS launchd plist.
@@ -304,7 +338,7 @@ func cmdInstallService() {
 	fmt.Printf("  launchctl unload %s\n", plistPath)
 }
 
-// yamlMarshal is a quick inline YAML marshaler to avoid importing gopkg.in/yaml.v3 in main.
+// yamlMarshal is a quick inline YAML marshaler.
 func yamlMarshal(cfg *config.Config) ([]byte, error) {
 	var sb strings.Builder
 	sb.WriteString("# paxd configuration\n")

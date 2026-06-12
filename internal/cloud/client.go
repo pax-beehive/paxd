@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 // Client communicates with the Fleet Cloud API.
@@ -52,13 +54,20 @@ type Message struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// OutboundMessage is the response sent back to Cloud after execution.
+// OutboundMessage is the response sent back to Cloud after message execution.
 type OutboundMessage struct {
 	AgentID     string `json:"agent_id"`
 	SessionID   string `json:"session_id"`
-	Type        string `json:"type"` // "chat_response", "error", "command_ack"
-	Content     string `json:"content"`
+	Type        string `json:"type"` // "turn_result", "error", "command_ack"
+	Content     string `json:"content,omitempty"`
 	ParentMsgID string `json:"parent_message_id,omitempty"`
+
+	// Structured turn result fields (type="turn_result")
+	TurnID      string               `json:"turn_id,omitempty"`
+	ResponseID  string               `json:"response_id,omitempty"`
+	Status      string               `json:"status,omitempty"`    // "completed" | "cancelled" | "error"
+	Events      []any                `json:"events,omitempty"`    // model.* structs
+	FileChanges []*model.FileChange  `json:"file_changes,omitempty"`
 }
 
 // RegisterRequest is the payload for POST /api/agent/register.

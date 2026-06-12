@@ -1,15 +1,19 @@
-// Package hermes provides an HTTP client for the local Hermes API Server.
+// Package hermes provides an HTTP client for the local Hermes API Server,
+// yielding structured model.* events from SSE streaming responses.
 package hermes
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 // Client communicates with a Hermes API Server instance.
@@ -19,62 +23,27 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// SessionInfo represents a Hermes session as returned by the API.
-type SessionInfo struct {
-	SessionID   string `json:"session_id"`
-	Status      string `json:"status"`       // "idle", "running", "completed"
-	CurrentTask string `json:"current_task"`
-	TokenUsage  int64  `json:"token_usage"`
-	UpdatedAt   string `json:"updated_at"`
-}
-
-// ChatRequest is sent to Hermes chat/stream endpoint.
-type ChatRequest struct {
-	SessionID string `json:"session_id,omitempty"` // empty = create new
-	Message   string `json:"message"`
-	Stream    bool   `json:"stream"`
-}
-
-// ChatEvent is a streaming SSE event from Hermes.
-type ChatEvent struct {
-	Type    string `json:"type"`    // "text", "tool_call", "done", "error"
-	Content string `json:"content"`
-}
-
 // NewClient creates a new Hermes API client.
 func NewClient(endpoint, apiKey string) *Client {
 	return &Client{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		apiKey:   apiKey,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // streaming responses can be long
+			Timeout: 5 * time.Minute,
 		},
 	}
 }
 
-func (c *Client) do(method, path string, body any) (*http.Response, error) {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal body: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	req, err := http.NewRequest(method, c.endpoint+path, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("X-API-Key", c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	return c.httpClient.Do(req)
-}
-
 // Ping checks if Hermes is reachable.
 func (c *Client) Ping() error {
-	resp, err := c.do(http.MethodGet, "/health", nil)
+	req, err := http.NewRequest("GET", c.endpoint+"/health", nil)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("hermes unreachable: %w", err)
 	}
@@ -86,81 +55,69 @@ func (c *Client) Ping() error {
 }
 
 // GetSessions fetches all active sessions from Hermes.
-func (c *Client) GetSessions() ([]SessionInfo, error) {
-	resp, err := c.do(http.MethodGet, "/api/sessions", nil)
+func (c *Client) GetSessions() ([]model.SessionInfo, error) {
+	req, err := http.NewRequest("GET", c.endpoint+"/api/sessions", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("get sessions: status %d: %s", resp.StatusCode, string(body))
 	}
-
-	var sessions []SessionInfo
+	var sessions []model.SessionInfo
 	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
 		return nil, fmt.Errorf("decode sessions: %w", err)
 	}
 	return sessions, nil
 }
 
-// GetSessionStatus returns a single session's status.
-func (c *Client) GetSessionStatus(sessionID string) (*SessionInfo, error) {
-	resp, err := c.do(http.MethodGet, "/api/sessions/"+sessionID, nil)
+// GetSessionStatus returns a single session's info.
+func (c *Client) GetSessionStatus(sessionID string) (*model.SessionInfo, error) {
+	req, err := http.NewRequest("GET", c.endpoint+"/api/sessions/"+sessionID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("get session: status %d: %s", resp.StatusCode, string(body))
 	}
-
-	var s SessionInfo
+	var s model.SessionInfo
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
 		return nil, fmt.Errorf("decode session: %w", err)
 	}
 	return &s, nil
 }
 
-// ChatStream sends a chat message and streams the response via callback.
-// Returns the full accumulated response text.
-func (c *Client) ChatStream(sessionID, message string, onEvent func(ChatEvent)) (string, error) {
-	req := ChatRequest{
-		SessionID: sessionID,
-		Message:   message,
-		Stream:    true,
-	}
-
-	path := "/api/sessions/" + sessionID + "/chat/stream"
-	if sessionID == "" {
-		path = "/api/chat/stream"
-	}
-
-	resp, err := c.do(http.MethodPost, path, req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("chat stream: status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return parseSSE(resp.Body, onEvent)
-}
-
 // StopRun stops a running session.
 func (c *Client) StopRun(sessionID string) error {
-	resp, err := c.do(http.MethodPost, "/v1/runs/"+sessionID+"/stop", nil)
+	req, err := http.NewRequest("POST", c.endpoint+"/v1/runs/"+sessionID+"/stop", nil)
+	if err != nil {
+		return err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("stop run: status %d: %s", resp.StatusCode, string(body))
@@ -168,41 +125,292 @@ func (c *Client) StopRun(sessionID string) error {
 	return nil
 }
 
-// parseSSE reads Server-Sent Events from the response and calls onEvent for each.
-// Returns the concatenated text content.
-func parseSSE(r io.Reader, onEvent func(ChatEvent)) (string, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var fullText strings.Builder
+// ─── SSE Streaming with model.* events ───
+
+// Turn contains the full result of one Hermes turn.
+type Turn struct {
+	TurnID      string
+	ResponseID  string
+	Events      []any            // []*model.TurnStarted | *model.MessageDelta | *model.ToolCall | ...
+	FileChanges []*model.FileChange
+	Status      string           // "completed" | "cancelled" | "error"
+	Usage       *model.UsageInfo
+}
+
+// StreamTurn sends a prompt to Hermes and returns the full turn result.
+func (c *Client) StreamTurn(ctx context.Context, prevRespID, sessionID, prompt string) (*Turn, error) {
+	turn := &Turn{Status: "completed"}
+
+	events := make(chan any, 64)
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- c.stream(ctx, prevRespID, sessionID, prompt, events)
+	}()
+
+	var fileChanges []*model.FileChange
+	for ev := range events {
+		turn.Events = append(turn.Events, ev)
+
+		switch e := ev.(type) {
+		case *model.TurnStarted:
+			turn.TurnID = e.TurnID
+		case *model.TurnDone:
+			turn.ResponseID = e.ResponseID
+			turn.Status = e.Status
+			turn.Usage = e.Usage
+		case *model.FileChanged:
+			fileChanges = append(fileChanges, e.Changes...)
+		case *model.TurnError:
+			turn.Status = "error"
+		}
+	}
+	turn.FileChanges = fileChanges
+
+	if err := <-errCh; err != nil {
+		if turn.Status == "completed" {
+			turn.Status = "error"
+		}
+		return turn, err
+	}
+
+	return turn, nil
+}
+
+// stream is the internal SSE parser that emits model.* events.
+func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt string, events chan<- any) error {
+	defer close(events)
+
+	body := struct {
+		Input              string `json:"input"`
+		PreviousResponseID string `json:"previous_response_id,omitempty"`
+		Stream             bool   `json:"stream"`
+		Store              bool   `json:"store"`
+	}{Input: prompt, PreviousResponseID: prevRespID, Stream: true, Store: true}
+
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(payload))
+	if err != nil {
+		events <- model.NewAgentStatus("", "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone("", "", "error")
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		events <- model.NewAgentStatus("", "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone("", "", "error")
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := fmt.Sprintf("http %d: %s", resp.StatusCode, string(body))
+		events <- model.NewAgentStatus("", "error", "Error", "❌", msg)
+		events <- model.NewTurnDone("", "", "error")
+		return fmt.Errorf(msg)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+	var turnID string
+	var pendingText strings.Builder
+	turnStarted := false
+	var fileChanges []*model.FileChange
+
+	flushText := func() {
+		if pendingText.Len() > 0 {
+			events <- model.NewMessageDelta(turnID, "assistant", pendingText.String())
+			pendingText.Reset()
+		}
+	}
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" || strings.HasPrefix(line, ":") {
+		select {
+		case <-ctx.Done():
+			flushText()
+			events <- model.NewAgentStatus(turnID, "cancelled", "Cancelled", "⏹️", "")
+			if len(fileChanges) > 0 {
+				events <- model.NewFileChanged(turnID, fileChanges)
+			}
+			events <- model.NewTurnDone(turnID, "", "cancelled")
+			return ctx.Err()
+		default:
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				break
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var sse hermesSSEvent
+		if err := json.Unmarshal([]byte(data), &sse); err != nil {
+			continue
+		}
+
+		switch sse.Type {
+		case "response.created":
+			turnID = sse.Response.ID
+			turnStarted = true
+			events <- model.NewTurnStarted(turnID)
+			events <- model.NewAgentStatus(turnID, "thinking", "Thinking…", "🧠", "")
+
+		case "response.output_text.delta":
+			pendingText.WriteString(sse.Delta)
+
+		case "response.output_item.added":
+			if sse.Item.Type == "function_call" {
+				flushText()
+				label := formatToolLabel(sse.Item.Name, sse.Item.Arguments)
+				events <- model.NewAgentStatus(turnID, "working", "Working…", "🔧", label)
+				events <- model.NewToolCall(turnID, sse.Item.CallID, sse.Item.Name, sse.Item.Arguments)
+
+				// Track file changes from write_file / patch
+				fc := extractFileChange(sse.Item.Name, sse.Item.Arguments)
+				if fc != nil {
+					fileChanges = append(fileChanges, fc)
+				}
 			}
-			var event ChatEvent
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue // skip unparseable events
+			if sse.Item.Type == "function_call_output" {
+				output := extractToolOutput(sse.Item.Output)
+				events <- model.NewToolResult(turnID, sse.Item.CallID, output)
+				events <- model.NewMessageDelta(turnID, "tool", "┊ "+truncate(output, 200))
+				events <- model.NewAgentStatus(turnID, "thinking", "Thinking…", "🧠", "")
 			}
-			if onEvent != nil {
-				onEvent(event)
-			}
-			if event.Type == "text" {
-				fullText.WriteString(event.Content)
-			}
-			if event.Type == "error" {
-				return fullText.String(), fmt.Errorf("hermes error: %s", event.Content)
-			}
+
+		case "response.output_text.done":
+			flushText()
+
+		case "response.completed":
+			// handled after loop
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fullText.String(), fmt.Errorf("read SSE: %w", err)
+		events <- model.NewAgentStatus(turnID, "error", "Error", "❌", err.Error())
+		events <- model.NewTurnDone(turnID, "", "error")
+		return err
 	}
-	return fullText.String(), nil
+
+	flushText()
+
+	if turnStarted {
+		events <- model.NewAgentStatus(turnID, "done", "Done", "✅", "")
+		if len(fileChanges) > 0 {
+			events <- model.NewFileChanged(turnID, fileChanges)
+		}
+		events <- model.NewTurnDone(turnID, turnID, "completed")
+	}
+	events <- model.NewAgentStatus("", "idle", "", "", "")
+
+	return nil
+}
+
+// ─── SSE internal types ───
+
+type hermesSSEvent struct {
+	Type     string `json:"type"`
+	Delta    string `json:"delta"`
+	Item     struct {
+		Type      string `json:"type"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+		CallID    string `json:"call_id"`
+		Output    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"output"`
+	} `json:"item"`
+	Response struct {
+		ID string `json:"id"`
+	} `json:"response"`
+}
+
+// ─── Helpers ───
+
+func extractToolOutput(outputs []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) string {
+	for _, o := range outputs {
+		if o.Type == "input_text" {
+			return o.Text
+		}
+	}
+	return ""
+}
+
+func extractFileChange(toolName, rawArgs string) *model.FileChange {
+	if toolName != "write_file" && toolName != "patch" {
+		return nil
+	}
+	var args map[string]any
+	if json.Unmarshal([]byte(rawArgs), &args) != nil {
+		return nil
+	}
+	path, _ := args["path"].(string)
+	if path == "" {
+		return nil
+	}
+	fc := &model.FileChange{Path: path, Tool: toolName}
+	if toolName == "write_file" {
+		fc.NewContent, _ = args["content"].(string)
+	} else {
+		fc.OldContent, _ = args["old_string"].(string)
+		fc.NewContent, _ = args["new_string"].(string)
+	}
+	return fc
+}
+
+var toolEmojis = map[string]string{
+	"terminal": "💻", "shell_exec": "💻", "web_search": "🔍", "web_extract": "📄",
+	"read_file": "📖", "write_file": "✏️", "patch": "🩹", "search_files": "🔎",
+	"browser_navigate": "🌐", "browser_click": "🖱️", "browser_type": "⌨️",
+	"execute_code": "🐍", "todo": "📋", "delegate_task": "🤖", "memory": "🧠",
+}
+
+var toolPrimaryKey = map[string]string{
+	"terminal": "command", "web_search": "query", "read_file": "path",
+	"write_file": "path", "patch": "path", "search_files": "pattern",
+	"browser_navigate": "url", "browser_click": "ref", "browser_type": "text",
+	"execute_code": "code", "delegate_task": "goal",
+}
+
+func formatToolLabel(name, rawArgs string) string {
+	var args map[string]any
+	json.Unmarshal([]byte(rawArgs), &args)
+	emoji := toolEmojis[name]
+	if emoji == "" {
+		emoji = "🔧"
+	}
+	key := toolPrimaryKey[name]
+	detail := ""
+	if val, ok := args[key]; ok {
+		detail = fmt.Sprint(val)
+		if len(detail) > 80 {
+			detail = detail[:80] + "..."
+		}
+	}
+	if detail != "" {
+		return fmt.Sprintf("%s %s %s", emoji, name, detail)
+	}
+	return fmt.Sprintf("%s %s", emoji, name)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

@@ -1,18 +1,19 @@
-// Package poller fetches messages from the Fleet Cloud API and dispatches
-// them to the executor. Also handles orphan reconciliation.
+// Package poller processes incoming messages from Cloud and reconciles orphans.
+//
+// ProcessMessage is called for each message received via WebSocket push.
+// ReconcileOrphans is called on a ticker to retry skipped messages.
 package poller
 
 import (
 	"context"
-	"fmt"
 	"log"
 
-	"github.com/toddzheng/paxd/internal/cloud"
-	"github.com/toddzheng/paxd/internal/executor"
-	"github.com/toddzheng/paxd/internal/store"
+	"github.com/pax-beehive/paxd/internal/cloud"
+	"github.com/pax-beehive/paxd/internal/executor"
+	"github.com/pax-beehive/paxd/internal/store"
 )
 
-// Poller pulls messages from Cloud and dispatches them for execution.
+// Poller processes Cloud messages arriving via WebSocket push.
 type Poller struct {
 	cloudClient *cloud.Client
 	executor    *executor.Executor
@@ -28,87 +29,53 @@ func New(cloudClient *cloud.Client, exec *executor.Executor, s *store.Store) *Po
 	}
 }
 
-// PollAndExecute fetches new messages, dispatches each, and reconciles orphans.
-func (p *Poller) PollAndExecute(ctx context.Context) error {
-	state, err := p.store.GetAgentState()
+// ProcessMessage executes a single Cloud message and creates an outbound result.
+func (p *Poller) ProcessMessage(ctx context.Context, msg cloud.Message) error {
+	// Mark as delivered
+	if err := p.cloudClient.MarkDelivered(msg.MessageID); err != nil {
+		log.Printf("[poller] mark delivered error: %v", err)
+	}
+
+	result, err := p.executor.Execute(ctx, msg)
 	if err != nil {
-		return fmt.Errorf("get agent state: %w", err)
-	}
-	if state == nil {
-		return fmt.Errorf("agent not registered")
-	}
-
-	// Fetch messages from the last offset
-	msgs, err := p.cloudClient.FetchMessages(state.LastOffset)
-	if err != nil {
-		return fmt.Errorf("fetch messages: %w", err)
+		log.Printf("[poller] execute error for %s: %v", msg.MessageID, err)
+		p.cloudClient.ReportFailure(msg.MessageID, err.Error())
+		return err
 	}
 
-	if len(msgs) > 0 {
-		log.Printf("[poller] fetched %d new messages (offset=%d)", len(msgs), state.LastOffset)
+	// nil result = message was orphaned (session running)
+	if result == nil {
+		return nil
 	}
 
-	var maxOffset int64
-	for _, msg := range msgs {
-		// Mark as delivered
-		if err := p.cloudClient.MarkDelivered(msg.MessageID); err != nil {
-			log.Printf("[poller] mark delivered error: %v", err)
-		}
-
-		result, err := p.executor.Execute(ctx, msg)
-		if err != nil {
-			log.Printf("[poller] execute error for %s: %v", msg.MessageID, err)
-			p.cloudClient.ReportFailure(msg.MessageID, err.Error())
-			continue
-		}
-
-		// nil result means the message was skipped (e.g., orphaned)
-		if result == nil {
-			maxOffset = msg.ID
-			continue
-		}
-
-		// Create outbound message
-		outbound := &cloud.OutboundMessage{
-			AgentID:     msg.AgentID,
-			SessionID:   msg.SessionID,
-			Type:        "chat_response",
-			Content:     result.Response,
-			ParentMsgID: msg.MessageID,
-		}
-		if err := p.cloudClient.CreateOutbound(outbound); err != nil {
-			log.Printf("[poller] create outbound error: %v", err)
-		}
-		if err := p.cloudClient.ReportCompleted(msg.MessageID, ""); err != nil {
-			log.Printf("[poller] report completed error: %v", err)
-		}
-
-		maxOffset = msg.ID
+	// Create structured outbound message with turn events
+	outbound := &cloud.OutboundMessage{
+		AgentID:     msg.AgentID,
+		SessionID:   msg.SessionID,
+		Type:        "turn_result",
+		ParentMsgID: msg.MessageID,
+		TurnID:      result.TurnID,
+		ResponseID:  result.ResponseID,
+		Status:      result.Status,
+		Events:      result.Events,
+		FileChanges: result.FileChanges,
+	}
+	if err := p.cloudClient.CreateOutbound(outbound); err != nil {
+		log.Printf("[poller] create outbound error: %v", err)
 	}
 
-	// Update the local offset
-	if maxOffset > 0 {
-		if err := p.store.UpdateOffset(maxOffset); err != nil {
-			return fmt.Errorf("update offset: %w", err)
-		}
-		if err := p.cloudClient.UpdateOffset(maxOffset); err != nil {
-			log.Printf("[poller] cloud update offset error: %v", err)
-		}
-	}
-
-	// Reconcile orphaned messages
-	if err := p.reconcileOrphans(ctx); err != nil {
-		log.Printf("[poller] orphan reconcile error: %v", err)
+	if err := p.cloudClient.ReportCompleted(msg.MessageID, result.ResponseID); err != nil {
+		log.Printf("[poller] report completed error: %v", err)
 	}
 
 	return nil
 }
 
-// reconcileOrphans replays skipped messages when their sessions become idle.
-func (p *Poller) reconcileOrphans(ctx context.Context) error {
+// ReconcileOrphans replays skipped messages when their sessions become idle.
+func (p *Poller) ReconcileOrphans(ctx context.Context) error {
 	orphans, err := p.store.ListOrphaned()
 	if err != nil {
-		return fmt.Errorf("list orphaned: %w", err)
+		return err
 	}
 
 	if len(orphans) == 0 {
@@ -118,12 +85,10 @@ func (p *Poller) reconcileOrphans(ctx context.Context) error {
 	log.Printf("[poller] reconciling %d orphaned messages", len(orphans))
 
 	for _, orphan := range orphans {
-		// Check if session is now idle
 		if !p.executor.IsSessionIdle(ctx, orphan.SessionID) {
 			continue
 		}
 
-		// Rebuild a Message from the orphaned record
 		msg := cloud.Message{
 			MessageID: orphan.MessageID,
 			AgentID:   orphan.AgentID,
@@ -136,29 +101,26 @@ func (p *Poller) reconcileOrphans(ctx context.Context) error {
 		result, err := p.executor.Execute(ctx, msg)
 		if err != nil {
 			log.Printf("[poller] orphan retry failed for %s: %v", orphan.MessageID, err)
-			if err := p.store.IncrementOrphanedRetry(orphan.MessageID); err != nil {
-				log.Printf("[poller] increment retry error: %v", err)
-			}
+			p.store.IncrementOrphanedRetry(orphan.MessageID)
 			continue
 		}
 
-		// Success — create outbound and delete orphan
 		if result != nil {
 			outbound := &cloud.OutboundMessage{
 				AgentID:     orphan.AgentID,
 				SessionID:   orphan.SessionID,
-				Type:        "chat_response",
-				Content:     result.Response,
+				Type:        "turn_result",
 				ParentMsgID: orphan.MessageID,
+				TurnID:      result.TurnID,
+				ResponseID:  result.ResponseID,
+				Status:      result.Status,
+				Events:      result.Events,
+				FileChanges: result.FileChanges,
 			}
-			if err := p.cloudClient.CreateOutbound(outbound); err != nil {
-				log.Printf("[poller] orphan outbound error: %v", err)
-			}
+			p.cloudClient.CreateOutbound(outbound)
 		}
 
-		if err := p.store.DeleteOrphaned(orphan.MessageID); err != nil {
-			log.Printf("[poller] delete orphan error: %v", err)
-		}
+		p.store.DeleteOrphaned(orphan.MessageID)
 	}
 
 	return nil

@@ -28,8 +28,10 @@ type AgentConfig struct {
 
 // CloudConfig points to the Fleet Cloud API.
 type CloudConfig struct {
-	APIURL string `yaml:"api_url"`
-	APIKey string `yaml:"api_key"` // written by register command
+	APIURL        string `yaml:"api_url"`
+	APIKey        string `yaml:"api_key"`         // written by register command
+	CFClientID    string `yaml:"cf_client_id"`    // Cloudflare Access Service Token (agent auth)
+	CFClientSecret string `yaml:"cf_client_secret"` // Cloudflare Access Service Token secret
 }
 
 // HermesConfig points to the local Hermes API Server.
@@ -41,10 +43,11 @@ type HermesConfig struct {
 
 // DaemonConfig controls daemon behaviour.
 type DaemonConfig struct {
-	PollInterval   time.Duration `yaml:"poll_interval"`   // message poll interval (default 5s)
-	StatusInterval time.Duration `yaml:"status_interval"`  // status report interval (default 10s)
-	LogLevel       string        `yaml:"log_level"`        // debug, info, warn, error
-	DBPath         string        `yaml:"db_path"`          // SQLite path (default ~/.pax/paxd.db)
+	StatusInterval    time.Duration `yaml:"status_interval"`    // status report interval (default 10s)
+	ReconcileInterval time.Duration `yaml:"reconcile_interval"` // orphan reconciliation interval (default 15s)
+	LogLevel          string        `yaml:"log_level"`          // debug, info, warn, error
+	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.pax/paxd.db)
+	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -58,10 +61,10 @@ func DefaultConfig() Config {
 			APIEndpoint: "http://localhost:8642",
 		},
 		Daemon: DaemonConfig{
-			PollInterval:   5 * time.Second,
-			StatusInterval: 10 * time.Second,
-			LogLevel:       "info",
-			DBPath:         filepath.Join(home, ".pax", "paxd.db"),
+			StatusInterval:    10 * time.Second,
+			ReconcileInterval: 15 * time.Second,
+			LogLevel:          "info",
+			DBPath:            filepath.Join(home, ".pax", "paxd.db"),
 		},
 	}
 }

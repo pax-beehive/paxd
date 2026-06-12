@@ -1,9 +1,5 @@
-// Package executor handles execution of incoming messages against Hermes.
-//
-// Message types:
-//   - chat: send to Hermes chat/stream; skip if session is running (orphan)
-//   - steer: stop current run then send chat/stream
-//   - command: local processing (upgrade, reconfig, status)
+// Package executor handles execution of incoming messages against Hermes,
+// producing structured model.* event batches for Cloud storage.
 package executor
 
 import (
@@ -11,12 +7,13 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/toddzheng/paxd/internal/cloud"
-	"github.com/toddzheng/paxd/internal/hermes"
-	"github.com/toddzheng/paxd/internal/store"
+	"github.com/pax-beehive/paxd/internal/cloud"
+	"github.com/pax-beehive/paxd/internal/hermes"
+	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
-// Executor runs messages against Hermes.
+// Executor runs messages against Hermes and returns structured turn results.
 type Executor struct {
 	hermesClient *hermes.Client
 	cloudClient  *cloud.Client
@@ -34,14 +31,18 @@ func New(hermesClient *hermes.Client, cloudClient *cloud.Client, s *store.Store,
 	}
 }
 
-// ExecuteResult holds the outcome of message execution.
-type ExecuteResult struct {
-	OutboundMessageID string
-	Response          string
+// TurnResult is the structured output of message execution.
+type TurnResult struct {
+	SessionID   string
+	TurnID      string
+	ResponseID  string
+	Status      string // "completed" | "cancelled" | "error"
+	Events      []any  // model.* structs
+	FileChanges []*model.FileChange
 }
 
-// Execute dispatches a message by type and returns the result.
-func (e *Executor) Execute(ctx context.Context, msg cloud.Message) (*ExecuteResult, error) {
+// Execute dispatches a message by type and returns structured results.
+func (e *Executor) Execute(ctx context.Context, msg cloud.Message) (*TurnResult, error) {
 	switch msg.Type {
 	case "chat":
 		return e.executeChat(ctx, msg)
@@ -56,13 +57,13 @@ func (e *Executor) Execute(ctx context.Context, msg cloud.Message) (*ExecuteResu
 
 // executeChat sends a message to Hermes. If the session is running,
 // the message is skipped and saved as orphaned.
-func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*ExecuteResult, error) {
+func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnResult, error) {
 	session, err := e.hermesClient.GetSessionStatus(msg.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get session status: %w", err)
 	}
 
-	// If session is running, skip and orphan this message
+	// Running → skip and orphan
 	if session.Status == "running" {
 		log.Printf("[executor] session %s is running, orphaning chat message %s", msg.SessionID, msg.MessageID)
 		orphan := &store.OrphanedMessage{
@@ -75,46 +76,54 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*Execute
 		if err := e.store.SaveOrphaned(orphan); err != nil {
 			return nil, fmt.Errorf("save orphaned: %w", err)
 		}
-		return nil, nil // nil result = skipped, don't create outbound
+		return nil, nil // nil result = skipped
 	}
 
-	// Session is idle — execute
-	response, err := e.hermesClient.ChatStream(msg.SessionID, msg.Content, nil)
-	if err != nil {
-		return nil, fmt.Errorf("chat stream: %w", err)
+	// Idle → execute
+	turn, err := e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	if err != nil && turn == nil {
+		return nil, fmt.Errorf("stream turn: %w", err)
 	}
 
-	return &ExecuteResult{Response: response}, nil
+	return &TurnResult{
+		SessionID:   msg.SessionID,
+		TurnID:      turn.TurnID,
+		ResponseID:  turn.ResponseID,
+		Status:      turn.Status,
+		Events:      turn.Events,
+		FileChanges: turn.FileChanges,
+	}, err
 }
 
 // executeSteer stops the current run then sends the steer message.
-func (e *Executor) executeSteer(ctx context.Context, msg cloud.Message) (*ExecuteResult, error) {
+func (e *Executor) executeSteer(ctx context.Context, msg cloud.Message) (*TurnResult, error) {
 	log.Printf("[executor] steering session %s", msg.SessionID)
 
 	// Stop the current run
 	if err := e.hermesClient.StopRun(msg.SessionID); err != nil {
 		log.Printf("[executor] stop run error (non-fatal): %v", err)
-		// Continue anyway — the session might already be stopped
 	}
 
-	// Send the steer message
-	response, err := e.hermesClient.ChatStream(msg.SessionID, msg.Content, nil)
-	if err != nil {
-		return nil, fmt.Errorf("steer chat stream: %w", err)
+	turn, err := e.hermesClient.StreamTurn(ctx, "", msg.SessionID, msg.Content)
+	if err != nil && turn == nil {
+		return nil, fmt.Errorf("steer turn: %w", err)
 	}
 
-	return &ExecuteResult{Response: response}, nil
+	return &TurnResult{
+		SessionID:   msg.SessionID,
+		TurnID:      turn.TurnID,
+		ResponseID:  turn.ResponseID,
+		Status:      turn.Status,
+		Events:      turn.Events,
+		FileChanges: turn.FileChanges,
+	}, err
 }
 
 // executeCommand handles local commands like upgrade, reconfig, status.
-func (e *Executor) executeCommand(ctx context.Context, msg cloud.Message) (*ExecuteResult, error) {
+func (e *Executor) executeCommand(ctx context.Context, msg cloud.Message) (*TurnResult, error) {
 	log.Printf("[executor] received command: %s", msg.Content)
-
-	// Command format: "command_name [args...]"
-	// Full implementation in cmd/paxd handles the actual command dispatch.
-	// For now, acknowledge the command.
-	return &ExecuteResult{
-		Response: fmt.Sprintf("command acknowledged: %s", msg.Content),
+	return &TurnResult{
+		Status: "completed",
 	}, nil
 }
 

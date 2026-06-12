@@ -12,9 +12,9 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 
-	"github.com/toddzheng/paxd/internal/cloud"
-	"github.com/toddzheng/paxd/internal/hermes"
-	"github.com/toddzheng/paxd/internal/store"
+	"github.com/pax-beehive/paxd/internal/cloud"
+	"github.com/pax-beehive/paxd/internal/hermes"
+	"github.com/pax-beehive/paxd/internal/store"
 )
 
 // Collector gathers and reports agent status.
