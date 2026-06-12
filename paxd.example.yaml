@@ -1,0 +1,21 @@
+# paxd configuration
+# See README.md for full documentation.
+
+agent:
+  machine_type: unknown
+  hostname: ""
+
+cloud:
+  api_url: https://fleet.example.com
+  api_key: ""
+
+hermes:
+  api_endpoint: http://localhost:8642
+  api_key_from_env: ~/.hermes/.env
+  profile: ""
+
+daemon:
+  poll_interval: 5s
+  status_interval: 10s
+  log_level: info
+  db_path: ~/.pax/paxd.db
