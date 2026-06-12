@@ -225,6 +225,9 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if sessionID != "" {
+		req.Header.Set("X-Hermes-Session-Id", sessionID)
+	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
