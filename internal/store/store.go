@@ -1,7 +1,7 @@
 // Package store manages the local SQLite database for the daemon.
-// Three tables:
-//   - agent_state: daemon identity + cloud credentials + message offset
-//   - hermes_instances: local Hermes API Server endpoints
+// Core tables:
+//   - node_state: daemon node identity + cloud credentials + message offset
+//   - cloud_agents: cloud agent IDs hosted by this node
 //   - orphaned_messages: messages skipped due to steer conflicts
 package store
 
@@ -18,7 +18,17 @@ type Store struct {
 	db *sql.DB
 }
 
-// AgentState is the single-row table holding daemon identity.
+// NodeState is the single-row table holding daemon identity.
+type NodeState struct {
+	NodeID       string
+	CloudAPIKey  string
+	CloudAPIURL  string
+	RegisteredAt string
+	LastOffset   int64
+	UpdatedAt    string
+}
+
+// AgentState is the legacy single-row table holding daemon identity.
 type AgentState struct {
 	AgentID      string
 	CloudAPIKey  string
@@ -34,6 +44,18 @@ type HermesInstance struct {
 	Name        string
 	APIEndpoint string
 	APIKey      string
+	Profile     string
+	Enabled     bool
+}
+
+// CloudAgent maps a cloud agent under the local paxd node to a Hermes instance.
+type CloudAgent struct {
+	AgentID     string
+	InstanceID  string
+	Name        string
+	AgentType   string
+	APIEndpoint string
+	APIKeyEnv   string
 	Profile     string
 	Enabled     bool
 }
@@ -75,6 +97,15 @@ func (s *Store) Close() error {
 
 func migrate(db *sql.DB) error {
 	schema := `
+	CREATE TABLE IF NOT EXISTS node_state (
+		node_id       TEXT PRIMARY KEY,
+		cloud_api_key TEXT NOT NULL,
+		cloud_api_url TEXT NOT NULL,
+		registered_at TEXT NOT NULL,
+		last_offset   INTEGER DEFAULT 0,
+		updated_at    TEXT DEFAULT (datetime('now'))
+	);
+
 	CREATE TABLE IF NOT EXISTS agent_state (
 		agent_id       TEXT PRIMARY KEY,
 		cloud_api_key  TEXT NOT NULL,
@@ -93,6 +124,18 @@ func migrate(db *sql.DB) error {
 		enabled       INTEGER DEFAULT 1
 	);
 
+	CREATE TABLE IF NOT EXISTS cloud_agents (
+		agent_id     TEXT PRIMARY KEY,
+		instance_id  TEXT NOT NULL,
+		name         TEXT NOT NULL,
+		agent_type   TEXT NOT NULL DEFAULT 'hermes',
+		api_endpoint TEXT NOT NULL,
+		api_key_env  TEXT,
+		profile      TEXT,
+		enabled      INTEGER DEFAULT 1,
+		updated_at   TEXT DEFAULT (datetime('now'))
+	);
+
 	CREATE TABLE IF NOT EXISTS orphaned_messages (
 		message_id    TEXT PRIMARY KEY,
 		agent_id      TEXT NOT NULL,
@@ -103,6 +146,53 @@ func migrate(db *sql.DB) error {
 	);
 	`
 	_, err := db.Exec(schema)
+	return err
+}
+
+// --- node_state ---
+
+// GetNodeState returns the current node state (single row).
+func (s *Store) GetNodeState() (*NodeState, error) {
+	row := s.db.QueryRow(`
+		SELECT node_id, cloud_api_key, cloud_api_url, registered_at, last_offset, updated_at
+		FROM node_state
+		LIMIT 1
+	`)
+	var n NodeState
+	err := row.Scan(
+		&n.NodeID,
+		&n.CloudAPIKey,
+		&n.CloudAPIURL,
+		&n.RegisteredAt,
+		&n.LastOffset,
+		&n.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// SaveNodeState upserts the node state.
+func (s *Store) SaveNodeState(n *NodeState) error {
+	_, err := s.db.Exec(`
+		INSERT INTO node_state (node_id, cloud_api_key, cloud_api_url, registered_at, last_offset, updated_at)
+		VALUES (?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(node_id) DO UPDATE SET
+			cloud_api_key = excluded.cloud_api_key,
+			cloud_api_url = excluded.cloud_api_url,
+			last_offset  = excluded.last_offset,
+			updated_at   = datetime('now')
+	`, n.NodeID, n.CloudAPIKey, n.CloudAPIURL, n.RegisteredAt, n.LastOffset)
+	return err
+}
+
+// UpdateNodeOffset sets the node message consumption offset.
+func (s *Store) UpdateNodeOffset(offset int64) error {
+	_, err := s.db.Exec(`UPDATE node_state SET last_offset = ?, updated_at = datetime('now')`, offset)
 	return err
 }
 
@@ -161,6 +251,62 @@ func (s *Store) ListHermesInstances() ([]HermesInstance, error) {
 		instances = append(instances, h)
 	}
 	return instances, rows.Err()
+}
+
+// --- cloud_agents ---
+
+// ListCloudAgents returns all enabled cloud agents hosted by this node.
+func (s *Store) ListCloudAgents() ([]CloudAgent, error) {
+	rows, err := s.db.Query(`
+		SELECT agent_id, instance_id, name, agent_type, api_endpoint, COALESCE(api_key_env, ''),
+			COALESCE(profile, ''), enabled
+		FROM cloud_agents
+		WHERE enabled = 1
+		ORDER BY name, agent_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var agents []CloudAgent
+	for rows.Next() {
+		var a CloudAgent
+		if err := rows.Scan(
+			&a.AgentID,
+			&a.InstanceID,
+			&a.Name,
+			&a.AgentType,
+			&a.APIEndpoint,
+			&a.APIKeyEnv,
+			&a.Profile,
+			&a.Enabled,
+		); err != nil {
+			return nil, err
+		}
+		agents = append(agents, a)
+	}
+	return agents, rows.Err()
+}
+
+// SaveCloudAgent inserts or updates a cloud agent mapping.
+func (s *Store) SaveCloudAgent(a *CloudAgent) error {
+	_, err := s.db.Exec(`
+		INSERT INTO cloud_agents (
+			agent_id, instance_id, name, agent_type, api_endpoint, api_key_env, profile, enabled, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(agent_id) DO UPDATE SET
+			instance_id = excluded.instance_id,
+			name = excluded.name,
+			agent_type = excluded.agent_type,
+			api_endpoint = excluded.api_endpoint,
+			api_key_env = excluded.api_key_env,
+			profile = excluded.profile,
+			enabled = excluded.enabled,
+			updated_at = datetime('now')
+	`, a.AgentID, a.InstanceID, a.Name, a.AgentType, a.APIEndpoint, a.APIKeyEnv, a.Profile, a.Enabled)
+	return err
 }
 
 // SaveHermesInstance inserts or updates a Hermes instance record.

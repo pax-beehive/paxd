@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/pkg/model"
@@ -19,21 +21,48 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// StatusReport is the payload sent to POST /api/agent/status.
-type StatusReport struct {
-	AgentID  string           `json:"agent_id"`
-	Status   string           `json:"status"` // "online"
-	Sessions []SessionStatus  `json:"sessions"`
-	System   SystemMetrics    `json:"system"`
+// APIResponse is the standard pax-manager response envelope.
+type APIResponse[T any] struct {
+	Data    T      `json:"data"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// NodeStatusReport is the payload sent to POST /api/v1/node/status.
+type NodeStatusReport struct {
+	NodeID   string        `json:"node_id,omitempty"`
+	Hostname string        `json:"hostname,omitempty"`
+	Agents   []AgentStatus `json:"agents"`
+	System   SystemMetrics `json:"system"`
+	Metadata any           `json:"metadata,omitempty"`
+}
+
+// AgentStatus describes one agent hosted by this node.
+type AgentStatus struct {
+	AgentID   string          `json:"agent_id"`
+	Name      string          `json:"name,omitempty"`
+	AgentType string          `json:"agent_type,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Online    bool            `json:"online"`
+	Sessions  []SessionStatus `json:"sessions,omitempty"`
 }
 
 // SessionStatus describes one Hermes session.
 type SessionStatus struct {
-	SessionID    string `json:"session_id"`
-	Status       string `json:"status"`        // "idle", "running", "completed"
-	CurrentTask  string `json:"current_task"`
-	TokenUsage   int64  `json:"token_usage"`
-	LastActiveAt string `json:"last_active_at"`
+	SessionID     string `json:"session_id"`
+	AgentType     string `json:"agent_type,omitempty"`
+	NativeID      string `json:"native_id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	ProjectID     string `json:"project_id,omitempty"`
+	Preview       string `json:"preview,omitempty"`
+	Status        string `json:"status,omitempty"`
+	CurrentTask   string `json:"current_task,omitempty"`
+	MessageCount  int    `json:"message_count,omitempty"`
+	TokenUsage    int64  `json:"token_usage,omitempty"`
+	Model         string `json:"model,omitempty"`
+	RunID         string `json:"run_id,omitempty"`
+	RunStatus     string `json:"run_status,omitempty"`
+	LastMessageAt string `json:"last_message_at,omitempty"`
 }
 
 // SystemMetrics holds machine-level metrics.
@@ -45,43 +74,52 @@ type SystemMetrics struct {
 
 // Message is a message from/to the Cloud inbox.
 type Message struct {
-	ID        int64  `json:"id"`
-	MessageID string `json:"message_id"`
-	AgentID   string `json:"agent_id"`
-	SessionID string `json:"session_id,omitempty"`
-	Type      string `json:"type"`      // "chat", "steer", "command"
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
+	ID          int64           `json:"id"`
+	MessageID   string          `json:"message_id"`
+	NodeID      string          `json:"node_id,omitempty"`
+	AgentID     string          `json:"agent_id"`
+	SessionID   string          `json:"session_id,omitempty"`
+	MessageType string          `json:"message_type"`
+	Message     string          `json:"message"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Status      string          `json:"status,omitempty"`
+	CreatedAt   string          `json:"created_at"`
+	Type        string          `json:"-"`
+	Content     string          `json:"-"`
 }
 
 // OutboundMessage is the response sent back to Cloud after message execution.
 type OutboundMessage struct {
 	AgentID     string `json:"agent_id"`
-	SessionID   string `json:"session_id"`
-	Type        string `json:"type"` // "turn_result", "error", "command_ack"
-	Content     string `json:"content,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	MessageType string `json:"message_type,omitempty"`
+	Content     string `json:"content"`
 	ParentMsgID string `json:"parent_message_id,omitempty"`
 
 	// Structured turn result fields (type="turn_result")
-	TurnID      string               `json:"turn_id,omitempty"`
-	ResponseID  string               `json:"response_id,omitempty"`
-	Status      string               `json:"status,omitempty"`    // "completed" | "cancelled" | "error"
-	Events      []any                `json:"events,omitempty"`    // model.* structs
-	FileChanges []*model.FileChange  `json:"file_changes,omitempty"`
+	TurnID      string              `json:"turn_id,omitempty"`
+	ResponseID  string              `json:"response_id,omitempty"`
+	Status      string              `json:"status,omitempty"` // "completed" | "cancelled" | "error"
+	Events      []any               `json:"events,omitempty"` // model.* structs
+	FileChanges []*model.FileChange `json:"file_changes,omitempty"`
+	TokenUsage  *model.UsageInfo    `json:"token_usage,omitempty"`
 }
 
-// RegisterRequest is the payload for POST /api/agent/register.
-type RegisterRequest struct {
+// RegisterNodeRequest is the payload for POST /api/v1/node/register.
+type RegisterNodeRequest struct {
+	Name        string `json:"name,omitempty"`
 	Hostname    string `json:"hostname"`
 	MachineType string `json:"machine_type"`
 	OS          string `json:"os"`
 	Arch        string `json:"arch"`
+	PaxdVersion string `json:"paxd_version,omitempty"`
+	APIEndpoint string `json:"api_endpoint,omitempty"`
 }
 
-// RegisterResponse is the response from POST /api/agent/register.
-type RegisterResponse struct {
-	AgentID string `json:"agent_id"`
-	APIKey  string `json:"api_key"`
+// RegisterNodeResponse is the response from POST /api/v1/node/register.
+type RegisterNodeResponse struct {
+	NodeID string `json:"node_id"`
+	APIKey string `json:"api_key"`
 }
 
 // UpgradeBinary is the response from GET /api/agent/upgrade.
@@ -94,7 +132,7 @@ type UpgradeBinary struct {
 // NewClient creates a new Cloud API client.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -103,6 +141,15 @@ func NewClient(baseURL, apiKey string) *Client {
 }
 
 func (c *Client) do(method, path string, body any) (*http.Response, error) {
+	return c.doWithHeaders(method, path, body, nil)
+}
+
+func (c *Client) doWithHeaders(
+	method string,
+	path string,
+	body any,
+	headers map[string]string,
+) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -116,16 +163,31 @@ func (c *Client) do(method, path string, body any) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		req.Header.Set("X-Pax-Key", c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "paxd/0.1.0")
+	for k, v := range headers {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
 
 	return c.httpClient.Do(req)
 }
 
-// Register calls POST /api/agent/register.
-func (c *Client) Register(req *RegisterRequest) (*RegisterResponse, error) {
-	resp, err := c.do(http.MethodPost, "/api/agent/register", req)
+// RegisterNode calls POST /api/v1/node/register.
+func (c *Client) RegisterNode(
+	req *RegisterNodeRequest,
+	registrationToken string,
+) (*RegisterNodeResponse, error) {
+	resp, err := c.doWithHeaders(
+		http.MethodPost,
+		"/api/v1/node/register",
+		req,
+		map[string]string{"X-Registration-Token": registrationToken},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -133,19 +195,15 @@ func (c *Client) Register(req *RegisterRequest) (*RegisterResponse, error) {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("register: status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("register node: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var regResp RegisterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&regResp); err != nil {
-		return nil, fmt.Errorf("decode register response: %w", err)
-	}
-	return &regResp, nil
+	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
 }
 
-// PostStatus sends a status report to POST /api/agent/status.
-func (c *Client) PostStatus(report *StatusReport) error {
-	resp, err := c.do(http.MethodPost, "/api/agent/status", report)
+// PostNodeStatus sends a status report to POST /api/v1/node/status.
+func (c *Client) PostNodeStatus(report *NodeStatusReport) error {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/status", report)
 	if err != nil {
 		return err
 	}
@@ -153,88 +211,143 @@ func (c *Client) PostStatus(report *StatusReport) error {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("post status: status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("post node status: status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
 
-// FetchMessages pulls unprocessed messages from GET /api/agent/messages.
-func (c *Client) FetchMessages(lastOffset int64) ([]Message, error) {
-	url := fmt.Sprintf("/api/agent/messages?offset=%d", lastOffset)
-	resp, err := c.do(http.MethodGet, url, nil)
+// FetchNodeMessages pulls unprocessed node-level messages.
+func (c *Client) FetchNodeMessages(lastOffset int64, limit int) ([]Message, int64, bool, error) {
+	return c.fetchMessages("/api/v1/node/mailbox", lastOffset, limit)
+}
+
+// FetchAgentMessages pulls unprocessed messages for an agent hosted by this node.
+func (c *Client) FetchAgentMessages(
+	agentID string,
+	lastOffset int64,
+	limit int,
+) ([]Message, int64, bool, error) {
+	path := "/api/v1/node/agents/" + url.PathEscape(agentID) + "/mailbox"
+	return c.fetchMessages(path, lastOffset, limit)
+}
+
+// FetchAgentSessionMessages pulls unprocessed messages for a specific agent session.
+func (c *Client) FetchAgentSessionMessages(
+	agentID string,
+	sessionID string,
+	lastOffset int64,
+	limit int,
+) ([]Message, int64, bool, error) {
+	path := "/api/v1/node/agents/" + url.PathEscape(agentID) +
+		"/sessions/" + url.PathEscape(sessionID) + "/mailbox"
+	return c.fetchMessages(path, lastOffset, limit)
+}
+
+func (c *Client) fetchMessages(
+	path string,
+	lastOffset int64,
+	limit int,
+) ([]Message, int64, bool, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	path = fmt.Sprintf("%s?offset=%d&limit=%d", path, lastOffset, limit)
+	resp, err := c.do(http.MethodGet, path, nil)
 	if err != nil {
-		return nil, err
+		return nil, lastOffset, false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("fetch messages: status %d: %s", resp.StatusCode, string(body))
+		return nil, lastOffset, false, fmt.Errorf("fetch messages: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var msgs []Message
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, fmt.Errorf("decode messages: %w", err)
+	pull, err := decodeEnvelope[MailboxPull](resp.Body, "fetch messages")
+	if err != nil {
+		return nil, lastOffset, false, err
 	}
-	return msgs, nil
+	return pull.Messages, pull.MaxOffset, pull.HasMore, nil
 }
 
-// MarkDelivered confirms receipt of a message (POST /api/agent/messages/{id}/delivered).
+// MailboxPull is the data payload returned by node mailbox endpoints.
+type MailboxPull struct {
+	Messages  []Message `json:"messages"`
+	MaxOffset int64     `json:"max_offset"`
+	HasMore   bool      `json:"has_more"`
+}
+
+// MarkDelivered confirms receipt of a message.
 func (c *Client) MarkDelivered(messageID string) error {
-	resp, err := c.do(http.MethodPost, "/api/agent/messages/"+messageID+"/delivered", nil)
+	resp, err := c.do(
+		http.MethodPost,
+		"/api/v1/node/messages/"+url.PathEscape(messageID)+"/delivered",
+		nil,
+	)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return nil
+	return checkStatus(resp, "mark delivered")
 }
 
 // CreateOutbound creates an outbound message on the Cloud.
 func (c *Client) CreateOutbound(msg *OutboundMessage) error {
-	resp, err := c.do(http.MethodPost, "/api/agent/messages/outbound", msg)
+	resp, err := c.do(http.MethodPost, "/api/v1/node/messages/outbound", msg)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("create outbound: status %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
+	return checkStatus(resp, "create outbound")
 }
 
-// ReportCompleted marks a message as completed (POST /api/agent/messages/{id}/completed).
-func (c *Client) ReportCompleted(messageID string, resultMessageID string) error {
-	payload := map[string]string{"result_message_id": resultMessageID}
-	resp, err := c.do(http.MethodPost, "/api/agent/messages/"+messageID+"/completed", payload)
+// ReportCompleted marks a message as completed.
+func (c *Client) ReportCompleted(messageID string, result *OutboundMessage) error {
+	payload := map[string]any{
+		"status":            "completed",
+		"result_message_id": result.ResponseID,
+		"content":           result.Content,
+		"events":            result.Events,
+		"file_changes":      result.FileChanges,
+		"token_usage":       result.TokenUsage,
+	}
+	resp, err := c.do(
+		http.MethodPost,
+		"/api/v1/node/messages/"+url.PathEscape(messageID)+"/result",
+		payload,
+	)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return nil
+	return checkStatus(resp, "report completed")
 }
 
 // ReportFailure reports a failed message execution.
 func (c *Client) ReportFailure(messageID string, errMsg string) error {
-	payload := map[string]string{"error": errMsg}
-	resp, err := c.do(http.MethodPost, "/api/agent/messages/"+messageID+"/failed", payload)
+	payload := map[string]string{"status": "failed", "error": errMsg}
+	resp, err := c.do(
+		http.MethodPost,
+		"/api/v1/node/messages/"+url.PathEscape(messageID)+"/result",
+		payload,
+	)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return nil
+	return checkStatus(resp, "report failure")
 }
 
-// UpdateOffset updates the agent's message offset on the Cloud.
+// UpdateOffset updates the node's message offset on the Cloud.
 func (c *Client) UpdateOffset(offset int64) error {
 	payload := map[string]int64{"offset": offset}
-	resp, err := c.do(http.MethodPost, "/api/agent/offset", payload)
+	resp, err := c.do(http.MethodPost, "/api/v1/node/messages/offset", payload)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return nil
+	return checkStatus(resp, "update offset")
 }
 
 // FetchUpgrade downloads a new binary version.
@@ -257,4 +370,41 @@ func (c *Client) FetchUpgrade(version string) (*UpgradeBinary, error) {
 		SHA256:  sha,
 		Body:    resp.Body,
 	}, nil
+}
+
+func decodeEnvelope[T any](body io.Reader, op string) (*T, error) {
+	var envelope APIResponse[T]
+	if err := json.NewDecoder(body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode %s response: %w", op, err)
+	}
+	return &envelope.Data, nil
+}
+
+func checkStatus(resp *http.Response, op string) error {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s: status %d: %s", op, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type wire Message
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = Message(decoded)
+	m.Type = firstNonEmpty(m.MessageType, m.Type)
+	m.Content = firstNonEmpty(m.Message, m.Content)
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

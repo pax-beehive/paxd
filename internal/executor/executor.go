@@ -38,8 +38,10 @@ type TurnResult struct {
 	TurnID      string
 	ResponseID  string
 	Status      string // "completed" | "cancelled" | "error"
-	Events      []any  // model.* structs
+	Content     string
+	Events      []any // model.* structs
 	FileChanges []*model.FileChange
+	TokenUsage  *model.UsageInfo
 }
 
 // Execute dispatches a message by type and returns structured results.
@@ -96,8 +98,10 @@ func (e *Executor) executeChat(ctx context.Context, msg cloud.Message) (*TurnRes
 		TurnID:      turn.TurnID,
 		ResponseID:  turn.ResponseID,
 		Status:      turn.Status,
+		Content:     firstText(turn.Events),
 		Events:      turn.Events, // nil when streaming via OnEvent
 		FileChanges: turn.FileChanges,
+		TokenUsage:  turn.Usage,
 	}, err
 }
 
@@ -126,8 +130,10 @@ func (e *Executor) executeSteer(ctx context.Context, msg cloud.Message) (*TurnRe
 		TurnID:      turn.TurnID,
 		ResponseID:  turn.ResponseID,
 		Status:      turn.Status,
+		Content:     firstText(turn.Events),
 		Events:      turn.Events,
 		FileChanges: turn.FileChanges,
+		TokenUsage:  turn.Usage,
 	}, err
 }
 
@@ -135,7 +141,8 @@ func (e *Executor) executeSteer(ctx context.Context, msg cloud.Message) (*TurnRe
 func (e *Executor) executeCommand(ctx context.Context, msg cloud.Message) (*TurnResult, error) {
 	log.Printf("[executor] received command: %s", msg.Content)
 	return &TurnResult{
-		Status: "completed",
+		Status:  "completed",
+		Content: "command completed",
 	}, nil
 }
 
@@ -146,4 +153,13 @@ func (e *Executor) IsSessionIdle(ctx context.Context, sessionID string) bool {
 		return false
 	}
 	return session.Status != "running"
+}
+
+func firstText(events []any) string {
+	for _, ev := range events {
+		if delta, ok := ev.(*model.MessageDelta); ok && delta.Content != "" {
+			return delta.Content
+		}
+	}
+	return ""
 }

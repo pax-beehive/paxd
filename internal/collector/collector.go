@@ -19,40 +19,72 @@ import (
 
 // Collector gathers and reports agent status.
 type Collector struct {
-	hermesClient *hermes.Client
-	cloudClient  *cloud.Client
-	store        *store.Store
-	agentID      string
+	agents      []AgentRuntime
+	cloudClient *cloud.Client
+	store       *store.Store
+	hostname    string
+}
+
+// AgentRuntime binds one cloud agent to a local Hermes client.
+type AgentRuntime struct {
+	Agent        store.CloudAgent
+	HermesClient *hermes.Client
 }
 
 // New creates a new Collector.
-func New(hermesClient *hermes.Client, cloudClient *cloud.Client, s *store.Store, agentID string) *Collector {
+func New(
+	agents []AgentRuntime,
+	cloudClient *cloud.Client,
+	s *store.Store,
+	hostname string,
+) *Collector {
 	return &Collector{
-		hermesClient: hermesClient,
-		cloudClient:  cloudClient,
-		store:        s,
-		agentID:      agentID,
+		agents:      agents,
+		cloudClient: cloudClient,
+		store:       s,
+		hostname:    hostname,
 	}
 }
 
 // CollectAndReport gathers all session statuses and system metrics,
 // then POSTs the report to the Cloud API.
 func (c *Collector) CollectAndReport(ctx context.Context) error {
-	// Collect Hermes sessions (non-fatal: Hermes may not expose /api/sessions)
-	sessions, err := c.hermesClient.GetSessions()
-	if err != nil {
-		log.Printf("[collector] get sessions (non-fatal): %v", err)
-		sessions = nil
-	}
+	agentStatuses := make([]cloud.AgentStatus, 0, len(c.agents))
+	sessionCount := 0
+	for _, runtime := range c.agents {
+		sessions, err := runtime.HermesClient.GetSessions()
+		if err != nil {
+			log.Printf(
+				"[collector] get sessions for agent %s (non-fatal): %v",
+				runtime.Agent.AgentID,
+				err,
+			)
+			sessions = nil
+		}
 
-	var sessionStatuses []cloud.SessionStatus
-	for _, s := range sessions {
-		sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-			SessionID:    s.SessionID,
-			Status:       s.Status,
-			CurrentTask:  s.CurrentTask,
-			TokenUsage:   s.TokenUsage,
-			LastActiveAt: s.UpdatedAt,
+		var sessionStatuses []cloud.SessionStatus
+		for _, s := range sessions {
+			sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
+				SessionID:     s.SessionID,
+				AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
+				NativeID:      s.NativeID,
+				Name:          s.Name,
+				ProjectID:     s.ProjectID,
+				Preview:       s.Preview,
+				Status:        s.Status,
+				CurrentTask:   s.CurrentTask,
+				TokenUsage:    s.TokenUsage,
+				LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+			})
+		}
+		sessionCount += len(sessionStatuses)
+		agentStatuses = append(agentStatuses, cloud.AgentStatus{
+			AgentID:   runtime.Agent.AgentID,
+			Name:      runtime.Agent.Name,
+			AgentType: firstNonEmpty(runtime.Agent.AgentType, "hermes"),
+			Status:    "online",
+			Online:    true,
+			Sessions:  sessionStatuses,
 		})
 	}
 
@@ -63,19 +95,23 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 		sys = cloud.SystemMetrics{} // send what we can
 	}
 
-	report := &cloud.StatusReport{
-		AgentID:  c.agentID,
-		Status:   "online",
-		Sessions: sessionStatuses,
+	report := &cloud.NodeStatusReport{
+		Hostname: c.hostname,
+		Agents:   agentStatuses,
 		System:   sys,
 	}
 
-	if err := c.cloudClient.PostStatus(report); err != nil {
+	if err := c.cloudClient.PostNodeStatus(report); err != nil {
 		return fmt.Errorf("post status: %w", err)
 	}
 
-	log.Printf("[collector] reported %d sessions, cpu=%.1f%%, mem=%.1f%%",
-		len(sessionStatuses), sys.CPUPercent, sys.MemoryPercent)
+	log.Printf(
+		"[collector] reported %d agents, %d sessions, cpu=%.1f%%, mem=%.1f%%",
+		len(agentStatuses),
+		sessionCount,
+		sys.CPUPercent,
+		sys.MemoryPercent,
+	)
 	return nil
 }
 
@@ -102,4 +138,13 @@ func collectSystemMetrics() (cloud.SystemMetrics, error) {
 	}
 
 	return m, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

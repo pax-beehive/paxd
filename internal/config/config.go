@@ -14,31 +14,48 @@ import (
 
 // Config represents the full daemon configuration.
 type Config struct {
-	Agent  AgentConfig  `yaml:"agent"`
-	Cloud  CloudConfig  `yaml:"cloud"`
-	Hermes HermesConfig `yaml:"hermes"`
-	Daemon DaemonConfig `yaml:"daemon"`
+	Agent  AgentConfig          `yaml:"agent"`
+	Cloud  CloudConfig          `yaml:"cloud"`
+	Hermes HermesConfig         `yaml:"hermes"`
+	Agents []RuntimeAgentConfig `yaml:"agents"`
+	Daemon DaemonConfig         `yaml:"daemon"`
 }
 
 // AgentConfig identifies this machine.
 type AgentConfig struct {
+	AgentID     string `yaml:"agent_id"`
+	Name        string `yaml:"name"`
 	MachineType string `yaml:"machine_type"` // e.g. "mac_mini", "linux_box"
 	Hostname    string `yaml:"hostname"`     // empty = auto-detect
 }
 
 // CloudConfig points to the Fleet Cloud API.
 type CloudConfig struct {
-	APIURL        string `yaml:"api_url"`
-	APIKey        string `yaml:"api_key"`         // written by register command
-	CFClientID    string `yaml:"cf_client_id"`    // Cloudflare Access Service Token (agent auth)
-	CFClientSecret string `yaml:"cf_client_secret"` // Cloudflare Access Service Token secret
+	APIURL            string `yaml:"api_url"`
+	NodeID            string `yaml:"node_id"`
+	APIKey            string `yaml:"api_key"`            // node key written by register command
+	RegistrationToken string `yaml:"registration_token"` // one-time node registration token
+	CFClientID        string `yaml:"cf_client_id"`       // Cloudflare Access Service Token (agent auth)
+	CFClientSecret    string `yaml:"cf_client_secret"`   // Cloudflare Access Service Token secret
 }
 
 // HermesConfig points to the local Hermes API Server.
 type HermesConfig struct {
-	APIEndpoint  string `yaml:"api_endpoint"`    // e.g. http://localhost:8642
-	APIKeyEnv    string `yaml:"api_key_from_env"` // path to Hermes .env file
-	Profile      string `yaml:"profile"`          // Hermes profile name
+	APIEndpoint string `yaml:"api_endpoint"`     // e.g. http://localhost:8642
+	APIKeyEnv   string `yaml:"api_key_from_env"` // path to Hermes .env file
+	Profile     string `yaml:"profile"`          // Hermes profile name
+}
+
+// RuntimeAgentConfig describes one local agent hosted by this paxd node.
+type RuntimeAgentConfig struct {
+	AgentID     string `yaml:"agent_id"`
+	InstanceID  string `yaml:"instance_id"`
+	Name        string `yaml:"name"`
+	AgentType   string `yaml:"agent_type"`
+	APIEndpoint string `yaml:"api_endpoint"`
+	APIKeyEnv   string `yaml:"api_key_from_env"`
+	Profile     string `yaml:"profile"`
+	Enabled     *bool  `yaml:"enabled"`
 }
 
 // DaemonConfig controls daemon behaviour.
@@ -63,6 +80,7 @@ func DefaultConfig() Config {
 		Daemon: DaemonConfig{
 			StatusInterval:    10 * time.Second,
 			ReconcileInterval: 15 * time.Second,
+			PollInterval:      5 * time.Second,
 			LogLevel:          "info",
 			DBPath:            filepath.Join(home, ".pax", "paxd.db"),
 		},
@@ -85,6 +103,13 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			applyEnv(&cfg)
+			if cfg.Agent.Hostname == "" {
+				host, _ := os.Hostname()
+				cfg.Agent.Hostname = host
+			}
+			cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
+			cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
 			return &cfg, nil // use defaults if no config file
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -94,6 +119,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	applyEnv(&cfg)
+
 	// Auto-detect hostname
 	if cfg.Agent.Hostname == "" {
 		host, _ := os.Hostname()
@@ -102,6 +129,10 @@ func Load(path string) (*Config, error) {
 
 	// Resolve ~ in db_path
 	cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
+	cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
+	for i := range cfg.Agents {
+		cfg.Agents[i].APIKeyEnv = expandHome(cfg.Agents[i].APIKeyEnv)
+	}
 
 	return &cfg, nil
 }
@@ -109,10 +140,15 @@ func Load(path string) (*Config, error) {
 // HermesAPIKey reads the Hermes API key from the configured .env file.
 // Looks for API_SERVER_KEY=... line.
 func (c *HermesConfig) HermesAPIKey() (string, error) {
-	if c.APIKeyEnv == "" {
+	return ReadEnvKey(c.APIKeyEnv)
+}
+
+// ReadEnvKey reads API_SERVER_KEY from an env file path.
+func ReadEnvKey(path string) (string, error) {
+	if path == "" {
 		return "", fmt.Errorf("hermes.api_key_from_env not set")
 	}
-	path := expandHome(c.APIKeyEnv)
+	path = expandHome(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read .env: %w", err)
@@ -124,6 +160,54 @@ func (c *HermesConfig) HermesAPIKey() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("API_SERVER_KEY not found in %s", path)
+}
+
+// RuntimeAgents returns explicit agents or a single legacy Hermes agent.
+func (c *Config) RuntimeAgents() []RuntimeAgentConfig {
+	if len(c.Agents) > 0 {
+		return c.Agents
+	}
+	enabled := true
+	return []RuntimeAgentConfig{{
+		InstanceID:  "default",
+		AgentID:     c.Agent.AgentID,
+		Name:        firstNonEmpty(c.Agent.Name, "hermes"),
+		AgentType:   "hermes",
+		APIEndpoint: c.Hermes.APIEndpoint,
+		APIKeyEnv:   c.Hermes.APIKeyEnv,
+		Profile:     c.Hermes.Profile,
+		Enabled:     &enabled,
+	}}
+}
+
+func applyEnv(cfg *Config) {
+	setStringFromEnv(&cfg.Cloud.APIURL, "PAX_CLOUD_URL")
+	setStringFromEnv(&cfg.Cloud.NodeID, "PAX_NODE_ID")
+	setStringFromEnv(&cfg.Cloud.APIKey, "PAX_NODE_API_KEY")
+	setStringFromEnv(&cfg.Cloud.RegistrationToken, "PAX_REGISTRATION_TOKEN")
+	setStringFromEnv(&cfg.Agent.AgentID, "PAX_AGENT_ID")
+	setStringFromEnv(&cfg.Agent.Name, "PAX_NODE_NAME")
+	setStringFromEnv(&cfg.Agent.MachineType, "PAX_MACHINE_TYPE")
+	setStringFromEnv(&cfg.Agent.Hostname, "PAX_HOSTNAME")
+	setStringFromEnv(&cfg.Hermes.APIEndpoint, "HERMES_API_ENDPOINT")
+	setStringFromEnv(&cfg.Hermes.APIKeyEnv, "HERMES_API_KEY_FROM_ENV")
+	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
+	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
+}
+
+func setStringFromEnv(target *string, key string) {
+	if value := os.Getenv(key); value != "" {
+		*target = value
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func expandHome(p string) string {

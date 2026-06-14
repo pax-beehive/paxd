@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.22-bookworm AS build
+
+WORKDIR /src
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/paxd ./cmd/paxd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/mockhermes ./cmd/mockhermes
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /out/paxd /app/paxd
+COPY --from=build /out/mockhermes /app/mockhermes
+COPY docker/paxd-integration-entrypoint.sh /app/entrypoint.sh
+
+ENV PAXD_DB_PATH=/data/paxd.db
+ENV HERMES_API_ENDPOINT=http://127.0.0.1:8642
+
+VOLUME ["/data"]
+
+EXPOSE 8642
+
+ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
