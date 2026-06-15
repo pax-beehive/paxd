@@ -17,18 +17,66 @@ import (
 type Poller struct {
 	cloudClient *cloud.Client
 	wsClient    *cloud.WSClient
-	executor    *executor.Executor
+	executors   map[string]*executor.Executor
 	store       *store.Store
 }
 
 // New creates a new Poller.
-func New(cloudClient *cloud.Client, wsClient *cloud.WSClient, exec *executor.Executor, s *store.Store) *Poller {
+func New(
+	cloudClient *cloud.Client,
+	wsClient *cloud.WSClient,
+	executors map[string]*executor.Executor,
+	s *store.Store,
+) *Poller {
 	return &Poller{
 		cloudClient: cloudClient,
 		wsClient:    wsClient,
-		executor:    exec,
+		executors:   executors,
 		store:       s,
 	}
+}
+
+// PollMailbox pulls node and agent mailboxes over the v1 node HTTP API.
+func (p *Poller) PollMailbox(ctx context.Context, offset int64, limit int) (int64, error) {
+	maxOffset := offset
+	nodeMessages, nextOffset, _, err := p.cloudClient.FetchNodeMessages(offset, limit)
+	if err != nil {
+		return maxOffset, err
+	}
+	if nextOffset > maxOffset {
+		maxOffset = nextOffset
+	}
+	for _, msg := range nodeMessages {
+		if err := p.ProcessMessage(ctx, msg); err != nil {
+			log.Printf("[poller] node message error: %v", err)
+		}
+	}
+
+	for agentID := range p.executors {
+		messages, nextOffset, _, err := p.cloudClient.FetchAgentMessages(agentID, offset, limit)
+		if err != nil {
+			log.Printf("[poller] fetch agent %s messages error: %v", agentID, err)
+			continue
+		}
+		if nextOffset > maxOffset {
+			maxOffset = nextOffset
+		}
+		for _, msg := range messages {
+			if err := p.ProcessMessage(ctx, msg); err != nil {
+				log.Printf("[poller] agent %s message error: %v", agentID, err)
+			}
+		}
+	}
+
+	if maxOffset > offset {
+		if err := p.cloudClient.UpdateOffset(maxOffset); err != nil {
+			log.Printf("[poller] update cloud offset error: %v", err)
+		}
+		if err := p.store.UpdateNodeOffset(maxOffset); err != nil {
+			log.Printf("[poller] update local offset error: %v", err)
+		}
+	}
+	return maxOffset, nil
 }
 
 // ProcessMessage executes a single Cloud message and creates an outbound result.
@@ -38,7 +86,16 @@ func (p *Poller) ProcessMessage(ctx context.Context, msg cloud.Message) error {
 		log.Printf("[poller] mark delivered error: %v", err)
 	}
 
-	result, err := p.executor.Execute(ctx, msg)
+	exec := p.executors[msg.AgentID]
+	if exec == nil {
+		err := p.handleUnknownAgent(msg)
+		if err != nil {
+			p.cloudClient.ReportFailure(msg.MessageID, err.Error())
+		}
+		return err
+	}
+
+	result, err := exec.Execute(ctx, msg)
 	if err != nil {
 		log.Printf("[poller] execute error for %s: %v", msg.MessageID, err)
 		p.cloudClient.ReportFailure(msg.MessageID, err.Error())
@@ -52,14 +109,20 @@ func (p *Poller) ProcessMessage(ctx context.Context, msg cloud.Message) error {
 
 	// Send each event directly via WebSocket as raw model.* JSON
 	// Skip if events were already sent via streaming (OnEvent callback)
-	for _, ev := range result.Events {
-		if err := p.wsClient.SendJSON(ev); err != nil {
-			log.Printf("[poller] ws send event error: %v", err)
+	if p.wsClient != nil {
+		for _, ev := range result.Events {
+			if err := p.wsClient.SendJSON(ev); err != nil {
+				log.Printf("[poller] ws send event error: %v", err)
+			}
 		}
 	}
 
-	if err := p.cloudClient.ReportCompleted(msg.MessageID, result.ResponseID); err != nil {
+	outbound := outboundFromResult(msg, result)
+	if err := p.cloudClient.ReportCompleted(msg.MessageID, outbound); err != nil {
 		log.Printf("[poller] report completed error: %v", err)
+	}
+	if err := p.cloudClient.CreateOutbound(outbound); err != nil {
+		log.Printf("[poller] create outbound error: %v", err)
 	}
 
 	return nil
@@ -79,7 +142,8 @@ func (p *Poller) ReconcileOrphans(ctx context.Context) error {
 	log.Printf("[poller] reconciling %d orphaned messages", len(orphans))
 
 	for _, orphan := range orphans {
-		if !p.executor.IsSessionIdle(ctx, orphan.SessionID) {
+		exec := p.executors[orphan.AgentID]
+		if exec == nil || !exec.IsSessionIdle(ctx, orphan.SessionID) {
 			continue
 		}
 
@@ -92,7 +156,7 @@ func (p *Poller) ReconcileOrphans(ctx context.Context) error {
 			CreatedAt: orphan.CreatedAt,
 		}
 
-		result, err := p.executor.Execute(ctx, msg)
+		result, err := exec.Execute(ctx, msg)
 		if err != nil {
 			log.Printf("[poller] orphan retry failed for %s: %v", orphan.MessageID, err)
 			p.store.IncrementOrphanedRetry(orphan.MessageID)
@@ -103,13 +167,15 @@ func (p *Poller) ReconcileOrphans(ctx context.Context) error {
 			outbound := &cloud.OutboundMessage{
 				AgentID:     orphan.AgentID,
 				SessionID:   orphan.SessionID,
-				Type:        "turn_result",
+				MessageType: "turn_result",
+				Content:     firstNonEmpty(result.Content, result.Status, "completed"),
 				ParentMsgID: orphan.MessageID,
 				TurnID:      result.TurnID,
 				ResponseID:  result.ResponseID,
 				Status:      result.Status,
 				Events:      result.Events,
 				FileChanges: result.FileChanges,
+				TokenUsage:  result.TokenUsage,
 			}
 			p.cloudClient.CreateOutbound(outbound)
 		}
@@ -118,4 +184,48 @@ func (p *Poller) ReconcileOrphans(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (p *Poller) handleUnknownAgent(msg cloud.Message) error {
+	if msg.Type == "command" && msg.AgentID != "" {
+		return nil
+	}
+	return &UnknownAgentError{AgentID: msg.AgentID}
+}
+
+// UnknownAgentError reports a mailbox item for an agent this process does not host.
+type UnknownAgentError struct {
+	AgentID string
+}
+
+func (e *UnknownAgentError) Error() string {
+	if e.AgentID == "" {
+		return "message has no agent_id"
+	}
+	return "unknown agent_id: " + e.AgentID
+}
+
+func outboundFromResult(msg cloud.Message, result *executor.TurnResult) *cloud.OutboundMessage {
+	return &cloud.OutboundMessage{
+		AgentID:     msg.AgentID,
+		SessionID:   firstNonEmpty(result.SessionID, msg.SessionID),
+		MessageType: "turn_result",
+		Content:     firstNonEmpty(result.Content, result.Status, "completed"),
+		ParentMsgID: msg.MessageID,
+		TurnID:      result.TurnID,
+		ResponseID:  result.ResponseID,
+		Status:      result.Status,
+		Events:      result.Events,
+		FileChanges: result.FileChanges,
+		TokenUsage:  result.TokenUsage,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
