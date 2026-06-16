@@ -21,7 +21,7 @@ Options:
   --harness NAME            hermes, gemini, codex, claude-code, auto
   --cloud-url URL           pax-manager base URL
   --api-key KEY             node API key
-  --agent-id ID             cloud agent ID
+  --agent-id ID             cloud agent ID created under the registered node
   --instance-id ID          instance ID, default: default
   --cf-client-id ID         Cloudflare Access service token client ID
   --cf-client-secret SECRET Cloudflare Access service token secret
@@ -39,6 +39,8 @@ Notes:
   install-adapter installs only the ACP adapter layer. It does not install
   Codex/Claude/Gemini/Hermes themselves, and it does not configure account
   login, subscriptions, keychain entries, or API keys.
+  register creates a node and node API key. The agent ID is created separately
+  by the user-side API under that node, then passed to paxd.
 USAGE
 }
 

@@ -61,7 +61,7 @@ STARTING → REGISTERING → RUNNING → STOPPING → STOPPED
 | 状态 | 行为 |
 |------|------|
 | **STARTING** | 加载配置，检查 Hermes 可达性 |
-| **REGISTERING** | 向 Cloud 注册，获取 agent_id + api_key |
+| **REGISTERING** | 向 Cloud 注册，获取 node_id + api_key |
 | **RUNNING** | 主循环：Status Collector + Message Poller + WS |
 | **STOPPING** | 完成当前消息（30s 超时），flush offset |
 | **STOPPED** | 退出 |
@@ -140,6 +140,8 @@ scripts/paxd-bootstrap configure \
   --api-key pax_node_key_here \
   --agent-id agent_xxx
 ```
+
+`agent_xxx` 不是 `register` 的返回值；`register` 只创建 node 并返回 `node_id` 和 node `api_key`。Agent 需要通过用户侧 API 在这个 node 下创建，例如 `POST /api/v1/user/self/nodes/{node_id}/agents`，然后把返回的 `agent_id` 交给 paxd forwarder。
 
 直接启动 forwarder，不写配置：
 
