@@ -12,8 +12,8 @@ func TestTunnelURLFromHTTP(t *testing.T) {
 		{
 			name:       "https",
 			base:       "https://fleet.example.com",
-			tunnelPath: "/api/agent/tunnel",
-			want:       "wss://fleet.example.com/api/agent/tunnel",
+			tunnelPath: "/api/v1/agent/tunnel",
+			want:       "wss://fleet.example.com/api/v1/agent/tunnel",
 		},
 		{
 			name:       "http with path",
@@ -25,7 +25,7 @@ func TestTunnelURLFromHTTP(t *testing.T) {
 			name:       "already websocket",
 			base:       "wss://fleet.example.com",
 			tunnelPath: "",
-			want:       "wss://fleet.example.com/api/agent/tunnel",
+			want:       "wss://fleet.example.com/api/v1/agent/tunnel",
 		},
 	}
 

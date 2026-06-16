@@ -95,7 +95,7 @@ func DefaultConfig() Config {
 			DBPath:            filepath.Join(home, ".pax", "paxd.db"),
 		},
 		ACPForwarder: ACPForwarderConfig{
-			TunnelPath:        "/api/agent/tunnel",
+			TunnelPath:        "/api/v1/agent/tunnel",
 			ReconnectInterval: 2 * time.Second,
 		},
 	}

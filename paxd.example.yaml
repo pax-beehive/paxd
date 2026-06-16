@@ -26,5 +26,5 @@ acp_forwarder:
   # Example: ["gemini", "--experimental-acp"]
   command: []
   working_dir: ""
-  tunnel_path: /api/agent/tunnel
+  tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
