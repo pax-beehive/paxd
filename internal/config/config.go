@@ -1,5 +1,6 @@
 // Package config loads and manages the paxd daemon configuration.
-// Config is read from ~/.pax/paxd.yaml on startup.
+// Config is read from ~/.paxd/paxd.yaml on startup, with ~/.pax/paxd.yaml
+// kept as a legacy fallback.
 package config
 
 import (
@@ -67,7 +68,7 @@ type DaemonConfig struct {
 	StatusInterval    time.Duration `yaml:"status_interval"`    // status report interval (default 10s)
 	ReconcileInterval time.Duration `yaml:"reconcile_interval"` // orphan reconciliation interval (default 15s)
 	LogLevel          string        `yaml:"log_level"`          // debug, info, warn, error
-	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.pax/paxd.db)
+	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
 	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
 }
 
@@ -96,7 +97,7 @@ func DefaultConfig() Config {
 			ReconcileInterval: 15 * time.Second,
 			PollInterval:      5 * time.Second,
 			LogLevel:          "info",
-			DBPath:            filepath.Join(home, ".pax", "paxd.db"),
+			DBPath:            filepath.Join(home, ".paxd", "paxd.db"),
 		},
 		ACPForwarder: ACPForwarderConfig{
 			TunnelPath:        "/api/v1/agent/tunnel",
@@ -105,17 +106,31 @@ func DefaultConfig() Config {
 	}
 }
 
-// Load reads the config file from the default path (~/.pax/paxd.yaml)
+// DefaultPath returns the preferred config path for new installations.
+func DefaultPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".paxd", "paxd.yaml")
+}
+
+// LegacyPath returns the previous config path, kept for compatibility.
+func LegacyPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pax", "paxd.yaml")
+}
+
+// Load reads the config file from the default path (~/.paxd/paxd.yaml)
 // and merges it with defaults.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
 	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("home dir: %w", err)
+		path = DefaultPath()
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			legacy := LegacyPath()
+			if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+				path = legacy
+			}
 		}
-		path = filepath.Join(home, ".pax", "paxd.yaml")
 	}
 
 	data, err := os.ReadFile(path)

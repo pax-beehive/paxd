@@ -16,9 +16,11 @@ import (
 
 // Client communicates with the Fleet Cloud API.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL        string
+	apiKey         string
+	cfClientID     string
+	cfClientSecret string
+	httpClient     *http.Client
 }
 
 // APIResponse is the standard pax-manager response envelope.
@@ -122,6 +124,25 @@ type RegisterNodeResponse struct {
 	APIKey string `json:"api_key"`
 }
 
+// RegisterNodeAgentRequest is the payload for POST /api/v1/node/agents/register.
+type RegisterNodeAgentRequest struct {
+	Node  *RegisterNodeRequest     `json:"node,omitempty"`
+	Agent RegisterNodeAgentPayload `json:"agent"`
+}
+
+// RegisterNodeAgentPayload describes the agent to create under a node.
+type RegisterNodeAgentPayload struct {
+	Name      string `json:"name,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
+}
+
+// RegisterNodeAgentResponse is the response from POST /api/v1/node/agents/register.
+type RegisterNodeAgentResponse struct {
+	NodeID  string `json:"node_id"`
+	APIKey  string `json:"api_key,omitempty"`
+	AgentID string `json:"agent_id"`
+}
+
 // UpgradeBinary is the response from GET /api/agent/upgrade.
 type UpgradeBinary struct {
 	Version string
@@ -138,6 +159,13 @@ func NewClient(baseURL, apiKey string) *Client {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// WithCloudflareAccess attaches Cloudflare Access service-token headers.
+func (c *Client) WithCloudflareAccess(clientID, clientSecret string) *Client {
+	c.cfClientID = clientID
+	c.cfClientSecret = clientSecret
+	return c
 }
 
 func (c *Client) do(method, path string, body any) (*http.Response, error) {
@@ -165,6 +193,12 @@ func (c *Client) doWithHeaders(
 	}
 	if c.apiKey != "" {
 		req.Header.Set("X-Pax-Key", c.apiKey)
+	}
+	if c.cfClientID != "" {
+		req.Header.Set("CF-Access-Client-Id", c.cfClientID)
+	}
+	if c.cfClientSecret != "" {
+		req.Header.Set("CF-Access-Client-Secret", c.cfClientSecret)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "paxd/0.1.0")
@@ -199,6 +233,31 @@ func (c *Client) RegisterNode(
 	}
 
 	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
+}
+
+// RegisterNodeAgent creates a cloud agent under the current node. With a
+// registration token it also creates the node and returns the new node API key.
+func (c *Client) RegisterNodeAgent(
+	req *RegisterNodeAgentRequest,
+	registrationToken string,
+) (*RegisterNodeAgentResponse, error) {
+	resp, err := c.doWithHeaders(
+		http.MethodPost,
+		"/api/v1/node/agents/register",
+		req,
+		map[string]string{"X-Registration-Token": registrationToken},
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("register node agent: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return decodeEnvelope[RegisterNodeAgentResponse](resp.Body, "register node agent")
 }
 
 // PostNodeStatus sends a status report to POST /api/v1/node/status.
