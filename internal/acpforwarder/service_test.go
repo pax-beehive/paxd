@@ -1,0 +1,49 @@
+package acpforwarder
+
+import "testing"
+
+func TestTunnelURLFromHTTP(t *testing.T) {
+	tests := []struct {
+		name       string
+		base       string
+		tunnelPath string
+		want       string
+	}{
+		{
+			name:       "https",
+			base:       "https://fleet.example.com",
+			tunnelPath: "/api/agent/tunnel",
+			want:       "wss://fleet.example.com/api/agent/tunnel",
+		},
+		{
+			name:       "http with path",
+			base:       "http://localhost:8080/base/",
+			tunnelPath: "tunnel",
+			want:       "ws://localhost:8080/base/tunnel",
+		},
+		{
+			name:       "already websocket",
+			base:       "wss://fleet.example.com",
+			tunnelPath: "",
+			want:       "wss://fleet.example.com/api/agent/tunnel",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tunnelURLFromHTTP(tt.base, tt.tunnelPath)
+			if err != nil {
+				t.Fatalf("tunnelURLFromHTTP() error = %v", err)
+			}
+			if got.String() != tt.want {
+				t.Fatalf("tunnelURLFromHTTP() = %q, want %q", got.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestTunnelURLFromHTTPRejectsUnsupportedScheme(t *testing.T) {
+	if _, err := tunnelURLFromHTTP("ftp://fleet.example.com", "/tunnel"); err == nil {
+		t.Fatal("expected unsupported scheme error")
+	}
+}

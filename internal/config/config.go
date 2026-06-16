@@ -14,11 +14,12 @@ import (
 
 // Config represents the full daemon configuration.
 type Config struct {
-	Agent  AgentConfig          `yaml:"agent"`
-	Cloud  CloudConfig          `yaml:"cloud"`
-	Hermes HermesConfig         `yaml:"hermes"`
-	Agents []RuntimeAgentConfig `yaml:"agents"`
-	Daemon DaemonConfig         `yaml:"daemon"`
+	Agent        AgentConfig          `yaml:"agent"`
+	Cloud        CloudConfig          `yaml:"cloud"`
+	Hermes       HermesConfig         `yaml:"hermes"`
+	Agents       []RuntimeAgentConfig `yaml:"agents"`
+	Daemon       DaemonConfig         `yaml:"daemon"`
+	ACPForwarder ACPForwarderConfig   `yaml:"acp_forwarder"`
 }
 
 // AgentConfig identifies this machine.
@@ -67,6 +68,15 @@ type DaemonConfig struct {
 	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
 }
 
+// ACPForwarderConfig controls the stateless ACP tunnel forwarder.
+type ACPForwarderConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	Command           []string      `yaml:"command"`
+	WorkingDir        string        `yaml:"working_dir"`
+	TunnelPath        string        `yaml:"tunnel_path"`
+	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
@@ -83,6 +93,10 @@ func DefaultConfig() Config {
 			PollInterval:      5 * time.Second,
 			LogLevel:          "info",
 			DBPath:            filepath.Join(home, ".pax", "paxd.db"),
+		},
+		ACPForwarder: ACPForwarderConfig{
+			TunnelPath:        "/api/agent/tunnel",
+			ReconnectInterval: 2 * time.Second,
 		},
 	}
 }
@@ -110,6 +124,7 @@ func Load(path string) (*Config, error) {
 			}
 			cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
 			cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
+			cfg.ACPForwarder.WorkingDir = expandHome(cfg.ACPForwarder.WorkingDir)
 			return &cfg, nil // use defaults if no config file
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -130,6 +145,7 @@ func Load(path string) (*Config, error) {
 	// Resolve ~ in db_path
 	cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
 	cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
+	cfg.ACPForwarder.WorkingDir = expandHome(cfg.ACPForwarder.WorkingDir)
 	for i := range cfg.Agents {
 		cfg.Agents[i].APIKeyEnv = expandHome(cfg.Agents[i].APIKeyEnv)
 	}
@@ -193,11 +209,30 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Hermes.APIKeyEnv, "HERMES_API_KEY_FROM_ENV")
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
+	setBoolFromEnv(&cfg.ACPForwarder.Enabled, "PAX_ACP_FORWARD_ENABLED")
+	setStringSliceFromEnv(&cfg.ACPForwarder.Command, "PAX_ACP_COMMAND")
+	setStringFromEnv(&cfg.ACPForwarder.WorkingDir, "PAX_ACP_WORKING_DIR")
+	setStringFromEnv(&cfg.ACPForwarder.TunnelPath, "PAX_ACP_TUNNEL_PATH")
 }
 
 func setStringFromEnv(target *string, key string) {
 	if value := os.Getenv(key); value != "" {
 		*target = value
+	}
+}
+
+func setBoolFromEnv(target *bool, key string) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		*target = true
+	case "0", "false", "no", "off":
+		*target = false
+	}
+}
+
+func setStringSliceFromEnv(target *[]string, key string) {
+	if value := os.Getenv(key); value != "" {
+		*target = strings.Fields(value)
 	}
 }
 

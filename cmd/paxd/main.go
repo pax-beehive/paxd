@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -27,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/acpforwarder"
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/collector"
 	"github.com/pax-beehive/paxd/internal/config"
@@ -51,6 +53,8 @@ func main() {
 		cmdRegister(os.Args[2:])
 	case "run":
 		cmdRun(os.Args[2:])
+	case "acp-forward":
+		cmdACPForward(os.Args[2:])
 	case "install-service":
 		cmdInstallService()
 	case "--version", "version":
@@ -68,6 +72,7 @@ func printUsage() {
 Usage:
   paxd register --cloud-url <url>     first-time registration
   paxd run                             start the daemon loop
+  paxd acp-forward                     run only the ACP tunnel forwarder
   paxd install-service                 install as macOS launchd service
   paxd --version                       print version
 `, version)
@@ -224,6 +229,18 @@ func cmdRun(args []string) {
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
+	if cfg.ACPForwarder.Enabled {
+		forwardCfg := acpForwarderConfig(cfg, nodeState)
+		go func() {
+			if err := acpforwarder.New(forwardCfg).Run(sm.Context()); err != nil &&
+				sm.Context().Err() == nil {
+				log.Printf("[paxd] acp forwarder stopped: %v", err)
+			}
+		}()
+		log.Printf("[paxd] ACP forwarder enabled (tunnel=%s, command=%q)",
+			forwardCfg.TunnelPath,
+			forwardCfg.Command)
+	}
 	log.Printf("[paxd] RUNNING (node=%s, agents=%d, poll=%s, status=%s, orphan=%s)",
 		nodeState.NodeID,
 		len(runtimes),
@@ -274,6 +291,50 @@ func cmdRun(args []string) {
 				log.Printf("[paxd] orphan reconcile error: %v", err)
 			}
 		}
+	}
+}
+
+// cmdACPForward runs only the stateless ACP tunnel forwarder.
+func cmdACPForward(args []string) {
+	fs := flag.NewFlagSet("acp-forward", flag.ExitOnError)
+	configPath := fs.String("config", "", "Config file path (default: ~/.pax/paxd.yaml)")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+
+	nodeState := &store.NodeState{
+		NodeID:       cfg.Cloud.NodeID,
+		CloudAPIKey:  cfg.Cloud.APIKey,
+		CloudAPIURL:  cfg.Cloud.APIURL,
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if nodeState.CloudAPIKey == "" || nodeState.CloudAPIURL == "" {
+		db, err := store.Open(cfg.Daemon.DBPath)
+		if err != nil {
+			log.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		saved, err := db.GetNodeState()
+		if err != nil {
+			log.Fatalf("get node state: %v", err)
+		}
+		if saved != nil {
+			nodeState = saved
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	forwardCfg := acpForwarderConfig(cfg, nodeState)
+	log.Printf("[paxd] ACP forwarder starting (tunnel=%s, command=%q)",
+		forwardCfg.TunnelPath,
+		forwardCfg.Command)
+	if err := acpforwarder.New(forwardCfg).Run(ctx); err != nil && ctx.Err() == nil {
+		log.Fatalf("acp forwarder: %v", err)
 	}
 }
 
@@ -388,6 +449,31 @@ func buildAgentRuntimes(
 	return runtimes, executors, nil
 }
 
+func acpForwarderConfig(cfg *config.Config, nodeState *store.NodeState) acpforwarder.Config {
+	agent := firstEnabledRuntimeAgent(cfg)
+	return acpforwarder.Config{
+		CloudURL:          firstNonEmpty(nodeState.CloudAPIURL, cfg.Cloud.APIURL),
+		APIKey:            firstNonEmpty(nodeState.CloudAPIKey, cfg.Cloud.APIKey),
+		CFClientID:        cfg.Cloud.CFClientID,
+		CFClientSecret:    cfg.Cloud.CFClientSecret,
+		AgentID:           firstNonEmpty(agent.AgentID, cfg.Agent.AgentID),
+		InstanceID:        agent.InstanceID,
+		Command:           cfg.ACPForwarder.Command,
+		WorkingDir:        cfg.ACPForwarder.WorkingDir,
+		TunnelPath:        cfg.ACPForwarder.TunnelPath,
+		ReconnectInterval: cfg.ACPForwarder.ReconnectInterval,
+	}
+}
+
+func firstEnabledRuntimeAgent(cfg *config.Config) config.RuntimeAgentConfig {
+	for _, agent := range cfg.RuntimeAgents() {
+		if agent.Enabled == nil || *agent.Enabled {
+			return agent
+		}
+	}
+	return config.RuntimeAgentConfig{}
+}
+
 func hermesAPIKey(path string) (string, error) {
 	if value := os.Getenv("HERMES_API_KEY"); value != "" {
 		return value, nil
@@ -458,7 +544,24 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 	sb.WriteString(fmt.Sprintf("hermes:\n  api_endpoint: %s\n  api_key_from_env: %s\n  profile: %s\n", cfg.Hermes.APIEndpoint, cfg.Hermes.APIKeyEnv, cfg.Hermes.Profile))
 	sb.WriteString(fmt.Sprintf("daemon:\n  poll_interval: %s\n  status_interval: %s\n  reconcile_interval: %s\n  log_level: %s\n  db_path: %s\n",
 		cfg.Daemon.PollInterval, cfg.Daemon.StatusInterval, cfg.Daemon.ReconcileInterval, cfg.Daemon.LogLevel, cfg.Daemon.DBPath))
+	sb.WriteString(fmt.Sprintf("acp_forwarder:\n  enabled: %t\n  command: %s\n  working_dir: %s\n  tunnel_path: %s\n  reconnect_interval: %s\n",
+		cfg.ACPForwarder.Enabled,
+		yamlStringList(cfg.ACPForwarder.Command),
+		cfg.ACPForwarder.WorkingDir,
+		cfg.ACPForwarder.TunnelPath,
+		cfg.ACPForwarder.ReconnectInterval))
 	return []byte(sb.String()), nil
+}
+
+func yamlStringList(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func firstNonEmpty(values ...string) string {
