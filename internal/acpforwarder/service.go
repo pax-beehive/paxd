@@ -38,6 +38,8 @@ type Service struct {
 	dialer *websocket.Dialer
 }
 
+const maxReconnectBackoff = 30 * time.Second
+
 // New creates a forwarder service.
 func New(cfg Config) *Service {
 	if cfg.TunnelPath == "" {
@@ -61,7 +63,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	backoff := s.cfg.ReconnectInterval
-	const maxBackoff = 30 * time.Second
 
 	for {
 		select {
@@ -70,7 +71,11 @@ func (s *Service) Run(ctx context.Context) error {
 		default:
 		}
 
-		if err := s.runOnce(ctx); err != nil && ctx.Err() == nil {
+		connected, err := s.runOnce(ctx)
+		if connected {
+			backoff = s.cfg.ReconnectInterval
+		}
+		if err != nil && ctx.Err() == nil {
 			log.Printf("[acp-forwarder] tunnel ended: %v; reconnecting in %s", err, backoff)
 		}
 
@@ -80,11 +85,19 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-time.After(backoff):
 		}
 
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = nextReconnectBackoff(backoff, s.cfg.ReconnectInterval, connected)
 	}
+}
+
+func nextReconnectBackoff(current time.Duration, initial time.Duration, connected bool) time.Duration {
+	if connected {
+		return initial
+	}
+	next := current * 2
+	if next > maxReconnectBackoff {
+		return maxReconnectBackoff
+	}
+	return next
 }
 
 func (s *Service) validate() error {
@@ -99,10 +112,10 @@ func (s *Service) validate() error {
 	return nil
 }
 
-func (s *Service) runOnce(ctx context.Context) error {
+func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	tunnelURL, err := tunnelURLFromHTTP(s.cfg.CloudURL, s.cfg.TunnelPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	q := tunnelURL.Query()
@@ -128,7 +141,7 @@ func (s *Service) runOnce(ctx context.Context) error {
 		_ = resp.Body.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("dial tunnel: %w", err)
+		return false, fmt.Errorf("dial tunnel: %w", err)
 	}
 	defer conn.Close()
 
@@ -140,18 +153,18 @@ func (s *Service) runOnce(ctx context.Context) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
+		return true, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+		return true, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
+		return true, fmt.Errorf("stderr pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start acp command: %w", err)
+		return true, fmt.Errorf("start acp command: %w", err)
 	}
 
 	log.Printf("[acp-forwarder] connected %s -> %s", tunnelURL.Redacted(), s.cfg.Command[0])
@@ -190,9 +203,9 @@ func (s *Service) runOnce(ctx context.Context) error {
 	}
 
 	if result != nil && strings.Contains(result.Error(), "use of closed network connection") {
-		return nil
+		return true, nil
 	}
-	return result
+	return true, result
 }
 
 func copyWSToStdin(conn *websocket.Conn, stdin io.WriteCloser) error {
