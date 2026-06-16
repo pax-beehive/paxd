@@ -169,6 +169,47 @@ The forwarder starts the configured ACP CLI locally, forwards every WebSocket
 message from pax-manager to the CLI's stdin, and forwards every stdout line back
 to the tunnel. It does not parse JSON-RPC or persist session state.
 
+### ACP WebSocket Smoke Tester
+
+`cmd/acp-smoke` connects to the user-side ACP tunnel, sends the standard
+initialize/auth/session/prompt flow, prints every WebSocket frame exactly as it
+was sent or received, and also prints an aggregate view of streaming
+`session/update` text chunks.
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --agent-id "$PAX_AGENT_ID" \
+  --cookie "$PAX_COOKIE" \
+  --interactive
+```
+
+The cookie value can be either raw cookie pairs or a copied browser header such
+as `Cookie: CF_Authorization=...; other=value`. A bare Cloudflare token can also
+be passed with `--cf-authorization "$CF_AUTHORIZATION"`.
+
+For local pax-manager tests:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url http://127.0.0.1:9879 \
+  --agent-id "$PAX_AGENT_ID" \
+  --user-email local@example.local
+```
+
+Useful options:
+
+- `--interactive` creates a session and then lets you type prompts until
+  `/quit`.
+- `--prompt "..."` can be repeated to replace the built-in prompt sequence.
+- `--messages-file test.ndjson` sends custom JSON-RPC messages after the smoke
+  flow; use `{{sessionId}}` as a placeholder.
+- `--raw-only` disables aggregate helper output while keeping raw frames.
+- `--raw-stream stderr|stdout|off` controls where raw WebSocket frames are
+  printed. The default is `stderr`, while aggregate output stays on `stdout`.
+- `--no-color` disables ANSI colors.
+- `--header 'Name: value'` can be repeated for extra auth or debugging headers.
+
 Environment overrides:
 
 | Env | Meaning |
