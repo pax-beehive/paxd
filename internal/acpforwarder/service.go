@@ -41,7 +41,7 @@ type Service struct {
 // New creates a forwarder service.
 func New(cfg Config) *Service {
 	if cfg.TunnelPath == "" {
-		cfg.TunnelPath = "/api/agent/tunnel"
+		cfg.TunnelPath = "/api/v1/agent/tunnel"
 	}
 	if cfg.ReconnectInterval <= 0 {
 		cfg.ReconnectInterval = 2 * time.Second
@@ -269,7 +269,7 @@ func tunnelURLFromHTTP(rawBase, tunnelPath string) (*url.URL, error) {
 		return nil, fmt.Errorf("unsupported cloud url scheme %q", base.Scheme)
 	}
 	if tunnelPath == "" {
-		tunnelPath = "/api/agent/tunnel"
+		tunnelPath = "/api/v1/agent/tunnel"
 	}
 	if !strings.HasPrefix(tunnelPath, "/") {
 		tunnelPath = "/" + tunnelPath

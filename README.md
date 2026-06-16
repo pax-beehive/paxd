@@ -144,7 +144,7 @@ acp_forwarder:
   enabled: false
   command: ["gemini", "--experimental-acp"]
   working_dir: ""
-  tunnel_path: /api/agent/tunnel
+  tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
 ```
 
@@ -159,7 +159,7 @@ HERMES_API_KEY=your-key-here
 
 paxd can also run a stateless Agent Client Protocol forwarder. It assumes
 pax-manager exposes a WebSocket tunnel endpoint, defaulting to
-`/api/agent/tunnel`.
+`/api/v1/agent/tunnel`.
 
 ```
 paxd acp-forward
