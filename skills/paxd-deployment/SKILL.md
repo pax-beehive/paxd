@@ -103,11 +103,25 @@ Save the returned `agent.agentId`. The ACP forwarder must send this as `agent_id
 
 ## Paxd Config
 
-Create or update `~/.pax/paxd.yaml` on the server:
+For home-server setup, prefer the bootstrap helper when it is available:
+
+```bash
+scripts/paxd-bootstrap detect
+scripts/paxd-bootstrap install-adapter --harness codex --yes
+scripts/paxd-bootstrap configure \
+  --harness codex \
+  --cloud-url "$PAX_CLOUD_URL" \
+  --api-key "$PAX_API_KEY" \
+  --agent-id "$PAX_AGENT_ID"
+```
+
+Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
+
+Create or update `~/.pax/paxd.yaml` on the server. `cloud.api_url` is the canonical key; `cloud.url` is accepted as a compatibility alias:
 
 ```yaml
 cloud:
-  url: https://app.example.com
+  api_url: https://app.example.com
   api_key: pax_node_key_here
   cf_client_id: cf_service_token_client_id_here
   cf_client_secret: cf_service_token_client_secret_here
@@ -117,6 +131,7 @@ instance_id: default
 
 acp_forwarder:
   enabled: true
+  harness: hermes
   command: ["hermes", "acp"]
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
@@ -132,10 +147,13 @@ export PAX_AGENT_ID="agent_xxx"
 export PAX_INSTANCE_ID="default"
 export PAX_CLOUD_CF_CLIENT_ID="cf_service_token_client_id_here"
 export PAX_CLOUD_CF_CLIENT_SECRET="cf_service_token_client_secret_here"
+export PAX_ACP_HARNESS="hermes"
 export PAX_ACP_COMMAND="hermes acp"
 export PAX_ACP_TUNNEL_PATH="/api/v1/agent/tunnel"
 export PAX_ACP_RECONNECT_INTERVAL="2s"
 ```
+
+Supported ACP harness presets are `hermes` (`hermes acp`), `gemini` (`gemini --acp`), `codex` (`codex-acp` or `npx -y @zed-industries/codex-acp`), and `claude-code` (`claude-agent-acp` or `npx -y @agentclientprotocol/claude-agent-acp`). Run `paxd harnesses` on the target machine to inspect local adapter support. Use `custom` plus `command` for other ACP-compatible adapters. Explicit `command` overrides the preset.
 
 Prefer a short reconnect interval while testing. A healthy forwarder should reset exponential backoff after any successful tunnel connection.
 
@@ -143,6 +161,19 @@ Start forwarding:
 
 ```bash
 paxd acp-forward
+```
+
+For one-off local testing, pass the same values as flags instead of creating a config file:
+
+```bash
+paxd acp-forward \
+  --cloud-url "$PAX_CLOUD_URL" \
+  --api-key "$PAX_API_KEY" \
+  --agent-id "$PAX_AGENT_ID" \
+  --instance-id "${PAX_INSTANCE_ID:-default}" \
+  --harness "${PAX_ACP_HARNESS:-hermes}" \
+  --cf-client-id "$CF_ACCESS_CLIENT_ID" \
+  --cf-client-secret "$CF_ACCESS_CLIENT_SECRET"
 ```
 
 Expected log shape:
@@ -155,7 +186,13 @@ Expected log shape:
 
 ## Postman WebSocket Smoke Test
 
-Connect Postman to the user tunnel:
+Generate the Postman URL and smoke-test JSON messages from the same config:
+
+```bash
+paxd postman --cloud-url "$PAX_CLOUD_URL" --agent-id "$PAX_AGENT_ID"
+```
+
+Connect Postman to the printed user tunnel. The URL shape is:
 
 ```text
 wss://app.example.com/api/v1/user/self/agents/<agent_id>/tunnel
