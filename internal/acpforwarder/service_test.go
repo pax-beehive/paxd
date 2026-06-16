@@ -1,6 +1,9 @@
 package acpforwarder
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTunnelURLFromHTTP(t *testing.T) {
 	tests := []struct {
@@ -45,5 +48,26 @@ func TestTunnelURLFromHTTP(t *testing.T) {
 func TestTunnelURLFromHTTPRejectsUnsupportedScheme(t *testing.T) {
 	if _, err := tunnelURLFromHTTP("ftp://fleet.example.com", "/tunnel"); err == nil {
 		t.Fatal("expected unsupported scheme error")
+	}
+}
+
+func TestNextReconnectBackoffDoublesFailedConnections(t *testing.T) {
+	initial := 2 * time.Second
+	got := nextReconnectBackoff(initial, initial, false)
+	if got != 4*time.Second {
+		t.Fatalf("next backoff = %s, want 4s", got)
+	}
+
+	got = nextReconnectBackoff(20*time.Second, initial, false)
+	if got != maxReconnectBackoff {
+		t.Fatalf("capped backoff = %s, want %s", got, maxReconnectBackoff)
+	}
+}
+
+func TestNextReconnectBackoffResetsAfterConnectedTunnel(t *testing.T) {
+	initial := 2 * time.Second
+	got := nextReconnectBackoff(maxReconnectBackoff, initial, true)
+	if got != initial {
+		t.Fatalf("reset backoff = %s, want %s", got, initial)
 	}
 }
