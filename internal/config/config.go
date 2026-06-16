@@ -14,6 +14,8 @@ import (
 
 // Config represents the full daemon configuration.
 type Config struct {
+	AgentID      string               `yaml:"agent_id"`    // legacy/top-level shorthand
+	InstanceID   string               `yaml:"instance_id"` // legacy/top-level shorthand
 	Agent        AgentConfig          `yaml:"agent"`
 	Cloud        CloudConfig          `yaml:"cloud"`
 	Hermes       HermesConfig         `yaml:"hermes"`
@@ -32,6 +34,7 @@ type AgentConfig struct {
 
 // CloudConfig points to the Fleet Cloud API.
 type CloudConfig struct {
+	URL               string `yaml:"url"` // alias for api_url used by deployment docs
 	APIURL            string `yaml:"api_url"`
 	NodeID            string `yaml:"node_id"`
 	APIKey            string `yaml:"api_key"`            // node key written by register command
@@ -71,6 +74,7 @@ type DaemonConfig struct {
 // ACPForwarderConfig controls the stateless ACP tunnel forwarder.
 type ACPForwarderConfig struct {
 	Enabled           bool          `yaml:"enabled"`
+	Harness           string        `yaml:"harness"`
 	Command           []string      `yaml:"command"`
 	WorkingDir        string        `yaml:"working_dir"`
 	TunnelPath        string        `yaml:"tunnel_path"`
@@ -118,6 +122,7 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			applyEnv(&cfg)
+			normalizeAliases(&cfg)
 			if cfg.Agent.Hostname == "" {
 				host, _ := os.Hostname()
 				cfg.Agent.Hostname = host
@@ -135,6 +140,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyEnv(&cfg)
+	normalizeAliases(&cfg)
 
 	// Auto-detect hostname
 	if cfg.Agent.Hostname == "" {
@@ -185,7 +191,7 @@ func (c *Config) RuntimeAgents() []RuntimeAgentConfig {
 	}
 	enabled := true
 	return []RuntimeAgentConfig{{
-		InstanceID:  "default",
+		InstanceID:  firstNonEmpty(c.InstanceID, "default"),
 		AgentID:     c.Agent.AgentID,
 		Name:        firstNonEmpty(c.Agent.Name, "hermes"),
 		AgentType:   "hermes",
@@ -200,8 +206,13 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Cloud.APIURL, "PAX_CLOUD_URL")
 	setStringFromEnv(&cfg.Cloud.NodeID, "PAX_NODE_ID")
 	setStringFromEnv(&cfg.Cloud.APIKey, "PAX_NODE_API_KEY")
+	setStringFromEnv(&cfg.Cloud.APIKey, "PAX_API_KEY")
 	setStringFromEnv(&cfg.Cloud.RegistrationToken, "PAX_REGISTRATION_TOKEN")
+	setStringFromEnv(&cfg.Cloud.CFClientID, "PAX_CLOUD_CF_CLIENT_ID")
+	setStringFromEnv(&cfg.Cloud.CFClientSecret, "PAX_CLOUD_CF_CLIENT_SECRET")
 	setStringFromEnv(&cfg.Agent.AgentID, "PAX_AGENT_ID")
+	setStringFromEnv(&cfg.AgentID, "PAX_AGENT_ID")
+	setStringFromEnv(&cfg.InstanceID, "PAX_INSTANCE_ID")
 	setStringFromEnv(&cfg.Agent.Name, "PAX_NODE_NAME")
 	setStringFromEnv(&cfg.Agent.MachineType, "PAX_MACHINE_TYPE")
 	setStringFromEnv(&cfg.Agent.Hostname, "PAX_HOSTNAME")
@@ -210,9 +221,26 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
 	setBoolFromEnv(&cfg.ACPForwarder.Enabled, "PAX_ACP_FORWARD_ENABLED")
+	setStringFromEnv(&cfg.ACPForwarder.Harness, "PAX_ACP_HARNESS")
 	setStringSliceFromEnv(&cfg.ACPForwarder.Command, "PAX_ACP_COMMAND")
 	setStringFromEnv(&cfg.ACPForwarder.WorkingDir, "PAX_ACP_WORKING_DIR")
 	setStringFromEnv(&cfg.ACPForwarder.TunnelPath, "PAX_ACP_TUNNEL_PATH")
+	setDurationFromEnv(&cfg.ACPForwarder.ReconnectInterval, "PAX_ACP_RECONNECT_INTERVAL")
+}
+
+func normalizeAliases(cfg *Config) {
+	if cfg.Cloud.APIURL == "" {
+		cfg.Cloud.APIURL = cfg.Cloud.URL
+	}
+	if cfg.Cloud.URL == "" {
+		cfg.Cloud.URL = cfg.Cloud.APIURL
+	}
+	if cfg.Agent.AgentID == "" {
+		cfg.Agent.AgentID = cfg.AgentID
+	}
+	if cfg.AgentID == "" {
+		cfg.AgentID = cfg.Agent.AgentID
+	}
 }
 
 func setStringFromEnv(target *string, key string) {
@@ -233,6 +261,15 @@ func setBoolFromEnv(target *bool, key string) {
 func setStringSliceFromEnv(target *[]string, key string) {
 	if value := os.Getenv(key); value != "" {
 		*target = strings.Fields(value)
+	}
+}
+
+func setDurationFromEnv(target *time.Duration, key string) {
+	if value := os.Getenv(key); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err == nil {
+			*target = duration
+		}
 	}
 }
 

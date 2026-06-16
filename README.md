@@ -116,6 +116,89 @@ paxd install-service
 launchctl load ~/Library/LaunchAgents/com.toddzheng.paxd.plist
 ```
 
+### 家用服务器 Bootstrap
+
+先探测这台机器已有的 harness 和 adapter：
+
+```bash
+scripts/paxd-bootstrap detect
+```
+
+安装 Codex / Claude Code 的 ACP adapter（二选一或都装）。这只安装 adapter，不安装 Codex/Claude 本体，也不配置订阅或登录态：
+
+```bash
+scripts/paxd-bootstrap install-adapter --harness codex --yes
+scripts/paxd-bootstrap install-adapter --harness claude-code --yes
+```
+
+写入 `~/.pax/paxd.yaml`：
+
+```bash
+scripts/paxd-bootstrap configure \
+  --harness codex \
+  --cloud-url https://app.example.com \
+  --api-key pax_node_key_here \
+  --agent-id agent_xxx
+```
+
+直接启动 forwarder，不写配置：
+
+```bash
+scripts/paxd-bootstrap run \
+  --harness codex \
+  --cloud-url https://app.example.com \
+  --api-key pax_node_key_here \
+  --agent-id agent_xxx
+```
+
+如果 pax-manager 的机器侧 tunnel 也经过 Cloudflare Access，再加 `--cf-client-id` 和 `--cf-client-secret`。
+
+### ACP + Postman 快速路径
+
+如果只想启动 ACP forwarder 并用 Postman 连用户侧 WebSocket，可以直接用配置或环境变量：
+
+```bash
+export PAX_CLOUD_URL="https://app.example.com"
+export PAX_API_KEY="pax_node_key_here"
+export PAX_AGENT_ID="agent_xxx"
+export PAX_INSTANCE_ID="default"
+export PAX_CLOUD_CF_CLIENT_ID="cf_service_token_client_id_here"
+export PAX_CLOUD_CF_CLIENT_SECRET="cf_service_token_client_secret_here"
+export PAX_ACP_HARNESS="codex"
+
+paxd acp-forward
+```
+
+也可以不写环境变量，直接临时传参：
+
+```bash
+paxd acp-forward \
+  --cloud-url https://app.example.com \
+  --api-key pax_node_key_here \
+  --agent-id agent_xxx \
+  --harness codex \
+  --cf-client-id cf_service_token_client_id_here \
+  --cf-client-secret cf_service_token_client_secret_here
+```
+
+给 Postman 生成 WebSocket URL 和烟测消息：
+
+```bash
+paxd postman --cloud-url https://app.example.com --agent-id agent_xxx
+```
+
+ACP harness 预设：
+
+| harness | 默认命令 |
+|---------|----------|
+| `hermes` | `hermes acp` |
+| `codex` | `codex-acp`，若未安装则 `npx -y @zed-industries/codex-acp` |
+| `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp` |
+| `gemini` | `gemini --acp` |
+| `custom` | 必须显式配置 `command` |
+
+`--command` 或 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API。
+
 ## 配置
 
 默认路径：`~/.pax/paxd.yaml`
@@ -127,6 +210,8 @@ agent:
 cloud:
   api_url: https://pax-manager-xxxxx-uc.a.run.app
   api_key: "key-xxxxx"       # register 后自动写入
+  cf_client_id: ""            # Cloudflare Access service token（可选）
+  cf_client_secret: ""        # Cloudflare Access service token（可选）
 
 hermes:
   api_endpoint: http://localhost:8642
@@ -142,7 +227,8 @@ daemon:
 
 acp_forwarder:
   enabled: false
-  command: ["gemini", "--experimental-acp"]
+  harness: hermes
+  command: []                 # optional override; e.g. ["codex-acp"]
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
@@ -152,7 +238,7 @@ acp_forwarder:
 
 从 `hermes.api_key_from_env` 指定的文件中读取 key。文件格式：
 ```
-HERMES_API_KEY=your-key-here
+API_SERVER_KEY=your-key-here
 ```
 
 ## ACP Forwarder

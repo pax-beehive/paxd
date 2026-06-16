@@ -20,7 +20,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -55,6 +57,10 @@ func main() {
 		cmdRun(os.Args[2:])
 	case "acp-forward":
 		cmdACPForward(os.Args[2:])
+	case "postman":
+		cmdPostman(os.Args[2:])
+	case "harnesses":
+		cmdHarnesses(os.Args[2:])
 	case "install-service":
 		cmdInstallService()
 	case "--version", "version":
@@ -73,6 +79,8 @@ Usage:
   paxd register --cloud-url <url>     first-time registration
   paxd run                             start the daemon loop
   paxd acp-forward                     run only the ACP tunnel forwarder
+  paxd postman                         print Postman WebSocket URL and smoke messages
+  paxd harnesses                       inspect local ACP harness support
   paxd install-service                 install as macOS launchd service
   paxd --version                       print version
 `, version)
@@ -298,6 +306,17 @@ func cmdRun(args []string) {
 func cmdACPForward(args []string) {
 	fs := flag.NewFlagSet("acp-forward", flag.ExitOnError)
 	configPath := fs.String("config", "", "Config file path (default: ~/.pax/paxd.yaml)")
+	cloudURL := fs.String("cloud-url", "", "Cloud API URL")
+	apiKey := fs.String("api-key", "", "Node API key")
+	agentID := fs.String("agent-id", "", "Cloud agent ID")
+	instanceID := fs.String("instance-id", "", "Agent instance ID")
+	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
+	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
+	harness := fs.String("harness", "", "ACP harness preset: hermes, codex, claude, claude-code, gemini, or custom")
+	command := fs.String("command", "", "ACP command, for example: \"hermes acp\"")
+	workingDir := fs.String("working-dir", "", "ACP command working directory")
+	tunnelPath := fs.String("tunnel-path", "", "Agent tunnel path")
+	reconnectInterval := fs.Duration("reconnect-interval", 0, "Reconnect interval")
 	fs.Parse(args)
 
 	cfg, err := config.Load(*configPath)
@@ -311,6 +330,19 @@ func cmdACPForward(args []string) {
 		CloudAPIURL:  cfg.Cloud.APIURL,
 		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	applyACPForwardOverrides(cfg, nodeState, acpForwardOverrides{
+		cloudURL:          *cloudURL,
+		apiKey:            *apiKey,
+		agentID:           *agentID,
+		instanceID:        *instanceID,
+		cfClientID:        *cfClientID,
+		cfClientSecret:    *cfClientSecret,
+		harness:           *harness,
+		command:           *command,
+		workingDir:        *workingDir,
+		tunnelPath:        *tunnelPath,
+		reconnectInterval: *reconnectInterval,
+	})
 	if nodeState.CloudAPIKey == "" || nodeState.CloudAPIURL == "" {
 		db, err := store.Open(cfg.Daemon.DBPath)
 		if err != nil {
@@ -323,6 +355,19 @@ func cmdACPForward(args []string) {
 		}
 		if saved != nil {
 			nodeState = saved
+			applyACPForwardOverrides(cfg, nodeState, acpForwardOverrides{
+				cloudURL:          *cloudURL,
+				apiKey:            *apiKey,
+				agentID:           *agentID,
+				instanceID:        *instanceID,
+				cfClientID:        *cfClientID,
+				cfClientSecret:    *cfClientSecret,
+				harness:           *harness,
+				command:           *command,
+				workingDir:        *workingDir,
+				tunnelPath:        *tunnelPath,
+				reconnectInterval: *reconnectInterval,
+			})
 		}
 	}
 
@@ -336,6 +381,267 @@ func cmdACPForward(args []string) {
 	if err := acpforwarder.New(forwardCfg).Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("acp forwarder: %v", err)
 	}
+}
+
+func cmdPostman(args []string) {
+	fs := flag.NewFlagSet("postman", flag.ExitOnError)
+	configPath := fs.String("config", "", "Config file path (default: ~/.pax/paxd.yaml)")
+	cloudURL := fs.String("cloud-url", "", "Cloud API URL")
+	agentID := fs.String("agent-id", "", "Cloud agent ID")
+	tunnelPath := fs.String("path", "/api/v1/user/self/agents/{agent_id}/tunnel", "User tunnel path")
+	cwd := fs.String("cwd", "/tmp", "ACP session cwd for the smoke message")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+
+	url, err := postmanTunnelURL(
+		firstNonEmpty(*cloudURL, cfg.Cloud.APIURL),
+		*tunnelPath,
+		firstNonEmpty(*agentID, cfg.Agent.AgentID),
+	)
+	if err != nil {
+		log.Fatalf("postman url: %v", err)
+	}
+
+	fmt.Printf("Postman WebSocket URL:\n%s\n\n", url)
+	fmt.Println("Headers/cookies:")
+	fmt.Println("Use the same Cloudflare user auth material that makes GET /api/v1/user/self/me work.")
+	fmt.Println()
+	fmt.Println("1. initialize")
+	fmt.Println(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"postman","version":"0.1.0"}}}`)
+	fmt.Println()
+	fmt.Println("2. authenticate (only if initialize returns authMethods)")
+	fmt.Println(`{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"deepseek"}}`)
+	fmt.Println()
+	fmt.Println("3. session/new")
+	fmt.Printf("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/new\",\"params\":{\"cwd\":%q,\"mcpServers\":[]}}\n", *cwd)
+	fmt.Println()
+	fmt.Println("4. session/prompt")
+	fmt.Println(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session_id_here","prompt":[{"type":"text","text":"Say hello in one short sentence."}]}}`)
+}
+
+func cmdHarnesses(args []string) {
+	fs := flag.NewFlagSet("harnesses", flag.ExitOnError)
+	fs.Parse(args)
+
+	fmt.Println("ACP harness support:")
+	for _, status := range detectHarnesses() {
+		command := "-"
+		if len(status.Command) > 0 {
+			command = strings.Join(status.Command, " ")
+		}
+		state := "unsupported"
+		if status.Supported {
+			state = "supported"
+		} else if status.Installed {
+			state = "installed"
+		}
+		fmt.Printf("  %-12s %-11s command=%s", status.Name, state, command)
+		if status.Path != "" {
+			fmt.Printf(" path=%s", status.Path)
+		}
+		if status.Note != "" {
+			fmt.Printf(" note=%s", status.Note)
+		}
+		fmt.Println()
+	}
+}
+
+type harnessStatus struct {
+	Name      string
+	Command   []string
+	Path      string
+	Installed bool
+	Supported bool
+	Note      string
+}
+
+func detectHarnesses() []harnessStatus {
+	statuses := []harnessStatus{
+		detectHarness("hermes", acpCommandForHarness("hermes"), []string{"acp"}),
+		detectHarness("gemini", acpCommandForHarness("gemini"), []string{"--acp", "--experimental-acp"}),
+		detectExternalAdapterHarness("claude-code", "claude-agent-acp", acpCommandForHarness("claude-code")),
+		detectExternalAdapterHarness("codex", "codex-acp", acpCommandForHarness("codex")),
+	}
+	for i := range statuses {
+		statuses[i].Note = harnessNote(statuses[i])
+	}
+	return statuses
+}
+
+func detectExternalAdapterHarness(name, adapterBinary string, command []string) harnessStatus {
+	status := harnessStatus{Name: name, Command: acpCommandForHarness(name)}
+	if len(command) > 0 {
+		status.Command = command
+	}
+	if path, err := exec.LookPath(adapterBinary); err == nil {
+		status.Path = path
+		status.Installed = true
+		status.Supported = true
+		return status
+	}
+	if _, err := exec.LookPath("npx"); err == nil && len(status.Command) > 0 && status.Command[0] == "npx" {
+		status.Installed = true
+		status.Supported = true
+	}
+	return status
+}
+
+func detectHarness(name string, command []string, helpMarkers []string) harnessStatus {
+	status := harnessStatus{Name: name, Command: command}
+	binary := name
+	if name == "claude-code" {
+		binary = "claude"
+	}
+	if len(command) > 0 {
+		binary = command[0]
+	}
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return status
+	}
+	status.Path = path
+	status.Installed = true
+
+	if len(command) == 0 {
+		return status
+	}
+
+	output, err := exec.Command(binary, "--help").CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return status
+	}
+	help := string(output)
+	for _, marker := range helpMarkers {
+		if strings.Contains(help, marker) {
+			status.Supported = true
+			return status
+		}
+	}
+	return status
+}
+
+func harnessNote(status harnessStatus) string {
+	if !status.Installed {
+		return "binary not found"
+	}
+	if status.Supported {
+		switch status.Name {
+		case "gemini":
+			if os.Getenv("GEMINI_API_KEY") == "" {
+				return "ACP flag present; GEMINI_API_KEY may be required for stdio mode"
+			}
+		case "claude-code", "codex":
+			if status.Path != "" {
+				return "external ACP adapter binary detected"
+			}
+			return "using npx fallback; install adapter binary for offline/runtime stability"
+		}
+		return "native ACP entrypoint detected"
+	}
+	switch status.Name {
+	case "claude-code":
+		return "install claude-agent-acp or make npx available"
+	case "codex":
+		return "install codex-acp or make npx available"
+	default:
+		return "ACP entrypoint not detected"
+	}
+}
+
+type acpForwardOverrides struct {
+	cloudURL          string
+	apiKey            string
+	agentID           string
+	instanceID        string
+	cfClientID        string
+	cfClientSecret    string
+	harness           string
+	command           string
+	workingDir        string
+	tunnelPath        string
+	reconnectInterval time.Duration
+}
+
+func applyACPForwardOverrides(
+	cfg *config.Config,
+	nodeState *store.NodeState,
+	overrides acpForwardOverrides,
+) {
+	if overrides.cloudURL != "" {
+		cfg.Cloud.APIURL = overrides.cloudURL
+		nodeState.CloudAPIURL = overrides.cloudURL
+	}
+	if overrides.apiKey != "" {
+		cfg.Cloud.APIKey = overrides.apiKey
+		nodeState.CloudAPIKey = overrides.apiKey
+	}
+	if overrides.agentID != "" {
+		cfg.Agent.AgentID = overrides.agentID
+		cfg.AgentID = overrides.agentID
+	}
+	if overrides.instanceID != "" {
+		cfg.InstanceID = overrides.instanceID
+	}
+	if overrides.cfClientID != "" {
+		cfg.Cloud.CFClientID = overrides.cfClientID
+	}
+	if overrides.cfClientSecret != "" {
+		cfg.Cloud.CFClientSecret = overrides.cfClientSecret
+	}
+	if overrides.harness != "" {
+		cfg.ACPForwarder.Harness = overrides.harness
+	}
+	if overrides.command != "" {
+		cfg.ACPForwarder.Command = strings.Fields(overrides.command)
+	}
+	if overrides.workingDir != "" {
+		cfg.ACPForwarder.WorkingDir = overrides.workingDir
+	}
+	if overrides.tunnelPath != "" {
+		cfg.ACPForwarder.TunnelPath = overrides.tunnelPath
+	}
+	if overrides.reconnectInterval > 0 {
+		cfg.ACPForwarder.ReconnectInterval = overrides.reconnectInterval
+	}
+}
+
+func postmanTunnelURL(rawBase, tunnelPath, agentID string) (string, error) {
+	if rawBase == "" {
+		return "", fmt.Errorf("cloud url is required")
+	}
+	if agentID == "" {
+		return "", fmt.Errorf("agent id is required")
+	}
+
+	base, err := url.Parse(strings.TrimRight(rawBase, "/"))
+	if err != nil {
+		return "", fmt.Errorf("parse cloud url: %w", err)
+	}
+	switch base.Scheme {
+	case "https":
+		base.Scheme = "wss"
+	case "http":
+		base.Scheme = "ws"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("unsupported cloud url scheme %q", base.Scheme)
+	}
+	if tunnelPath == "" {
+		tunnelPath = "/api/v1/user/self/agents/{agent_id}/tunnel"
+	}
+	if !strings.HasPrefix(tunnelPath, "/") {
+		tunnelPath = "/" + tunnelPath
+	}
+	path := strings.TrimRight(base.Path, "/") + strings.ReplaceAll(tunnelPath, "{agent_id}", agentID)
+	rawPath := strings.TrimRight(base.EscapedPath(), "/") +
+		strings.ReplaceAll(tunnelPath, "{agent_id}", url.PathEscape(agentID))
+	base.Path = path
+	base.RawPath = rawPath
+	return base.String(), nil
 }
 
 // wsURLFromHTTP derives the WebSocket URL from the HTTP Cloud URL.
@@ -451,6 +757,10 @@ func buildAgentRuntimes(
 
 func acpForwarderConfig(cfg *config.Config, nodeState *store.NodeState) acpforwarder.Config {
 	agent := firstEnabledRuntimeAgent(cfg)
+	command := cfg.ACPForwarder.Command
+	if len(command) == 0 {
+		command = acpCommandForHarness(firstNonEmpty(cfg.ACPForwarder.Harness, agent.AgentType))
+	}
 	return acpforwarder.Config{
 		CloudURL:          firstNonEmpty(nodeState.CloudAPIURL, cfg.Cloud.APIURL),
 		APIKey:            firstNonEmpty(nodeState.CloudAPIKey, cfg.Cloud.APIKey),
@@ -458,11 +768,43 @@ func acpForwarderConfig(cfg *config.Config, nodeState *store.NodeState) acpforwa
 		CFClientSecret:    cfg.Cloud.CFClientSecret,
 		AgentID:           firstNonEmpty(agent.AgentID, cfg.Agent.AgentID),
 		InstanceID:        agent.InstanceID,
-		Command:           cfg.ACPForwarder.Command,
+		Command:           command,
 		WorkingDir:        cfg.ACPForwarder.WorkingDir,
 		TunnelPath:        cfg.ACPForwarder.TunnelPath,
 		ReconnectInterval: cfg.ACPForwarder.ReconnectInterval,
 	}
+}
+
+func acpCommandForHarness(harness string) []string {
+	switch normalizeHarness(harness) {
+	case "", "custom":
+		return nil
+	case "hermes":
+		return []string{"hermes", "acp"}
+	case "codex":
+		return externalACPAdapterCommand("codex-acp", "@zed-industries/codex-acp")
+	case "claude", "claude-code":
+		return externalACPAdapterCommand("claude-agent-acp", "@agentclientprotocol/claude-agent-acp")
+	case "gemini":
+		return []string{"gemini", "--acp"}
+	case "acp":
+		return nil
+	default:
+		return nil
+	}
+}
+
+func externalACPAdapterCommand(binary, npmPackage string) []string {
+	if _, err := exec.LookPath(binary); err == nil {
+		return []string{binary}
+	}
+	return []string{"npx", "-y", npmPackage}
+}
+
+func normalizeHarness(harness string) string {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	harness = strings.ReplaceAll(harness, "_", "-")
+	return harness
 }
 
 func firstEnabledRuntimeAgent(cfg *config.Config) config.RuntimeAgentConfig {
@@ -544,8 +886,9 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 	sb.WriteString(fmt.Sprintf("hermes:\n  api_endpoint: %s\n  api_key_from_env: %s\n  profile: %s\n", cfg.Hermes.APIEndpoint, cfg.Hermes.APIKeyEnv, cfg.Hermes.Profile))
 	sb.WriteString(fmt.Sprintf("daemon:\n  poll_interval: %s\n  status_interval: %s\n  reconcile_interval: %s\n  log_level: %s\n  db_path: %s\n",
 		cfg.Daemon.PollInterval, cfg.Daemon.StatusInterval, cfg.Daemon.ReconcileInterval, cfg.Daemon.LogLevel, cfg.Daemon.DBPath))
-	sb.WriteString(fmt.Sprintf("acp_forwarder:\n  enabled: %t\n  command: %s\n  working_dir: %s\n  tunnel_path: %s\n  reconnect_interval: %s\n",
+	sb.WriteString(fmt.Sprintf("acp_forwarder:\n  enabled: %t\n  harness: %s\n  command: %s\n  working_dir: %s\n  tunnel_path: %s\n  reconnect_interval: %s\n",
 		cfg.ACPForwarder.Enabled,
+		cfg.ACPForwarder.Harness,
 		yamlStringList(cfg.ACPForwarder.Command),
 		cfg.ACPForwarder.WorkingDir,
 		cfg.ACPForwarder.TunnelPath,
