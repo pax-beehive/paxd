@@ -17,5 +17,14 @@ hermes:
 daemon:
   poll_interval: 5s
   status_interval: 10s
+  reconcile_interval: 15s
   log_level: info
   db_path: ~/.pax/paxd.db
+
+acp_forwarder:
+  enabled: false
+  # Example: ["gemini", "--experimental-acp"]
+  command: []
+  working_dir: ""
+  tunnel_path: /api/agent/tunnel
+  reconnect_interval: 2s

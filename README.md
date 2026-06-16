@@ -139,6 +139,13 @@ daemon:
   reconcile_interval: 30s
   log_level: info
   db_path: ~/.pax/paxd.db
+
+acp_forwarder:
+  enabled: false
+  command: ["gemini", "--experimental-acp"]
+  working_dir: ""
+  tunnel_path: /api/agent/tunnel
+  reconnect_interval: 2s
 ```
 
 ### Hermes API Key
@@ -147,6 +154,29 @@ daemon:
 ```
 HERMES_API_KEY=your-key-here
 ```
+
+## ACP Forwarder
+
+paxd can also run a stateless Agent Client Protocol forwarder. It assumes
+pax-manager exposes a WebSocket tunnel endpoint, defaulting to
+`/api/agent/tunnel`.
+
+```
+paxd acp-forward
+```
+
+The forwarder starts the configured ACP CLI locally, forwards every WebSocket
+message from pax-manager to the CLI's stdin, and forwards every stdout line back
+to the tunnel. It does not parse JSON-RPC or persist session state.
+
+Environment overrides:
+
+| Env | Meaning |
+|-----|---------|
+| `PAX_ACP_FORWARD_ENABLED` | Enable ACP forwarding inside `paxd run` |
+| `PAX_ACP_COMMAND` | Space-separated local ACP command |
+| `PAX_ACP_WORKING_DIR` | Working directory for the ACP command |
+| `PAX_ACP_TUNNEL_PATH` | pax-manager tunnel path |
 
 ## 本地 SQLite
 
