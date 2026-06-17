@@ -304,7 +304,6 @@ was sent or received, and also prints an aggregate view of streaming
 ```bash
 go run ./cmd/acp-smoke \
   --url "$PAX_CLOUD_URL" \
-  --agent-id "$PAX_AGENT_ID" \
   --cookie "$PAX_COOKIE" \
   --interactive
 ```
@@ -313,12 +312,33 @@ The cookie value can be either raw cookie pairs or a copied browser header such
 as `Cookie: CF_Authorization=...; other=value`. A bare Cloudflare token can also
 be passed with `--cf-authorization "$CF_AUTHORIZATION"`.
 
+List the agents visible to the cookie-backed user:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --list-agents
+```
+
+If exactly one online agent is visible, `cmd/acp-smoke` selects it automatically.
+When multiple online agents are visible, pass either the exact `--agent-id` or an
+`--agent` selector that matches id, name, type, node id, or hostname:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --agent review \
+  --interactive
+```
+
 For local pax-manager tests:
 
 ```bash
 go run ./cmd/acp-smoke \
   --url http://127.0.0.1:9879 \
-  --agent-id "$PAX_AGENT_ID" \
+  --agent codex \
   --user-email local@example.local
 ```
 
