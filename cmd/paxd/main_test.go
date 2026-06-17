@@ -163,6 +163,74 @@ func TestAgentACPForwarderConfigCanDisableOneAgent(t *testing.T) {
 	}
 }
 
+func TestACPSessionListerIncludesHermesAgents(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Cloud: config.CloudConfig{
+			APIURL: "https://app.example.com",
+			APIKey: "node_key",
+		},
+		ACPForwarder: config.ACPForwarderConfig{Enabled: true},
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:   "agent_hermes",
+			AgentType: "hermes",
+			Enabled:   &enabled,
+		}},
+	}
+	agent := store.CloudAgent{
+		AgentID:   "agent_hermes",
+		AgentType: "hermes",
+	}
+
+	got := acpSessionListerForAgent(cfg, agent)
+	if got == nil {
+		t.Fatal("acpSessionListerForAgent() = nil, want Hermes ACP lister")
+	}
+	if command := strings.Join(got.Command, " "); command != "hermes acp" {
+		t.Fatalf("command = %q, want hermes acp", command)
+	}
+}
+
+func TestSyncConfiguredAgentsDisablesStaleCloudAgents(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "paxd.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.SaveCloudAgent(&store.CloudAgent{
+		AgentID:    "agent_stale",
+		InstanceID: "stale",
+		Name:       "stale",
+		AgentType:  "codex",
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("save stale agent: %v", err)
+	}
+
+	enabled := true
+	cfg := &config.Config{
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_current",
+			InstanceID: "current",
+			Name:       "current",
+			AgentType:  "codex",
+			Enabled:    &enabled,
+		}},
+	}
+
+	if err := syncConfiguredAgents(cfg, db); err != nil {
+		t.Fatalf("syncConfiguredAgents() error = %v", err)
+	}
+	agents, err := db.ListCloudAgents()
+	if err != nil {
+		t.Fatalf("ListCloudAgents() error = %v", err)
+	}
+	if len(agents) != 1 || agents[0].AgentID != "agent_current" {
+		t.Fatalf("enabled agents = %#v, want only agent_current", agents)
+	}
+}
+
 func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{

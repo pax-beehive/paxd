@@ -23,6 +23,7 @@ daemon:
   poll_interval: 5s
   status_interval: 10s
   reconcile_interval: 15s
+  session_batch_size: 100
   log_level: info
   db_path: ~/.pax/paxd.db
 
