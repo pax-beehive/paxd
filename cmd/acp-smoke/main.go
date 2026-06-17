@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -53,6 +54,17 @@ type inboundFrame struct {
 	Payload []byte
 }
 
+type userAgent struct {
+	AgentID       string `json:"agent_id"`
+	NodeID        string `json:"node_id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Hostname      string `json:"hostname,omitempty"`
+	AgentType     string `json:"agent_type,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Online        bool   `json:"online,omitempty"`
+	LastHeartbeat string `json:"last_heartbeat,omitempty"`
+}
+
 type aggregate struct {
 	builder strings.Builder
 	frames  int
@@ -77,6 +89,10 @@ func main() {
 	fs := flag.NewFlagSet("acp-smoke", flag.ExitOnError)
 	baseURL := fs.String("url", env("PAX_CLOUD_URL", ""), "Pax cloud URL or full user tunnel WebSocket URL")
 	agentID := fs.String("agent-id", env("PAX_AGENT_ID", ""), "agent id used with the default user tunnel path")
+	agentSelector := fs.String("agent", env("PAX_AGENT", ""), "agent selector used when --agent-id is omitted; matches id, name, or agent type")
+	listAgents := fs.Bool("list-agents", false, "list user-visible agents and exit")
+	includeOffline := fs.Bool("include-offline", false, "include offline agents when listing or auto-selecting")
+	agentsPath := fs.String("agents-path", "/api/user/agents", "user agents list path")
 	path := fs.String("path", "/api/v1/user/self/agents/{agent_id}/tunnel", "user tunnel path; {agent_id} is replaced")
 	cwd := fs.String("cwd", env("PAX_ACP_TEST_CWD", "/tmp"), "cwd for session/new")
 	authMethod := fs.String("auth-method", env("PAX_ACP_AUTH_METHOD", "auto"), "authenticate method id, auto, or empty to skip")
@@ -106,9 +122,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if *agentID == "" && !looksLikeTunnelURL(*baseURL) {
-		log.Fatal("--agent-id or PAX_AGENT_ID is required unless --url is a full tunnel URL")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -116,11 +129,6 @@ func main() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, *overallTimeout)
 		defer cancel()
-	}
-
-	tunnelURL, err := userTunnelURL(*baseURL, *path, *agentID)
-	if err != nil {
-		log.Fatalf("build tunnel URL: %v", err)
 	}
 
 	header := http.Header{}
@@ -152,6 +160,36 @@ func main() {
 			log.Fatalf("invalid --header %q; want 'Name: value'", h)
 		}
 		header.Add(strings.TrimSpace(name), strings.TrimSpace(value))
+	}
+
+	if *listAgents {
+		agents, err := fetchUserAgents(ctx, *baseURL, *agentsPath, header)
+		if err != nil {
+			log.Fatalf("list agents: %v", err)
+		}
+		printAgents(ui, agents, *includeOffline)
+		return
+	}
+	if *agentID == "" && !looksLikeTunnelURL(*baseURL) {
+		agents, err := fetchUserAgents(ctx, *baseURL, *agentsPath, header)
+		if err != nil {
+			log.Fatalf("choose agent: %v", err)
+		}
+		selected, err := chooseAgent(agents, *agentSelector, *includeOffline)
+		if err != nil {
+			printAgents(ui, agents, *includeOffline)
+			log.Fatalf("choose agent: %v", err)
+		}
+		*agentID = selected.AgentID
+		ui.human("AGENT", "%s name=%q type=%s status=%s", selected.AgentID, selected.Name, selected.AgentType, selected.Status)
+	}
+	if *agentID == "" && !looksLikeTunnelURL(*baseURL) {
+		log.Fatal("--agent-id, --agent, or PAX_AGENT_ID is required unless --url is a full tunnel URL")
+	}
+
+	tunnelURL, err := userTunnelURL(*baseURL, *path, *agentID)
+	if err != nil {
+		log.Fatalf("build tunnel URL: %v", err)
 	}
 
 	ui.human("CONNECT", "%s", tunnelURL.Redacted())
@@ -537,6 +575,159 @@ func textChunks(v any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func fetchUserAgents(ctx context.Context, rawBase, agentsPath string, header http.Header) ([]userAgent, error) {
+	agentsURL, err := userAgentsURL(rawBase, agentsPath)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentsURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = header.Clone()
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if readErr != nil {
+			return nil, fmt.Errorf("GET %s: status %d; read body: %w", agentsURL.Redacted(), resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("GET %s: status %d: %s", agentsURL.Redacted(), resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	return parseUserAgents(body)
+}
+
+func parseUserAgents(body []byte) ([]userAgent, error) {
+	var enveloped struct {
+		Data struct {
+			Agents []userAgent `json:"agents"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &enveloped); err == nil && enveloped.Data.Agents != nil {
+		return enveloped.Data.Agents, nil
+	}
+
+	var direct struct {
+		Agents []userAgent `json:"agents"`
+	}
+	if err := json.Unmarshal(body, &direct); err == nil && direct.Agents != nil {
+		return direct.Agents, nil
+	}
+	return nil, fmt.Errorf("decode agents response: expected data.agents or agents")
+}
+
+func chooseAgent(agents []userAgent, selector string, includeOffline bool) (userAgent, error) {
+	candidates := filterAgents(agents, includeOffline)
+	if selector != "" {
+		candidates = matchAgents(candidates, selector)
+	}
+	switch len(candidates) {
+	case 0:
+		if selector != "" {
+			return userAgent{}, fmt.Errorf("no online agent matched %q", selector)
+		}
+		return userAgent{}, fmt.Errorf("no online agents found")
+	case 1:
+		return candidates[0], nil
+	default:
+		return userAgent{}, fmt.Errorf("multiple online agents found; pass --agent-id or --agent")
+	}
+}
+
+func filterAgents(agents []userAgent, includeOffline bool) []userAgent {
+	out := make([]userAgent, 0, len(agents))
+	for _, agent := range agents {
+		if includeOffline || agent.Online || strings.EqualFold(agent.Status, "online") {
+			out = append(out, agent)
+		}
+	}
+	return out
+}
+
+func matchAgents(agents []userAgent, selector string) []userAgent {
+	selector = strings.ToLower(strings.TrimSpace(selector))
+	if selector == "" {
+		return agents
+	}
+	var exact []userAgent
+	var partial []userAgent
+	for _, agent := range agents {
+		fields := []string{agent.AgentID, agent.Name, agent.AgentType, agent.NodeID, agent.Hostname}
+		for _, field := range fields {
+			field = strings.ToLower(strings.TrimSpace(field))
+			if field == "" {
+				continue
+			}
+			if field == selector {
+				exact = append(exact, agent)
+				break
+			}
+			if strings.Contains(field, selector) {
+				partial = append(partial, agent)
+				break
+			}
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return partial
+}
+
+func printAgents(ui display, agents []userAgent, includeOffline bool) {
+	shown := filterAgents(agents, includeOffline)
+	ui.human("AGENTS", "showing=%d total=%d", len(shown), len(agents))
+	for _, agent := range shown {
+		ui.human(
+			"AGENT",
+			"%s name=%q type=%s status=%s online=%t node=%s host=%s",
+			agent.AgentID,
+			agent.Name,
+			agent.AgentType,
+			agent.Status,
+			agent.Online,
+			agent.NodeID,
+			agent.Hostname,
+		)
+	}
+}
+
+func userAgentsURL(rawBase, agentsPath string) (*url.URL, error) {
+	base, err := url.Parse(strings.TrimSpace(rawBase))
+	if err != nil {
+		return nil, err
+	}
+	if base.Scheme == "" {
+		return nil, fmt.Errorf("missing URL scheme in %q", rawBase)
+	}
+	switch base.Scheme {
+	case "https", "http":
+	case "wss":
+		base.Scheme = "https"
+	case "ws":
+		base.Scheme = "http"
+	default:
+		return nil, fmt.Errorf("unsupported scheme %q", base.Scheme)
+	}
+	if looksLikeTunnelURL(rawBase) {
+		return nil, fmt.Errorf("--url is a tunnel URL; pass a cloud base URL to list agents")
+	}
+	if !strings.HasPrefix(agentsPath, "/") {
+		agentsPath = "/" + agentsPath
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + agentsPath
+	base.RawQuery = ""
+	base.Fragment = ""
+	return base, nil
 }
 
 func userTunnelURL(rawBase, tunnelPath, agentID string) (*url.URL, error) {
