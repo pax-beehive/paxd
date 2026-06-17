@@ -119,9 +119,17 @@ func cmdConfigure(args []string) {
 	harness := fs.String("harness", "codex", "Default ACP harness when --agent is omitted")
 	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
 	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
+	appendAgents := fs.Bool("append", false, "Append newly registered agents instead of replacing agents")
+	assumeYes := fs.Bool("y", false, "Assume yes for destructive configure prompts")
+	fs.BoolVar(assumeYes, "yes", false, "Assume yes for destructive configure prompts")
 	var agentFlags stringListFlag
 	fs.Var(&agentFlags, "agent", "Agent spec name:harness[:instance_id], repeatable")
 	fs.Parse(args)
+
+	targetPath := *configPath
+	if targetPath == "" {
+		targetPath = config.DefaultPath()
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -171,7 +179,18 @@ func cmdConfigure(args []string) {
 		os.Exit(1)
 	}
 
-	cfg.Agents = cfg.Agents[:0]
+	if !*appendAgents && configureWouldReplaceExistingAgents(targetPath, cfg) && !*assumeYes {
+		if !confirmReplaceConfigure(targetPath, cfg.RuntimeAgents()) {
+			fmt.Fprintln(os.Stderr, "configure cancelled")
+			os.Exit(1)
+		}
+	}
+
+	if *appendAgents {
+		cfg.Agents = explicitAgentsForAppend(cfg)
+	} else {
+		cfg.Agents = cfg.Agents[:0]
+	}
 	for i, spec := range specs {
 		regToken := ""
 		req := &cloud.RegisterNodeAgentRequest{
@@ -210,7 +229,7 @@ func cmdConfigure(args []string) {
 			log.Fatalf("register agent %s: response missing agent_id", spec.Name)
 		}
 		enabled := true
-		cfg.Agents = append(cfg.Agents, config.RuntimeAgentConfig{
+		newAgent := config.RuntimeAgentConfig{
 			AgentID:     resp.AgentID,
 			InstanceID:  firstNonEmpty(spec.InstanceID, spec.Name, resp.AgentID),
 			Name:        spec.Name,
@@ -224,24 +243,25 @@ func cmdConfigure(args []string) {
 				Harness: spec.Harness,
 				Command: acpCommandForHarness(spec.Harness),
 			},
-		})
-		if i == 0 {
+		}
+		cfg.Agents = append(cfg.Agents, newAgent)
+		if i == 0 && !*appendAgents {
 			cfg.Agent.AgentID = resp.AgentID
 			cfg.AgentID = resp.AgentID
 			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
 			cfg.ACPForwarder.Enabled = true
 			cfg.ACPForwarder.Harness = spec.Harness
 			cfg.ACPForwarder.Command = acpCommandForHarness(spec.Harness)
+		} else if cfg.Agent.AgentID == "" {
+			cfg.Agent.AgentID = resp.AgentID
+			cfg.AgentID = resp.AgentID
+			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
 		}
 		fmt.Printf("Registered agent: %s (%s) -> %s\n", spec.Name, spec.Harness, resp.AgentID)
 	}
 	cfg.Cloud.APIKey = nodeAPIKey
 	cfg.Cloud.RegistrationToken = ""
 
-	targetPath := *configPath
-	if targetPath == "" {
-		targetPath = config.DefaultPath()
-	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
 		log.Fatalf("create config dir: %v", err)
 	}
@@ -1099,6 +1119,48 @@ func promptLine(prompt string) string {
 	reader := bufio.NewReader(os.Stdin)
 	text, _ := reader.ReadString('\n')
 	return strings.TrimSpace(text)
+}
+
+func configureWouldReplaceExistingAgents(path string, cfg *config.Config) bool {
+	if !configFileExists(path) {
+		return false
+	}
+	return len(cfg.Agents) > 0 || cfg.Agent.AgentID != "" || cfg.AgentID != ""
+}
+
+func configFileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func explicitAgentsForAppend(cfg *config.Config) []config.RuntimeAgentConfig {
+	if len(cfg.Agents) > 0 {
+		return append([]config.RuntimeAgentConfig(nil), cfg.Agents...)
+	}
+	agents := cfg.RuntimeAgents()
+	if len(agents) == 0 || agents[0].AgentID == "" {
+		return nil
+	}
+	return agents
+}
+
+func confirmReplaceConfigure(path string, agents []config.RuntimeAgentConfig) bool {
+	fmt.Fprintf(os.Stderr, "paxd configure will replace existing agents in %s.\n", path)
+	for _, agent := range agents {
+		if agent.AgentID == "" {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  - %s (%s, instance=%s)\n",
+			agent.AgentID,
+			firstNonEmpty(agent.AgentType, "unknown"),
+			firstNonEmpty(agent.InstanceID, "default"),
+		)
+	}
+	answer := strings.ToLower(promptLine("Continue? [y/N]: "))
+	return answer == "y" || answer == "yes"
 }
 
 func firstEnabledRuntimeAgent(cfg *config.Config) config.RuntimeAgentConfig {

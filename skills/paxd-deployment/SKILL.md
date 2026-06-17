@@ -91,15 +91,13 @@ Save the returned `node_id`, `api_key`, and `agent_id`. The `api_key` is the pax
 On an already configured machine, create another hosted agent with the node API key:
 
 ```bash
-curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/agents/register" \
-  -H 'Content-Type: application/json' \
-  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-  -H "X-Pax-Key: $PAX_API_KEY" \
-  -d '{"agent":{"name":"review","agent_type":"claude-code"}}'
+paxd configure \
+  --cloud-url "$PAX_CLOUD_URL" \
+  --append \
+  --agent review:claude-code:review
 ```
 
-Save the returned `agent_id`. The ACP forwarder must send this as `agent_id` on `/api/v1/agent/tunnel`.
+Without `--append`, `paxd configure` has replace semantics and rewrites the local `agents` list to the agents registered by that invocation. If an existing config would be overwritten, it prompts for confirmation; pass `-y` or `--yes` in automation.
 
 ## Paxd Config
 

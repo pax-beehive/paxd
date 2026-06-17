@@ -150,7 +150,16 @@ paxd configure \
   --agent review:claude-code:review
 ```
 
-如果 `~/.paxd/paxd.yaml` 已经有 `cloud.api_key`，再次运行 `paxd configure` 会复用这个 node key 注册新的 agent，并替换本地 `agents` 配置；不会复用旧的 `agent_id`。
+`paxd configure` 默认是 replace 语义：会把本地 `agents` 列表替换成本次命令注册出来的 agents。检测到已有 `~/.paxd/paxd.yaml` 且即将覆盖现有 agents 时，会要求确认；自动化脚本可以加 `-y` 或 `--yes` 跳过确认。
+
+如果只想给已配置好的 node 增加 agent，用 `--append`。这种情况下会复用现有 `cloud.api_key` 注册新 agent，并把新 agent 追加到本地 `agents` 列表；不会复用旧的 `agent_id`。
+
+```bash
+paxd configure \
+  --cloud-url https://app.example.com \
+  --append \
+  --agent review:claude-code:review
+```
 
 直接启动 forwarder，不写配置：
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -202,5 +204,67 @@ func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
 	}
 	if !strings.Contains(text, "agents:\n  - agent_id: \"agent_codex\"") {
 		t.Fatalf("yaml missing agents list:\n%s", text)
+	}
+}
+
+func TestConfigureWouldReplaceExistingAgents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paxd.yaml")
+	cfg := &config.Config{
+		Agents: []config.RuntimeAgentConfig{{AgentID: "agent_existing"}},
+	}
+
+	if configureWouldReplaceExistingAgents(path, cfg) {
+		t.Fatal("configureWouldReplaceExistingAgents() = true for missing file")
+	}
+	if err := os.WriteFile(path, []byte("agents: []\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if !configureWouldReplaceExistingAgents(path, cfg) {
+		t.Fatal("configureWouldReplaceExistingAgents() = false for existing agents")
+	}
+	if configureWouldReplaceExistingAgents(path, &config.Config{}) {
+		t.Fatal("configureWouldReplaceExistingAgents() = true for no configured agents")
+	}
+}
+
+func TestExplicitAgentsForAppendPreservesExistingAgents(t *testing.T) {
+	cfg := &config.Config{
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_existing",
+			InstanceID: "existing",
+			AgentType:  "codex",
+		}},
+	}
+
+	got := explicitAgentsForAppend(cfg)
+	if len(got) != 1 || got[0].AgentID != "agent_existing" {
+		t.Fatalf("explicitAgentsForAppend() = %#v", got)
+	}
+	got[0].AgentID = "mutated"
+	if cfg.Agents[0].AgentID != "agent_existing" {
+		t.Fatalf("explicitAgentsForAppend() returned backing slice")
+	}
+}
+
+func TestExplicitAgentsForAppendConvertsLegacyAgent(t *testing.T) {
+	cfg := &config.Config{
+		AgentID:    "agent_legacy",
+		InstanceID: "legacy",
+		Agent: config.AgentConfig{
+			AgentID: "agent_legacy",
+			Name:    "legacy-agent",
+		},
+		Hermes: config.HermesConfig{
+			APIEndpoint: "http://localhost:8642",
+		},
+	}
+
+	got := explicitAgentsForAppend(cfg)
+	if len(got) != 1 {
+		t.Fatalf("len(explicitAgentsForAppend()) = %d", len(got))
+	}
+	if got[0].AgentID != "agent_legacy" || got[0].InstanceID != "legacy" || got[0].AgentType != "hermes" {
+		t.Fatalf("explicitAgentsForAppend() = %#v", got[0])
 	}
 }

@@ -9,7 +9,7 @@ Usage:
   scripts/paxd-bootstrap detect
   scripts/paxd-bootstrap install-adapter --harness codex
   scripts/paxd-bootstrap configure --harness codex --cloud-url URL --registration-token TOKEN
-  scripts/paxd-bootstrap configure --cloud-url URL --agent work:codex --agent review:claude-code
+  scripts/paxd-bootstrap configure --append --cloud-url URL --agent review:claude-code
   scripts/paxd-bootstrap run --harness codex --cloud-url URL --api-key KEY --agent-id AGENT_ID
 
 Harnesses:
@@ -31,14 +31,15 @@ Options:
   --cf-client-id ID         Cloudflare Access service token client ID
   --cf-client-secret SECRET Cloudflare Access service token secret
   --config PATH             config path, default: ~/.paxd/paxd.yaml
+  --append                  Append agents instead of replacing agents
   --no-npx                  Do not use npx fallback for adapters
-  --yes                     Non-interactive yes for installs
+  --yes                     Non-interactive yes for installs/configure prompts
 
 Examples:
   scripts/paxd-bootstrap detect
   scripts/paxd-bootstrap install-adapter --harness codex --yes
   scripts/paxd-bootstrap configure --harness claude-code --cloud-url https://app.example.com --registration-token token_...
-  scripts/paxd-bootstrap configure --cloud-url https://app.example.com --agent work:codex --agent review:claude-code
+  scripts/paxd-bootstrap configure --append --cloud-url https://app.example.com --agent review:claude-code
   scripts/paxd-bootstrap run --harness gemini --cloud-url https://app.example.com --api-key pax_... --agent-id agent_...
 
 Notes:
@@ -81,6 +82,7 @@ cf_client_secret="${PAX_CLOUD_CF_CLIENT_SECRET:-}"
 config_path="${PAXD_CONFIG:-$HOME/.paxd/paxd.yaml}"
 allow_npx=1
 assume_yes=0
+append_agents=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --cf-client-id) cf_client_id=${2:-}; shift 2 ;;
     --cf-client-secret) cf_client_secret=${2:-}; shift 2 ;;
     --config) config_path=${2:-}; shift 2 ;;
+    --append) append_agents=1; shift ;;
     --no-npx) allow_npx=0; shift ;;
     --yes|-y) assume_yes=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -287,6 +290,8 @@ write_config() {
   [[ -z "$machine_type" ]] || args+=(--machine-type "$machine_type")
   [[ -z "$cf_client_id" ]] || args+=(--cf-client-id "$cf_client_id")
   [[ -z "$cf_client_secret" ]] || args+=(--cf-client-secret "$cf_client_secret")
+  [[ "$append_agents" == "0" ]] || args+=(--append)
+  [[ "$assume_yes" == "0" ]] || args+=(--yes)
   for spec in "${agent_specs[@]}"; do
     args+=(--agent "$spec")
   done
