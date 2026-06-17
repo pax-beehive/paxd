@@ -234,11 +234,6 @@ cloud:
   cf_client_id: ""            # Cloudflare Access service token（可选）
   cf_client_secret: ""        # Cloudflare Access service token（可选）
 
-hermes:
-  api_endpoint: http://localhost:8642
-  api_key_from_env: ~/.hermes/.env  # Hermes API key 存放的文件路径
-  profile: ""                # Hermes profile 名称（可选）
-
 agents:
   - agent_id: agent_codex
     instance_id: codex-main
@@ -276,6 +271,8 @@ acp_forwarder:
   reconnect_interval: 2s
 ```
 
+只有 `agent_type: hermes` 的 legacy/Hermes HTTP agent 需要 `hermes.api_endpoint`、`api_key_from_env` 和 `profile`；Codex/Claude/Gemini ACP agent 不需要这些字段。
+
 ### Hermes API Key
 
 从 `hermes.api_key_from_env` 指定的文件中读取 key。文件格式：
@@ -307,7 +304,6 @@ was sent or received, and also prints an aggregate view of streaming
 ```bash
 go run ./cmd/acp-smoke \
   --url "$PAX_CLOUD_URL" \
-  --agent-id "$PAX_AGENT_ID" \
   --cookie "$PAX_COOKIE" \
   --interactive
 ```
@@ -316,12 +312,33 @@ The cookie value can be either raw cookie pairs or a copied browser header such
 as `Cookie: CF_Authorization=...; other=value`. A bare Cloudflare token can also
 be passed with `--cf-authorization "$CF_AUTHORIZATION"`.
 
+List the agents visible to the cookie-backed user:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --list-agents
+```
+
+If exactly one online agent is visible, `cmd/acp-smoke` selects it automatically.
+When multiple online agents are visible, pass either the exact `--agent-id` or
+the agent's configured name with `--agent-name`:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --agent-name review \
+  --interactive
+```
+
 For local pax-manager tests:
 
 ```bash
 go run ./cmd/acp-smoke \
   --url http://127.0.0.1:9879 \
-  --agent-id "$PAX_AGENT_ID" \
+  --agent-name codex \
   --user-email local@example.local
 ```
 
