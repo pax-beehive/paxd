@@ -71,6 +71,7 @@ type DaemonConfig struct {
 	LogLevel          string        `yaml:"log_level"`          // debug, info, warn, error
 	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
 	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
+	SessionBatchSize  int           `yaml:"session_batch_size"` // max sessions per status report
 }
 
 // ACPForwarderConfig controls the stateless ACP tunnel forwarder.
@@ -107,6 +108,7 @@ func DefaultConfig() Config {
 			StatusInterval:    10 * time.Second,
 			ReconcileInterval: 15 * time.Second,
 			PollInterval:      5 * time.Second,
+			SessionBatchSize:  100,
 			LogLevel:          "info",
 			DBPath:            filepath.Join(home, ".paxd", "paxd.db"),
 		},
@@ -247,6 +249,7 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Hermes.APIKeyEnv, "HERMES_API_KEY_FROM_ENV")
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
+	setIntFromEnv(&cfg.Daemon.SessionBatchSize, "PAX_SESSION_REPORT_BATCH_SIZE")
 	setBoolFromEnv(&cfg.ACPForwarder.Enabled, "PAX_ACP_FORWARD_ENABLED")
 	setStringFromEnv(&cfg.ACPForwarder.Harness, "PAX_ACP_HARNESS")
 	setStringSliceFromEnv(&cfg.ACPForwarder.Command, "PAX_ACP_COMMAND")
@@ -296,6 +299,15 @@ func setDurationFromEnv(target *time.Duration, key string) {
 		duration, err := time.ParseDuration(value)
 		if err == nil {
 			*target = duration
+		}
+	}
+}
+
+func setIntFromEnv(target *int, key string) {
+	if value := os.Getenv(key); value != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil {
+			*target = parsed
 		}
 	}
 }

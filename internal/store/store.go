@@ -8,6 +8,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -306,6 +307,30 @@ func (s *Store) SaveCloudAgent(a *CloudAgent) error {
 			enabled = excluded.enabled,
 			updated_at = datetime('now')
 	`, a.AgentID, a.InstanceID, a.Name, a.AgentType, a.APIEndpoint, a.APIKeyEnv, a.Profile, a.Enabled)
+	return err
+}
+
+// DisableCloudAgentsExcept disables enabled cloud agents absent from the current config.
+func (s *Store) DisableCloudAgentsExcept(agentIDs []string) error {
+	if len(agentIDs) == 0 {
+		_, err := s.db.Exec(`
+			UPDATE cloud_agents
+			SET enabled = 0, updated_at = datetime('now')
+			WHERE enabled = 1
+		`)
+		return err
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(agentIDs)), ",")
+	args := make([]any, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		args = append(args, agentID)
+	}
+	_, err := s.db.Exec(`
+		UPDATE cloud_agents
+		SET enabled = 0, updated_at = datetime('now')
+		WHERE enabled = 1 AND agent_id NOT IN (`+placeholders+`)
+	`, args...)
 	return err
 }
 

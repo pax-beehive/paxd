@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/acpforwarder"
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/collector"
@@ -186,8 +187,9 @@ func cmdConfigure(args []string) {
 		}
 	}
 
+	existingAgents := explicitAgentsForAppend(cfg)
 	if *appendAgents {
-		cfg.Agents = explicitAgentsForAppend(cfg)
+		cfg.Agents = existingAgents
 	} else {
 		cfg.Agents = cfg.Agents[:0]
 	}
@@ -228,32 +230,10 @@ func cmdConfigure(args []string) {
 		if resp.AgentID == "" {
 			log.Fatalf("register agent %s: response missing agent_id", spec.Name)
 		}
-		enabled := true
-		newAgent := config.RuntimeAgentConfig{
-			AgentID:    resp.AgentID,
-			InstanceID: firstNonEmpty(spec.InstanceID, spec.Name, resp.AgentID),
-			Name:       spec.Name,
-			AgentType:  spec.Harness,
-			Enabled:    &enabled,
-			ACPForwarder: config.AgentACPForwarderConfig{
-				Enabled: &enabled,
-				Harness: spec.Harness,
-				Command: acpCommandForHarness(spec.Harness),
-			},
-		}
-		if supportsHermesHTTP(spec.Harness) {
-			newAgent.APIEndpoint = cfg.Hermes.APIEndpoint
-			newAgent.APIKeyEnv = cfg.Hermes.APIKeyEnv
-			newAgent.Profile = cfg.Hermes.Profile
-		}
+		newAgent := runtimeAgentConfigFromSpec(resp.AgentID, spec, cfg)
 		cfg.Agents = append(cfg.Agents, newAgent)
 		if i == 0 && !*appendAgents {
-			cfg.Agent.AgentID = resp.AgentID
-			cfg.AgentID = resp.AgentID
-			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
-			cfg.ACPForwarder.Enabled = true
-			cfg.ACPForwarder.Harness = spec.Harness
-			cfg.ACPForwarder.Command = acpCommandForHarness(spec.Harness)
+			applyPrimaryConfiguredAgent(cfg, newAgent, spec)
 		} else if cfg.Agent.AgentID == "" {
 			cfg.Agent.AgentID = resp.AgentID
 			cfg.AgentID = resp.AgentID
@@ -436,7 +416,8 @@ func cmdRun(args []string) {
 	}
 
 	// Create subsystems
-	col := collector.New(runtimes, cloudClient, db, cfg.Agent.Hostname)
+	col := collector.New(runtimes, cloudClient, db, cfg.Agent.Hostname).
+		WithBatchSize(cfg.Daemon.SessionBatchSize)
 	pol := poller.New(cloudClient, nil, executors, db)
 
 	// Transition to RUNNING
@@ -904,9 +885,16 @@ func nodeStateFromConfig(cfg *config.Config, db *store.Store) *store.NodeState {
 }
 
 func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
-	for _, runtimeAgent := range cfg.RuntimeAgents() {
+	runtimeAgents := cfg.RuntimeAgents()
+	configuredAgentIDs := make([]string, 0, len(runtimeAgents))
+	seenAgentIDs := make(map[string]bool, len(runtimeAgents))
+	for _, runtimeAgent := range runtimeAgents {
 		if runtimeAgent.AgentID == "" {
 			continue
+		}
+		if !seenAgentIDs[runtimeAgent.AgentID] {
+			configuredAgentIDs = append(configuredAgentIDs, runtimeAgent.AgentID)
+			seenAgentIDs[runtimeAgent.AgentID] = true
 		}
 		enabled := true
 		if runtimeAgent.Enabled != nil {
@@ -928,7 +916,7 @@ func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
 			return err
 		}
 	}
-	return nil
+	return db.DisableCloudAgentsExcept(configuredAgentIDs)
 }
 
 func buildAgentRuntimes(
@@ -952,10 +940,39 @@ func buildAgentRuntimes(
 			Agent:              agent,
 			HermesClient:       hermesClient,
 			SupportsHermesHTTP: supportsHermesHTTP(agent.AgentType),
+			ACPSessionLister:   acpSessionListerForAgent(cfg, agent),
 		})
 		executors[agent.AgentID] = executor.New(hermesClient, cloudClient, db, agent.AgentID)
 	}
 	return runtimes, executors, nil
+}
+
+func acpSessionListerForAgent(cfg *config.Config, agent store.CloudAgent) *acpclient.SessionLister {
+	runtimeAgent, ok := runtimeAgentByID(cfg, agent.AgentID)
+	if !ok {
+		return nil
+	}
+	forwardCfg, ok := agentACPForwarderConfig(cfg, &store.NodeState{
+		CloudAPIURL: cfg.Cloud.APIURL,
+		CloudAPIKey: cfg.Cloud.APIKey,
+	}, runtimeAgent)
+	if !ok || len(forwardCfg.Command) == 0 {
+		return nil
+	}
+	return &acpclient.SessionLister{
+		Command:    append([]string(nil), forwardCfg.Command...),
+		WorkingDir: forwardCfg.WorkingDir,
+		Timeout:    10 * time.Second,
+	}
+}
+
+func runtimeAgentByID(cfg *config.Config, agentID string) (config.RuntimeAgentConfig, bool) {
+	for _, agent := range cfg.RuntimeAgents() {
+		if agent.AgentID == agentID {
+			return agent, true
+		}
+	}
+	return config.RuntimeAgentConfig{}, false
 }
 
 func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *store.NodeState) int {
@@ -1077,6 +1094,37 @@ func configureHermesAPIEndpoint(cfg *config.Config, specs []configureAgentSpec) 
 		}
 	}
 	return ""
+}
+
+func runtimeAgentConfigFromSpec(agentID string, spec configureAgentSpec, cfg *config.Config) config.RuntimeAgentConfig {
+	enabled := true
+	newAgent := config.RuntimeAgentConfig{
+		AgentID:    agentID,
+		InstanceID: firstNonEmpty(spec.InstanceID, spec.Name, agentID),
+		Name:       spec.Name,
+		AgentType:  spec.Harness,
+		Enabled:    &enabled,
+		ACPForwarder: config.AgentACPForwarderConfig{
+			Enabled: &enabled,
+			Harness: spec.Harness,
+			Command: acpCommandForHarness(spec.Harness),
+		},
+	}
+	if supportsHermesHTTP(spec.Harness) {
+		newAgent.APIEndpoint = cfg.Hermes.APIEndpoint
+		newAgent.APIKeyEnv = cfg.Hermes.APIKeyEnv
+		newAgent.Profile = cfg.Hermes.Profile
+	}
+	return newAgent
+}
+
+func applyPrimaryConfiguredAgent(cfg *config.Config, agent config.RuntimeAgentConfig, spec configureAgentSpec) {
+	cfg.Agent.AgentID = agent.AgentID
+	cfg.AgentID = agent.AgentID
+	cfg.InstanceID = firstNonEmpty(agent.InstanceID, spec.InstanceID, spec.Name, "default")
+	cfg.ACPForwarder.Enabled = true
+	cfg.ACPForwarder.Harness = spec.Harness
+	cfg.ACPForwarder.Command = acpCommandForHarness(spec.Harness)
 }
 
 func configUsesHermesHTTP(cfg *config.Config) bool {
