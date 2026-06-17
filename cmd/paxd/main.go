@@ -424,7 +424,7 @@ func cmdRun(args []string) {
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
-	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState)
+	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState, db)
 	log.Printf("[paxd] RUNNING (node=%s, agents=%d, poll=%s, status=%s, orphan=%s)",
 		nodeState.NodeID,
 		len(runtimes),
@@ -522,12 +522,12 @@ func cmdACPForward(args []string) {
 		tunnelPath:        *tunnelPath,
 		reconnectInterval: *reconnectInterval,
 	})
+	db, err := store.Open(cfg.Daemon.DBPath)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
 	if nodeState.CloudAPIKey == "" || nodeState.CloudAPIURL == "" {
-		db, err := store.Open(cfg.Daemon.DBPath)
-		if err != nil {
-			log.Fatalf("open db: %v", err)
-		}
-		defer db.Close()
 		saved, err := db.GetNodeState()
 		if err != nil {
 			log.Fatalf("get node state: %v", err)
@@ -555,6 +555,7 @@ func cmdACPForward(args []string) {
 
 	cfg.ACPForwarder.Enabled = true
 	forwardCfg := acpForwarderConfig(cfg, nodeState)
+	forwardCfg.Journal = db
 	log.Printf("[paxd] ACP forwarder starting (tunnel=%s, command=%q)",
 		forwardCfg.TunnelPath,
 		forwardCfg.Command)
@@ -975,13 +976,14 @@ func runtimeAgentByID(cfg *config.Config, agentID string) (config.RuntimeAgentCo
 	return config.RuntimeAgentConfig{}, false
 }
 
-func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *store.NodeState) int {
+func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *store.NodeState, db *store.Store) int {
 	count := 0
 	for _, agent := range cfg.RuntimeAgents() {
 		forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
 		if !ok {
 			continue
 		}
+		forwardCfg.Journal = db
 		count++
 		go func(forwardCfg acpforwarder.Config) {
 			log.Printf(

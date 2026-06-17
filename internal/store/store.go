@@ -72,6 +72,41 @@ type OrphanedMessage struct {
 	RetryCount int
 }
 
+// Message is durable local business history. It is separate from
+// transport_journal, which is only the reliable WebSocket queue.
+type Message struct {
+	ID              int64
+	MessageID       string
+	AgentID         string
+	SessionID       string
+	Source          string
+	Direction       string
+	Role            string
+	Status          string
+	MessageType     string
+	ParentMessageID string
+	TurnID          string
+	ResponseID      string
+	LogicalKey      string
+	RawJSON         string
+	CreatedAt       string
+	UpdatedAt       string
+}
+
+// MessagePart stores text, raw JSON, or future artifact references. Streaming
+// deltas append to a text part instead of creating one row per token.
+type MessagePart struct {
+	ID          int64
+	MessageID   string
+	PartIndex   int
+	PartType    string
+	Text        string
+	PayloadJSON string
+	ArtifactURI string
+	CreatedAt   string
+	UpdatedAt   string
+}
+
 // Open opens (or creates) the SQLite database at the given path.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
@@ -145,6 +180,67 @@ func migrate(db *sql.DB) error {
 		created_at    TEXT NOT NULL,
 		retry_count   INTEGER DEFAULT 0
 	);
+
+	CREATE TABLE IF NOT EXISTS messages (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id        TEXT UNIQUE NOT NULL,
+		agent_id          TEXT NOT NULL,
+		session_id        TEXT,
+		source            TEXT NOT NULL,
+		direction         TEXT NOT NULL,
+		role              TEXT,
+		status            TEXT,
+		message_type      TEXT,
+		parent_message_id TEXT,
+		turn_id           TEXT,
+		response_id       TEXT,
+		logical_key       TEXT UNIQUE,
+		raw_json          TEXT,
+		created_at        TEXT NOT NULL,
+		updated_at        TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS message_parts (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id   TEXT NOT NULL,
+		part_index   INTEGER NOT NULL,
+		part_type    TEXT NOT NULL,
+		text         TEXT,
+		payload_json TEXT,
+		artifact_uri TEXT,
+		created_at   TEXT NOT NULL,
+		updated_at   TEXT NOT NULL,
+		UNIQUE(message_id, part_index),
+		FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_messages_agent_created ON messages(agent_id, created_at, id);
+	CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at, id);
+	CREATE INDEX IF NOT EXISTS idx_message_parts_message ON message_parts(message_id, part_index);
+
+	CREATE TABLE IF NOT EXISTS transport_journal (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent_id        TEXT NOT NULL,
+		stream          TEXT NOT NULL,
+		seq             INTEGER NOT NULL,
+		local_direction TEXT NOT NULL,
+		payload_json    TEXT NOT NULL,
+		status          TEXT NOT NULL,
+		error           TEXT,
+		retry_count     INTEGER NOT NULL DEFAULT 0,
+		created_at      TEXT NOT NULL,
+		updated_at      TEXT NOT NULL,
+		sent_at         TEXT,
+		received_at     TEXT,
+		acked_at        TEXT,
+		applied_at      TEXT,
+		UNIQUE(agent_id, stream, seq, local_direction)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_transport_journal_pending
+		ON transport_journal(agent_id, stream, local_direction, status, seq);
+	CREATE INDEX IF NOT EXISTS idx_transport_journal_cleanup
+		ON transport_journal(status, updated_at);
 	`
 	_, err := db.Exec(schema)
 	return err
