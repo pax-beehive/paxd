@@ -101,18 +101,17 @@ Without `--append`, `paxd configure` has replace semantics and rewrites the loca
 
 ## Paxd Config
 
-For home-server setup, prefer the bootstrap helper when it is available:
+For home-server setup, use paxd directly:
 
 ```bash
-scripts/paxd-bootstrap detect
-scripts/paxd-bootstrap install-adapter --harness codex --yes
-scripts/paxd-bootstrap configure \
+paxd harnesses
+paxd configure \
   --harness codex \
   --cloud-url "$PAX_CLOUD_URL" \
   --registration-token "$REGISTRATION_TOKEN"
 ```
 
-Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
+Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. If `paxd harnesses` reports a missing Codex or Claude Code adapter, install the corresponding adapter package outside paxd. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
 
 Create or update `~/.paxd/paxd.yaml` on the server. `cloud.api_url` is the canonical key; `cloud.url` is accepted as a compatibility alias:
 

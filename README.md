@@ -121,14 +121,14 @@ launchctl load ~/Library/LaunchAgents/com.toddzheng.paxd.plist
 先探测这台机器已有的 harness 和 adapter：
 
 ```bash
-scripts/paxd-bootstrap detect
+paxd harnesses
 ```
 
-安装 Codex / Claude Code 的 ACP adapter（二选一或都装）。这只安装 adapter，不安装 Codex/Claude 本体，也不配置订阅或登录态：
+如果 `paxd harnesses` 显示 Codex / Claude Code adapter 不可用，先按 adapter 项目文档安装；这一步不由 paxd 管理，也不配置 Codex/Claude 本体、订阅或登录态：
 
 ```bash
-scripts/paxd-bootstrap install-adapter --harness codex --yes
-scripts/paxd-bootstrap install-adapter --harness claude-code --yes
+npm install -g @zed-industries/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
 写入 `~/.paxd/paxd.yaml`。新机器只需要 `registration_token`，`node_id`、node `api_key`、`agent_id` 都由 paxd 通过 pax-manager 创建并写回：
@@ -164,11 +164,11 @@ paxd configure \
 直接启动 forwarder，不写配置：
 
 ```bash
-scripts/paxd-bootstrap run \
-  --harness codex \
-  --cloud-url https://app.example.com \
-  --api-key pax_node_key_here \
-  --agent-id agent_xxx
+PAX_CLOUD_URL=https://app.example.com \
+PAX_API_KEY=pax_node_key_here \
+PAX_AGENT_ID=agent_xxx \
+PAX_ACP_HARNESS=codex \
+paxd acp-forward
 ```
 
 如果 pax-manager 的机器侧 tunnel 也经过 Cloudflare Access，再加 `--cf-client-id` 和 `--cf-client-secret`。
