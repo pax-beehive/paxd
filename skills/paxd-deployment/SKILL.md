@@ -34,8 +34,7 @@ Confirm these before starting:
   - `CF_ACCESS_CLIENT_ID`
   - `CF_ACCESS_CLIENT_SECRET`
   - a node registration token
-  - the node API key returned by registration
-  - the `agent_id` returned by node-agent creation
+  - or an existing node API key in `~/.paxd/paxd.yaml`
 
 ## Manager Checks
 
@@ -76,30 +75,31 @@ curl -sS -X POST "$PAX_CLOUD_URL/api/v1/user/self/node-registration-tokens" \
   -d '{}'
 ```
 
-Register the server as a node:
+On a new machine, register the server as a node and create the first hosted agent in one machine-side call:
 
 ```bash
-curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/register" \
+curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/agents/register" \
   -H 'Content-Type: application/json' \
   -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
   -H "X-Registration-Token: $REGISTRATION_TOKEN" \
-  -d '{"name":"hermes-node","hostname":"'"$(hostname)"'","machine_type":"server","os":"linux","arch":"amd64","paxd_version":"0.1.0"}'
+  -d '{"node":{"name":"agent-node","hostname":"'"$(hostname)"'","machine_type":"server","os":"linux","arch":"amd64","paxd_version":"0.1.0"},"agent":{"name":"codex","agent_type":"codex"}}'
 ```
 
-Save the returned `nodeId` and `apiKey`. The `apiKey` is the paxd `cloud.api_key` / `PAX_API_KEY`; do not use the registration token after node registration.
+Save the returned `node_id`, `api_key`, and `agent_id`. The `api_key` is the paxd `cloud.api_key` / `PAX_API_KEY`; do not use the registration token after bootstrap.
 
-Create a node agent:
+On an already configured machine, create another hosted agent with the node API key:
 
 ```bash
-curl -sS -X POST "$PAX_CLOUD_URL/api/v1/user/self/nodes/$NODE_ID/agents" \
+curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/agents/register" \
   -H 'Content-Type: application/json' \
   -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-  -d '{"name":"hermes-agent","agent_type":"hermes"}'
+  -H "X-Pax-Key: $PAX_API_KEY" \
+  -d '{"agent":{"name":"review","agent_type":"claude-code"}}'
 ```
 
-Save the returned `agent.agentId`. The ACP forwarder must send this as `agent_id` on `/api/v1/agent/tunnel`.
+Save the returned `agent_id`. The ACP forwarder must send this as `agent_id` on `/api/v1/agent/tunnel`.
 
 ## Paxd Config
 
@@ -111,17 +111,17 @@ scripts/paxd-bootstrap install-adapter --harness codex --yes
 scripts/paxd-bootstrap configure \
   --harness codex \
   --cloud-url "$PAX_CLOUD_URL" \
-  --api-key "$PAX_API_KEY" \
-  --agent-id "$PAX_AGENT_ID"
+  --registration-token "$REGISTRATION_TOKEN"
 ```
 
 Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
 
-Create or update `~/.pax/paxd.yaml` on the server. `cloud.api_url` is the canonical key; `cloud.url` is accepted as a compatibility alias:
+Create or update `~/.paxd/paxd.yaml` on the server. `cloud.api_url` is the canonical key; `cloud.url` is accepted as a compatibility alias:
 
 ```yaml
 cloud:
   api_url: https://app.example.com
+  node_id: node_xxx
   api_key: pax_node_key_here
   cf_client_id: cf_service_token_client_id_here
   cf_client_secret: cf_service_token_client_secret_here
@@ -129,10 +129,17 @@ cloud:
 agent_id: agent_xxx
 instance_id: default
 
+agents:
+  - agent_id: agent_xxx
+    instance_id: default
+    name: codex
+    agent_type: codex
+    enabled: true
+
 acp_forwarder:
   enabled: true
-  harness: hermes
-  command: ["hermes", "acp"]
+  harness: codex
+  command: ["codex-acp"]
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
@@ -273,7 +280,7 @@ When handing the setup to another tester, provide:
 - instructions for obtaining a fresh node registration token
 - target server SSH access
 - expected `paxd.yaml` template with placeholders
-- the node `agent_id` after creation
+- the hosted `agent_id` after creation
 - the exact user WebSocket URL
 - the four smoke-test JSON-RPC messages
 - known timeout/reconnect expectations

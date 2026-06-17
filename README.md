@@ -31,10 +31,10 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 
 ```
 cmd/paxd
-├── main.go              CLI: register | run | install-service | --version
+├── main.go              CLI: configure | register | run | install-service | --version
 │
 internal/
-├── config/config.go     YAML 配置 (~/.pax/paxd.yaml)
+├── config/config.go     YAML 配置 (~/.paxd/paxd.yaml)
 ├── store/store.go       本地 SQLite (agent 身份 + orphaned messages)
 ├── state/state.go       生命周期状态机
 ├── cloud/client.go      Cloud HTTP API (register, status)
@@ -61,7 +61,7 @@ STARTING → REGISTERING → RUNNING → STOPPING → STOPPED
 | 状态 | 行为 |
 |------|------|
 | **STARTING** | 加载配置，检查 Hermes 可达性 |
-| **REGISTERING** | 向 Cloud 注册，获取 agent_id + api_key |
+| **REGISTERING** | 向 Cloud 注册，获取 node_id + api_key |
 | **RUNNING** | 主循环：Status Collector + Message Poller + WS |
 | **STOPPING** | 完成当前消息（30s 超时），flush offset |
 | **STOPPED** | 退出 |
@@ -105,8 +105,8 @@ paxd 解析 Hermes SSE 流，产生结构化 `model.*` 事件，实时推送回 
 ```bash
 # 前置条件：本地有 Hermes 在 localhost:8642 运行
 
-# 注册到 Cloud
-paxd register --cloud-url https://pax.example.com
+# 注册 node + agent 并写入配置
+paxd configure --cloud-url https://pax.example.com --registration-token token_xxx
 
 # 运行守护进程
 paxd run
@@ -131,15 +131,26 @@ scripts/paxd-bootstrap install-adapter --harness codex --yes
 scripts/paxd-bootstrap install-adapter --harness claude-code --yes
 ```
 
-写入 `~/.pax/paxd.yaml`：
+写入 `~/.paxd/paxd.yaml`。新机器只需要 `registration_token`，`node_id`、node `api_key`、`agent_id` 都由 paxd 通过 pax-manager 创建并写回：
 
 ```bash
-scripts/paxd-bootstrap configure \
+paxd configure \
   --harness codex \
   --cloud-url https://app.example.com \
-  --api-key pax_node_key_here \
-  --agent-id agent_xxx
+  --registration-token token_xxx
 ```
+
+也可以一次注册多个 agent；同一个 harness 可以注册多个 agent：
+
+```bash
+paxd configure \
+  --cloud-url https://app.example.com \
+  --registration-token token_xxx \
+  --agent work:codex:work \
+  --agent review:claude-code:review
+```
+
+如果 `~/.paxd/paxd.yaml` 已经有 `cloud.api_key`，再次运行 `paxd configure` 会复用这个 node key 注册新的 agent，并替换本地 `agents` 配置；不会复用旧的 `agent_id`。
 
 直接启动 forwarder，不写配置：
 
@@ -201,7 +212,7 @@ ACP harness 预设：
 
 ## 配置
 
-默认路径：`~/.pax/paxd.yaml`
+默认路径：`~/.paxd/paxd.yaml`，旧的 `~/.pax/paxd.yaml` 仍作为兼容 fallback 读取。
 
 ```yaml
 agent:
@@ -209,7 +220,8 @@ agent:
 
 cloud:
   api_url: https://pax-manager-xxxxx-uc.a.run.app
-  api_key: "key-xxxxx"       # register 后自动写入
+  node_id: "node_xxxxx"      # configure 后自动写入
+  api_key: "key-xxxxx"       # node API key，configure 后自动写入
   cf_client_id: ""            # Cloudflare Access service token（可选）
   cf_client_secret: ""        # Cloudflare Access service token（可选）
 
@@ -223,7 +235,7 @@ daemon:
   status_interval: 10s
   reconcile_interval: 30s
   log_level: info
-  db_path: ~/.pax/paxd.db
+  db_path: ~/.paxd/paxd.db
 
 acp_forwarder:
   enabled: false
@@ -307,7 +319,7 @@ Environment overrides:
 
 ## 本地 SQLite
 
-数据库文件：`~/.pax/paxd.db`
+数据库文件：`~/.paxd/paxd.db`
 
 | 表 | 用途 |
 |----|------|

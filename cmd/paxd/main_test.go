@@ -60,3 +60,35 @@ func TestACPCommandForHarness(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigureAgentSpecsDefault(t *testing.T) {
+	got, err := parseConfigureAgentSpecs(nil, "claude")
+	if err != nil {
+		t.Fatalf("parseConfigureAgentSpecs() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Name != "claude-code" || got[0].Harness != "claude-code" || got[0].InstanceID != "default" {
+		t.Fatalf("parseConfigureAgentSpecs() = %#v", got[0])
+	}
+}
+
+func TestParseConfigureAgentSpecsMultiple(t *testing.T) {
+	got, err := parseConfigureAgentSpecs(
+		[]string{"work:codex:primary", "review:claude_code"},
+		"gemini",
+	)
+	if err != nil {
+		t.Fatalf("parseConfigureAgentSpecs() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Name != "work" || got[0].Harness != "codex" || got[0].InstanceID != "primary" {
+		t.Fatalf("got[0] = %#v", got[0])
+	}
+	if got[1].Name != "review" || got[1].Harness != "claude-code" || got[1].InstanceID != "review" {
+		t.Fatalf("got[1] = %#v", got[1])
+	}
+}
