@@ -126,9 +126,6 @@ cloud:
   cf_client_id: cf_service_token_client_id_here
   cf_client_secret: cf_service_token_client_secret_here
 
-agent_id: agent_xxx
-instance_id: default
-
 agents:
   - agent_id: agent_xxx
     instance_id: default

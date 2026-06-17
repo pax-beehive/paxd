@@ -160,3 +160,47 @@ func TestAgentACPForwarderConfigCanDisableOneAgent(t *testing.T) {
 		t.Fatal("agentACPForwarderConfig() enabled disabled agent")
 	}
 }
+
+func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		AgentID:    "legacy_agent",
+		InstanceID: "legacy_instance",
+		Agent: config.AgentConfig{
+			AgentID:     "legacy_agent",
+			Name:        "node",
+			MachineType: "unknown",
+			Hostname:    "host",
+		},
+		Cloud: config.CloudConfig{
+			APIURL: "https://app.example.com",
+			NodeID: "node_123",
+			APIKey: "pax_key",
+		},
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_codex",
+			InstanceID: "codex-main",
+			Name:       "codex-main",
+			AgentType:  "codex",
+			Enabled:    &enabled,
+		}},
+	}
+
+	data, err := yamlMarshal(cfg)
+	if err != nil {
+		t.Fatalf("yamlMarshal() error = %v", err)
+	}
+	text := string(data)
+	for _, legacy := range []string{
+		"\nagent_id: \"legacy_agent\"",
+		"instance_id: \"legacy_instance\"",
+		"agent:\n  agent_id:",
+	} {
+		if strings.Contains(text, legacy) {
+			t.Fatalf("yaml contains legacy shorthand %q:\n%s", legacy, text)
+		}
+	}
+	if !strings.Contains(text, "agents:\n  - agent_id: \"agent_codex\"") {
+		t.Fatalf("yaml missing agents list:\n%s", text)
+	}
+}

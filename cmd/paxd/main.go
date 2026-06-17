@@ -1188,10 +1188,15 @@ func cmdInstallService() {
 func yamlMarshal(cfg *config.Config) ([]byte, error) {
 	var sb strings.Builder
 	sb.WriteString("# paxd configuration\n")
-	sb.WriteString(fmt.Sprintf("agent_id: %s\n", yamlQuote(cfg.AgentID)))
-	sb.WriteString(fmt.Sprintf("instance_id: %s\n", yamlQuote(cfg.InstanceID)))
-	sb.WriteString(fmt.Sprintf("agent:\n  agent_id: %s\n  name: %s\n  machine_type: %s\n  hostname: %s\n",
-		yamlQuote(cfg.Agent.AgentID),
+	if len(cfg.Agents) == 0 {
+		sb.WriteString(fmt.Sprintf("agent_id: %s\n", yamlQuote(cfg.AgentID)))
+		sb.WriteString(fmt.Sprintf("instance_id: %s\n", yamlQuote(cfg.InstanceID)))
+	}
+	sb.WriteString("agent:\n")
+	if len(cfg.Agents) == 0 {
+		sb.WriteString(fmt.Sprintf("  agent_id: %s\n", yamlQuote(cfg.Agent.AgentID)))
+	}
+	sb.WriteString(fmt.Sprintf("  name: %s\n  machine_type: %s\n  hostname: %s\n",
 		yamlQuote(cfg.Agent.Name),
 		yamlQuote(cfg.Agent.MachineType),
 		yamlQuote(cfg.Agent.Hostname)))
