@@ -89,7 +89,8 @@ func main() {
 	fs := flag.NewFlagSet("acp-smoke", flag.ExitOnError)
 	baseURL := fs.String("url", env("PAX_CLOUD_URL", ""), "Pax cloud URL or full user tunnel WebSocket URL")
 	agentID := fs.String("agent-id", env("PAX_AGENT_ID", ""), "agent id used with the default user tunnel path")
-	agentSelector := fs.String("agent", env("PAX_AGENT", ""), "agent selector used when --agent-id is omitted; matches id, name, or agent type")
+	agentName := fs.String("agent-name", env("PAX_AGENT_NAME", ""), "agent name used when --agent-id is omitted")
+	agentNameAlias := fs.String("agent", env("PAX_AGENT", ""), "deprecated alias for --agent-name")
 	listAgents := fs.Bool("list-agents", false, "list user-visible agents and exit")
 	includeOffline := fs.Bool("include-offline", false, "include offline agents when listing or auto-selecting")
 	agentsPath := fs.String("agents-path", "/api/user/agents", "user agents list path")
@@ -114,6 +115,9 @@ func main() {
 	fs.Var(&prompts, "prompt", "session prompt text; repeatable")
 	fs.Var(&files, "messages-file", "JSON array or NDJSON file with raw JSON-RPC messages; repeatable")
 	fs.Parse(os.Args[1:])
+	if *agentName == "" {
+		*agentName = *agentNameAlias
+	}
 
 	if *baseURL == "" {
 		log.Fatal("--url or PAX_CLOUD_URL is required")
@@ -175,7 +179,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("choose agent: %v", err)
 		}
-		selected, err := chooseAgent(agents, *agentSelector, *includeOffline)
+		selected, err := chooseAgent(agents, *agentName, *includeOffline)
 		if err != nil {
 			printAgents(ui, agents, *includeOffline)
 			log.Fatalf("choose agent: %v", err)
@@ -184,7 +188,7 @@ func main() {
 		ui.human("AGENT", "%s name=%q type=%s status=%s", selected.AgentID, selected.Name, selected.AgentType, selected.Status)
 	}
 	if *agentID == "" && !looksLikeTunnelURL(*baseURL) {
-		log.Fatal("--agent-id, --agent, or PAX_AGENT_ID is required unless --url is a full tunnel URL")
+		log.Fatal("--agent-id, --agent-name, or PAX_AGENT_ID is required unless --url is a full tunnel URL")
 	}
 
 	tunnelURL, err := userTunnelURL(*baseURL, *path, *agentID)
@@ -625,21 +629,24 @@ func parseUserAgents(body []byte) ([]userAgent, error) {
 	return nil, fmt.Errorf("decode agents response: expected data.agents or agents")
 }
 
-func chooseAgent(agents []userAgent, selector string, includeOffline bool) (userAgent, error) {
+func chooseAgent(agents []userAgent, name string, includeOffline bool) (userAgent, error) {
 	candidates := filterAgents(agents, includeOffline)
-	if selector != "" {
-		candidates = matchAgents(candidates, selector)
+	if name != "" {
+		candidates = matchAgentsByName(candidates, name)
 	}
 	switch len(candidates) {
 	case 0:
-		if selector != "" {
-			return userAgent{}, fmt.Errorf("no online agent matched %q", selector)
+		if name != "" {
+			return userAgent{}, fmt.Errorf("no online agent named %q", name)
 		}
 		return userAgent{}, fmt.Errorf("no online agents found")
 	case 1:
 		return candidates[0], nil
 	default:
-		return userAgent{}, fmt.Errorf("multiple online agents found; pass --agent-id or --agent")
+		if name != "" {
+			return userAgent{}, fmt.Errorf("multiple online agents named %q; pass --agent-id", name)
+		}
+		return userAgent{}, fmt.Errorf("multiple online agents found; pass --agent-id or --agent-name")
 	}
 }
 
@@ -653,34 +660,18 @@ func filterAgents(agents []userAgent, includeOffline bool) []userAgent {
 	return out
 }
 
-func matchAgents(agents []userAgent, selector string) []userAgent {
-	selector = strings.ToLower(strings.TrimSpace(selector))
-	if selector == "" {
+func matchAgentsByName(agents []userAgent, name string) []userAgent {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
 		return agents
 	}
-	var exact []userAgent
-	var partial []userAgent
+	out := make([]userAgent, 0, len(agents))
 	for _, agent := range agents {
-		fields := []string{agent.AgentID, agent.Name, agent.AgentType, agent.NodeID, agent.Hostname}
-		for _, field := range fields {
-			field = strings.ToLower(strings.TrimSpace(field))
-			if field == "" {
-				continue
-			}
-			if field == selector {
-				exact = append(exact, agent)
-				break
-			}
-			if strings.Contains(field, selector) {
-				partial = append(partial, agent)
-				break
-			}
+		if strings.ToLower(strings.TrimSpace(agent.Name)) == name {
+			out = append(out, agent)
 		}
 	}
-	if len(exact) > 0 {
-		return exact
-	}
-	return partial
+	return out
 }
 
 func printAgents(ui display, agents []userAgent, includeOffline bool) {

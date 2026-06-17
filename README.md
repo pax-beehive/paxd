@@ -322,14 +322,14 @@ go run ./cmd/acp-smoke \
 ```
 
 If exactly one online agent is visible, `cmd/acp-smoke` selects it automatically.
-When multiple online agents are visible, pass either the exact `--agent-id` or an
-`--agent` selector that matches id, name, type, node id, or hostname:
+When multiple online agents are visible, pass either the exact `--agent-id` or
+the agent's configured name with `--agent-name`:
 
 ```bash
 go run ./cmd/acp-smoke \
   --url "$PAX_CLOUD_URL" \
   --cookie "$PAX_COOKIE" \
-  --agent review \
+  --agent-name review \
   --interactive
 ```
 
@@ -338,7 +338,7 @@ For local pax-manager tests:
 ```bash
 go run ./cmd/acp-smoke \
   --url http://127.0.0.1:9879 \
-  --agent codex \
+  --agent-name codex \
   --user-email local@example.local
 ```
 

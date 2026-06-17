@@ -33,7 +33,7 @@ func TestChooseAgentAutoSelectsSingleOnlineAgent(t *testing.T) {
 	}
 }
 
-func TestChooseAgentMatchesSelector(t *testing.T) {
+func TestChooseAgentMatchesName(t *testing.T) {
 	got, err := chooseAgent([]userAgent{
 		{AgentID: "agent_codex", Name: "work", AgentType: "codex", Online: true},
 		{AgentID: "agent_claude", Name: "review", AgentType: "claude-code", Online: true},
@@ -43,6 +43,15 @@ func TestChooseAgentMatchesSelector(t *testing.T) {
 	}
 	if got.AgentID != "agent_claude" {
 		t.Fatalf("chooseAgent() = %#v", got)
+	}
+}
+
+func TestChooseAgentDoesNotMatchTypeAsName(t *testing.T) {
+	_, err := chooseAgent([]userAgent{
+		{AgentID: "agent_codex", Name: "work", AgentType: "codex", Online: true},
+	}, "codex", false)
+	if err == nil {
+		t.Fatal("chooseAgent() error = nil, want no matching name")
 	}
 }
 
