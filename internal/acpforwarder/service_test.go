@@ -1,6 +1,7 @@
 package acpforwarder
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,5 +70,21 @@ func TestNextReconnectBackoffResetsAfterConnectedTunnel(t *testing.T) {
 	got := nextReconnectBackoff(maxReconnectBackoff, initial, true)
 	if got != initial {
 		t.Fatalf("reset backoff = %s, want %s", got, initial)
+	}
+}
+
+func TestValidateRejectsMissingACPCommandExecutable(t *testing.T) {
+	s := New(Config{
+		CloudURL: "https://fleet.example.com",
+		APIKey:   "pax_key",
+		Command:  []string{"definitely-not-a-real-paxd-acp-command"},
+	})
+
+	err := s.validate()
+	if err == nil {
+		t.Fatal("validate() error = nil, want missing executable error")
+	}
+	if !strings.Contains(err.Error(), "not found in PATH") {
+		t.Fatalf("validate() error = %v", err)
 	}
 }
