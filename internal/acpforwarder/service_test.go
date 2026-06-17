@@ -1,6 +1,9 @@
 package acpforwarder
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTunnelURLFromHTTP(t *testing.T) {
 	tests := []struct {
@@ -45,5 +48,21 @@ func TestTunnelURLFromHTTP(t *testing.T) {
 func TestTunnelURLFromHTTPRejectsUnsupportedScheme(t *testing.T) {
 	if _, err := tunnelURLFromHTTP("ftp://fleet.example.com", "/tunnel"); err == nil {
 		t.Fatal("expected unsupported scheme error")
+	}
+}
+
+func TestValidateRejectsMissingACPCommandExecutable(t *testing.T) {
+	s := New(Config{
+		CloudURL: "https://fleet.example.com",
+		APIKey:   "pax_key",
+		Command:  []string{"definitely-not-a-real-paxd-acp-command"},
+	})
+
+	err := s.validate()
+	if err == nil {
+		t.Fatal("validate() error = nil, want missing executable error")
+	}
+	if !strings.Contains(err.Error(), "not found in PATH") {
+		t.Fatalf("validate() error = %v", err)
 	}
 }

@@ -96,6 +96,14 @@ func (s *Service) validate() error {
 	case len(s.cfg.Command) == 0:
 		return fmt.Errorf("acp command is required")
 	}
+	if !strings.ContainsAny(s.cfg.Command[0], `/\`) {
+		if _, err := exec.LookPath(s.cfg.Command[0]); err != nil {
+			return fmt.Errorf(
+				"acp command executable %q not found in PATH; install it or set agents[].acp_forwarder.command",
+				s.cfg.Command[0],
+			)
+		}
+	}
 	return nil
 }
 
