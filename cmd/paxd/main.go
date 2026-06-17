@@ -208,7 +208,7 @@ func cmdConfigure(args []string) {
 				OS:          runtime.GOOS,
 				Arch:        runtime.GOARCH,
 				PaxdVersion: version,
-				APIEndpoint: cfg.Hermes.APIEndpoint,
+				APIEndpoint: configureHermesAPIEndpoint(cfg, specs),
 			}
 		}
 
@@ -230,19 +230,21 @@ func cmdConfigure(args []string) {
 		}
 		enabled := true
 		newAgent := config.RuntimeAgentConfig{
-			AgentID:     resp.AgentID,
-			InstanceID:  firstNonEmpty(spec.InstanceID, spec.Name, resp.AgentID),
-			Name:        spec.Name,
-			AgentType:   spec.Harness,
-			APIEndpoint: cfg.Hermes.APIEndpoint,
-			APIKeyEnv:   cfg.Hermes.APIKeyEnv,
-			Profile:     cfg.Hermes.Profile,
-			Enabled:     &enabled,
+			AgentID:    resp.AgentID,
+			InstanceID: firstNonEmpty(spec.InstanceID, spec.Name, resp.AgentID),
+			Name:       spec.Name,
+			AgentType:  spec.Harness,
+			Enabled:    &enabled,
 			ACPForwarder: config.AgentACPForwarderConfig{
 				Enabled: &enabled,
 				Harness: spec.Harness,
 				Command: acpCommandForHarness(spec.Harness),
 			},
+		}
+		if supportsHermesHTTP(spec.Harness) {
+			newAgent.APIEndpoint = cfg.Hermes.APIEndpoint
+			newAgent.APIKeyEnv = cfg.Hermes.APIKeyEnv
+			newAgent.Profile = cfg.Hermes.Profile
 		}
 		cfg.Agents = append(cfg.Agents, newAgent)
 		if i == 0 && !*appendAgents {
@@ -911,14 +913,16 @@ func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
 			enabled = *runtimeAgent.Enabled
 		}
 		agent := &store.CloudAgent{
-			AgentID:     runtimeAgent.AgentID,
-			InstanceID:  firstNonEmpty(runtimeAgent.InstanceID, runtimeAgent.AgentID),
-			Name:        firstNonEmpty(runtimeAgent.Name, "hermes"),
-			AgentType:   firstNonEmpty(runtimeAgent.AgentType, "hermes"),
-			APIEndpoint: firstNonEmpty(runtimeAgent.APIEndpoint, cfg.Hermes.APIEndpoint),
-			APIKeyEnv:   firstNonEmpty(runtimeAgent.APIKeyEnv, cfg.Hermes.APIKeyEnv),
-			Profile:     runtimeAgent.Profile,
-			Enabled:     enabled,
+			AgentID:    runtimeAgent.AgentID,
+			InstanceID: firstNonEmpty(runtimeAgent.InstanceID, runtimeAgent.AgentID),
+			Name:       firstNonEmpty(runtimeAgent.Name, "hermes"),
+			AgentType:  firstNonEmpty(runtimeAgent.AgentType, "hermes"),
+			Enabled:    enabled,
+		}
+		if supportsHermesHTTP(agent.AgentType) {
+			agent.APIEndpoint = firstNonEmpty(runtimeAgent.APIEndpoint, cfg.Hermes.APIEndpoint)
+			agent.APIKeyEnv = firstNonEmpty(runtimeAgent.APIKeyEnv, cfg.Hermes.APIKeyEnv)
+			agent.Profile = runtimeAgent.Profile
 		}
 		if err := db.SaveCloudAgent(agent); err != nil {
 			return err
@@ -1064,6 +1068,27 @@ func normalizeHarness(harness string) string {
 
 func supportsHermesHTTP(agentType string) bool {
 	return normalizeHarness(agentType) == "hermes"
+}
+
+func configureHermesAPIEndpoint(cfg *config.Config, specs []configureAgentSpec) string {
+	for _, spec := range specs {
+		if supportsHermesHTTP(spec.Harness) {
+			return cfg.Hermes.APIEndpoint
+		}
+	}
+	return ""
+}
+
+func configUsesHermesHTTP(cfg *config.Config) bool {
+	if len(cfg.Agents) == 0 {
+		return true
+	}
+	for _, agent := range cfg.Agents {
+		if supportsHermesHTTP(agent.AgentType) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeConfigureHarness(harness string) string {
@@ -1271,10 +1296,12 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 			yamlQuote(cfg.Cloud.CFClientID),
 			yamlQuote(cfg.Cloud.CFClientSecret)))
 	}
-	sb.WriteString(fmt.Sprintf("hermes:\n  api_endpoint: %s\n  api_key_from_env: %s\n  profile: %s\n",
-		yamlQuote(cfg.Hermes.APIEndpoint),
-		yamlQuote(cfg.Hermes.APIKeyEnv),
-		yamlQuote(cfg.Hermes.Profile)))
+	if configUsesHermesHTTP(cfg) {
+		sb.WriteString(fmt.Sprintf("hermes:\n  api_endpoint: %s\n  api_key_from_env: %s\n  profile: %s\n",
+			yamlQuote(cfg.Hermes.APIEndpoint),
+			yamlQuote(cfg.Hermes.APIKeyEnv),
+			yamlQuote(cfg.Hermes.Profile)))
+	}
 	if len(cfg.Agents) > 0 {
 		sb.WriteString("agents:\n")
 		for _, agent := range cfg.Agents {
@@ -1282,15 +1309,18 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 			if agent.Enabled != nil {
 				enabled = *agent.Enabled
 			}
-			sb.WriteString(fmt.Sprintf("  - agent_id: %s\n    instance_id: %s\n    name: %s\n    agent_type: %s\n    api_endpoint: %s\n    api_key_from_env: %s\n    profile: %s\n    enabled: %t\n",
+			sb.WriteString(fmt.Sprintf("  - agent_id: %s\n    instance_id: %s\n    name: %s\n    agent_type: %s\n",
 				yamlQuote(agent.AgentID),
 				yamlQuote(agent.InstanceID),
 				yamlQuote(agent.Name),
-				yamlQuote(agent.AgentType),
-				yamlQuote(agent.APIEndpoint),
-				yamlQuote(agent.APIKeyEnv),
-				yamlQuote(agent.Profile),
-				enabled))
+				yamlQuote(agent.AgentType)))
+			if supportsHermesHTTP(agent.AgentType) {
+				sb.WriteString(fmt.Sprintf("    api_endpoint: %s\n    api_key_from_env: %s\n    profile: %s\n",
+					yamlQuote(agent.APIEndpoint),
+					yamlQuote(agent.APIKeyEnv),
+					yamlQuote(agent.Profile)))
+			}
+			sb.WriteString(fmt.Sprintf("    enabled: %t\n", enabled))
 			if agentACPForwarderConfigSet(agent.ACPForwarder) {
 				sb.WriteString("    acp_forwarder:\n")
 				if agent.ACPForwarder.Enabled != nil {
