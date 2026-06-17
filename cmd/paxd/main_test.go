@@ -207,6 +207,91 @@ func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
 	}
 }
 
+func TestYAMLMarshalOmitsHermesEndpointForACPOnlyAgents(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Agent: config.AgentConfig{Name: "node"},
+		Cloud: config.CloudConfig{
+			APIURL: "https://app.example.com",
+			NodeID: "node_123",
+			APIKey: "pax_key",
+		},
+		Hermes: config.HermesConfig{
+			APIEndpoint: "http://localhost:8642",
+			APIKeyEnv:   "~/.hermes/.env",
+			Profile:     "work",
+		},
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_codex",
+			InstanceID: "codex-main",
+			Name:       "codex-main",
+			AgentType:  "codex",
+			Enabled:    &enabled,
+		}},
+	}
+
+	data, err := yamlMarshal(cfg)
+	if err != nil {
+		t.Fatalf("yamlMarshal() error = %v", err)
+	}
+	text := string(data)
+	for _, unexpected := range []string{
+		"hermes:",
+		"api_endpoint:",
+		"api_key_from_env:",
+		"profile:",
+		"http://localhost:8642",
+	} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("yaml contains %q:\n%s", unexpected, text)
+		}
+	}
+}
+
+func TestYAMLMarshalKeepsHermesEndpointForHermesAgent(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Agent: config.AgentConfig{Name: "node"},
+		Cloud: config.CloudConfig{
+			APIURL: "https://app.example.com",
+			NodeID: "node_123",
+			APIKey: "pax_key",
+		},
+		Hermes: config.HermesConfig{
+			APIEndpoint: "http://localhost:8642",
+			APIKeyEnv:   "~/.hermes/.env",
+		},
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:     "agent_hermes",
+			InstanceID:  "hermes-main",
+			Name:        "hermes-main",
+			AgentType:   "hermes",
+			APIEndpoint: "http://localhost:8642",
+			APIKeyEnv:   "~/.hermes/.env",
+			Enabled:     &enabled,
+		}},
+	}
+
+	data, err := yamlMarshal(cfg)
+	if err != nil {
+		t.Fatalf("yamlMarshal() error = %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "hermes:") || !strings.Contains(text, "api_endpoint: \"http://localhost:8642\"") {
+		t.Fatalf("yaml missing hermes endpoint:\n%s", text)
+	}
+}
+
+func TestConfigureHermesAPIEndpointOnlyForHermesSpecs(t *testing.T) {
+	cfg := &config.Config{Hermes: config.HermesConfig{APIEndpoint: "http://localhost:8642"}}
+	if got := configureHermesAPIEndpoint(cfg, []configureAgentSpec{{Harness: "codex"}}); got != "" {
+		t.Fatalf("configureHermesAPIEndpoint(codex) = %q", got)
+	}
+	if got := configureHermesAPIEndpoint(cfg, []configureAgentSpec{{Harness: "hermes"}}); got != "http://localhost:8642" {
+		t.Fatalf("configureHermesAPIEndpoint(hermes) = %q", got)
+	}
+}
+
 func TestConfigureWouldReplaceExistingAgents(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paxd.yaml")

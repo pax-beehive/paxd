@@ -234,11 +234,6 @@ cloud:
   cf_client_id: ""            # Cloudflare Access service token（可选）
   cf_client_secret: ""        # Cloudflare Access service token（可选）
 
-hermes:
-  api_endpoint: http://localhost:8642
-  api_key_from_env: ~/.hermes/.env  # Hermes API key 存放的文件路径
-  profile: ""                # Hermes profile 名称（可选）
-
 agents:
   - agent_id: agent_codex
     instance_id: codex-main
@@ -275,6 +270,8 @@ acp_forwarder:
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
 ```
+
+只有 `agent_type: hermes` 的 legacy/Hermes HTTP agent 需要 `hermes.api_endpoint`、`api_key_from_env` 和 `profile`；Codex/Claude/Gemini ACP agent 不需要这些字段。
 
 ### Hermes API Key
 
