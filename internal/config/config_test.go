@@ -74,3 +74,55 @@ func TestLoadAcceptsSmokeTestEnvAliases(t *testing.T) {
 		t.Fatalf("RuntimeAgents()[0].InstanceID = %q", got)
 	}
 }
+
+func TestLoadAcceptsPerAgentACPForwarderConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "paxd.yaml")
+	body := []byte(`
+cloud:
+  api_url: https://app.example.com
+  api_key: pax_key
+acp_forwarder:
+  enabled: true
+  tunnel_path: /api/v1/agent/tunnel
+agents:
+  - agent_id: agent_codex
+    instance_id: codex-main
+    name: codex-main
+    agent_type: codex
+    enabled: true
+    acp_forwarder:
+      harness: codex
+      command: ["codex-acp"]
+  - agent_id: agent_review
+    instance_id: review
+    name: reviewer
+    agent_type: claude-code
+    enabled: true
+    acp_forwarder:
+      harness: claude-code
+      command: ["claude-agent-acp"]
+      reconnect_interval: 7s
+`)
+	if err := os.WriteFile(configPath, body, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	agents := cfg.RuntimeAgents()
+	if len(agents) != 2 {
+		t.Fatalf("len(RuntimeAgents()) = %d, want 2", len(agents))
+	}
+	if got := agents[0].ACPForwarder.Command; len(got) != 1 || got[0] != "codex-acp" {
+		t.Fatalf("codex command = %#v", got)
+	}
+	if agents[1].ACPForwarder.Harness != "claude-code" {
+		t.Fatalf("claude harness = %q", agents[1].ACPForwarder.Harness)
+	}
+	if agents[1].ACPForwarder.ReconnectInterval != 7*time.Second {
+		t.Fatalf("claude reconnect = %s", agents[1].ACPForwarder.ReconnectInterval)
+	}
+}

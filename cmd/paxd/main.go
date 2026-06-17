@@ -119,9 +119,17 @@ func cmdConfigure(args []string) {
 	harness := fs.String("harness", "codex", "Default ACP harness when --agent is omitted")
 	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
 	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
+	appendAgents := fs.Bool("append", false, "Append newly registered agents instead of replacing agents")
+	assumeYes := fs.Bool("y", false, "Assume yes for destructive configure prompts")
+	fs.BoolVar(assumeYes, "yes", false, "Assume yes for destructive configure prompts")
 	var agentFlags stringListFlag
 	fs.Var(&agentFlags, "agent", "Agent spec name:harness[:instance_id], repeatable")
 	fs.Parse(args)
+
+	targetPath := *configPath
+	if targetPath == "" {
+		targetPath = config.DefaultPath()
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -171,7 +179,18 @@ func cmdConfigure(args []string) {
 		os.Exit(1)
 	}
 
-	cfg.Agents = cfg.Agents[:0]
+	if !*appendAgents && configureWouldReplaceExistingAgents(targetPath, cfg) && !*assumeYes {
+		if !confirmReplaceConfigure(targetPath, cfg.RuntimeAgents()) {
+			fmt.Fprintln(os.Stderr, "configure cancelled")
+			os.Exit(1)
+		}
+	}
+
+	if *appendAgents {
+		cfg.Agents = explicitAgentsForAppend(cfg)
+	} else {
+		cfg.Agents = cfg.Agents[:0]
+	}
 	for i, spec := range specs {
 		regToken := ""
 		req := &cloud.RegisterNodeAgentRequest{
@@ -210,7 +229,7 @@ func cmdConfigure(args []string) {
 			log.Fatalf("register agent %s: response missing agent_id", spec.Name)
 		}
 		enabled := true
-		cfg.Agents = append(cfg.Agents, config.RuntimeAgentConfig{
+		newAgent := config.RuntimeAgentConfig{
 			AgentID:     resp.AgentID,
 			InstanceID:  firstNonEmpty(spec.InstanceID, spec.Name, resp.AgentID),
 			Name:        spec.Name,
@@ -219,24 +238,30 @@ func cmdConfigure(args []string) {
 			APIKeyEnv:   cfg.Hermes.APIKeyEnv,
 			Profile:     cfg.Hermes.Profile,
 			Enabled:     &enabled,
-		})
-		if i == 0 {
+			ACPForwarder: config.AgentACPForwarderConfig{
+				Enabled: &enabled,
+				Harness: spec.Harness,
+				Command: acpCommandForHarness(spec.Harness),
+			},
+		}
+		cfg.Agents = append(cfg.Agents, newAgent)
+		if i == 0 && !*appendAgents {
 			cfg.Agent.AgentID = resp.AgentID
 			cfg.AgentID = resp.AgentID
 			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
 			cfg.ACPForwarder.Enabled = true
 			cfg.ACPForwarder.Harness = spec.Harness
 			cfg.ACPForwarder.Command = acpCommandForHarness(spec.Harness)
+		} else if cfg.Agent.AgentID == "" {
+			cfg.Agent.AgentID = resp.AgentID
+			cfg.AgentID = resp.AgentID
+			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
 		}
 		fmt.Printf("Registered agent: %s (%s) -> %s\n", spec.Name, spec.Harness, resp.AgentID)
 	}
 	cfg.Cloud.APIKey = nodeAPIKey
 	cfg.Cloud.RegistrationToken = ""
 
-	targetPath := *configPath
-	if targetPath == "" {
-		targetPath = config.DefaultPath()
-	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
 		log.Fatalf("create config dir: %v", err)
 	}
@@ -384,6 +409,14 @@ func cmdRun(args []string) {
 
 	// Check Hermes reachability
 	for _, runtime := range runtimes {
+		if !runtime.SupportsHermesHTTP {
+			log.Printf(
+				"[paxd] ACP agent %s (%s) does not use Hermes HTTP health checks",
+				runtime.Agent.AgentID,
+				runtime.Agent.AgentType,
+			)
+			continue
+		}
 		if err := runtime.HermesClient.Ping(); err != nil {
 			log.Printf(
 				"[paxd] WARNING: Hermes not reachable for agent %s: %v",
@@ -408,24 +441,16 @@ func cmdRun(args []string) {
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
-	if cfg.ACPForwarder.Enabled {
-		forwardCfg := acpForwarderConfig(cfg, nodeState)
-		go func() {
-			if err := acpforwarder.New(forwardCfg).Run(sm.Context()); err != nil &&
-				sm.Context().Err() == nil {
-				log.Printf("[paxd] acp forwarder stopped: %v", err)
-			}
-		}()
-		log.Printf("[paxd] ACP forwarder enabled (tunnel=%s, command=%q)",
-			forwardCfg.TunnelPath,
-			forwardCfg.Command)
-	}
+	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState)
 	log.Printf("[paxd] RUNNING (node=%s, agents=%d, poll=%s, status=%s, orphan=%s)",
 		nodeState.NodeID,
 		len(runtimes),
 		cfg.Daemon.PollInterval,
 		cfg.Daemon.StatusInterval,
 		cfg.Daemon.ReconcileInterval)
+	if forwarderCount > 0 {
+		log.Printf("[paxd] ACP forwarders running: %d", forwarderCount)
+	}
 
 	// Main loop: mailbox polling, status reporting, and orphan reconciliation.
 	pollTicker := time.NewTicker(cfg.Daemon.PollInterval)
@@ -545,6 +570,7 @@ func cmdACPForward(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	cfg.ACPForwarder.Enabled = true
 	forwardCfg := acpForwarderConfig(cfg, nodeState)
 	log.Printf("[paxd] ACP forwarder starting (tunnel=%s, command=%q)",
 		forwardCfg.TunnelPath,
@@ -919,32 +945,89 @@ func buildAgentRuntimes(
 		}
 		hermesClient := hermes.NewClient(agent.APIEndpoint, apiKey)
 		runtimes = append(runtimes, collector.AgentRuntime{
-			Agent:        agent,
-			HermesClient: hermesClient,
+			Agent:              agent,
+			HermesClient:       hermesClient,
+			SupportsHermesHTTP: supportsHermesHTTP(agent.AgentType),
 		})
 		executors[agent.AgentID] = executor.New(hermesClient, cloudClient, db, agent.AgentID)
 	}
 	return runtimes, executors, nil
 }
 
+func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *store.NodeState) int {
+	count := 0
+	for _, agent := range cfg.RuntimeAgents() {
+		forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
+		if !ok {
+			continue
+		}
+		count++
+		go func(forwardCfg acpforwarder.Config) {
+			log.Printf(
+				"[paxd] ACP forwarder enabled for agent %s instance %s (tunnel=%s, command=%q)",
+				forwardCfg.AgentID,
+				forwardCfg.InstanceID,
+				forwardCfg.TunnelPath,
+				forwardCfg.Command,
+			)
+			if err := acpforwarder.New(forwardCfg).Run(ctx); err != nil && ctx.Err() == nil {
+				log.Printf(
+					"[paxd] acp forwarder stopped for agent %s instance %s: %v",
+					forwardCfg.AgentID,
+					forwardCfg.InstanceID,
+					err,
+				)
+			}
+		}(forwardCfg)
+	}
+	return count
+}
+
 func acpForwarderConfig(cfg *config.Config, nodeState *store.NodeState) acpforwarder.Config {
 	agent := firstEnabledRuntimeAgent(cfg)
+	forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
+	if ok {
+		return forwardCfg
+	}
+	return acpforwarder.Config{}
+}
+
+func agentACPForwarderConfig(
+	cfg *config.Config,
+	nodeState *store.NodeState,
+	agent config.RuntimeAgentConfig,
+) (acpforwarder.Config, bool) {
+	if !runtimeAgentEnabled(agent) || agent.AgentID == "" {
+		return acpforwarder.Config{}, false
+	}
+	enabled := cfg.ACPForwarder.Enabled
+	if agent.ACPForwarder.Enabled != nil {
+		enabled = *agent.ACPForwarder.Enabled
+	}
+	if !enabled {
+		return acpforwarder.Config{}, false
+	}
+
+	harness := firstNonEmpty(agent.ACPForwarder.Harness, cfg.ACPForwarder.Harness, agent.AgentType)
 	command := cfg.ACPForwarder.Command
+	if len(agent.ACPForwarder.Command) > 0 {
+		command = agent.ACPForwarder.Command
+	}
 	if len(command) == 0 {
-		command = acpCommandForHarness(firstNonEmpty(cfg.ACPForwarder.Harness, agent.AgentType))
+		command = acpCommandForHarness(harness)
 	}
 	return acpforwarder.Config{
 		CloudURL:          firstNonEmpty(nodeState.CloudAPIURL, cfg.Cloud.APIURL),
 		APIKey:            firstNonEmpty(nodeState.CloudAPIKey, cfg.Cloud.APIKey),
 		CFClientID:        cfg.Cloud.CFClientID,
 		CFClientSecret:    cfg.Cloud.CFClientSecret,
-		AgentID:           firstNonEmpty(agent.AgentID, cfg.Agent.AgentID),
+		AgentID:           agent.AgentID,
 		InstanceID:        agent.InstanceID,
 		Command:           command,
-		WorkingDir:        cfg.ACPForwarder.WorkingDir,
-		TunnelPath:        cfg.ACPForwarder.TunnelPath,
-		ReconnectInterval: cfg.ACPForwarder.ReconnectInterval,
-	}
+		WorkingDir:        firstNonEmpty(agent.ACPForwarder.WorkingDir, cfg.ACPForwarder.WorkingDir),
+		TunnelPath:        firstNonEmpty(agent.ACPForwarder.TunnelPath, cfg.ACPForwarder.TunnelPath),
+		ReconnectInterval: firstNonZeroDuration(agent.ACPForwarder.ReconnectInterval, cfg.ACPForwarder.ReconnectInterval),
+	}, true
 }
 
 func acpCommandForHarness(harness string) []string {
@@ -977,6 +1060,10 @@ func normalizeHarness(harness string) string {
 	harness = strings.ToLower(strings.TrimSpace(harness))
 	harness = strings.ReplaceAll(harness, "_", "-")
 	return harness
+}
+
+func supportsHermesHTTP(agentType string) bool {
+	return normalizeHarness(agentType) == "hermes"
 }
 
 func normalizeConfigureHarness(harness string) string {
@@ -1034,13 +1121,68 @@ func promptLine(prompt string) string {
 	return strings.TrimSpace(text)
 }
 
+func configureWouldReplaceExistingAgents(path string, cfg *config.Config) bool {
+	if !configFileExists(path) {
+		return false
+	}
+	return len(cfg.Agents) > 0 || cfg.Agent.AgentID != "" || cfg.AgentID != ""
+}
+
+func configFileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func explicitAgentsForAppend(cfg *config.Config) []config.RuntimeAgentConfig {
+	if len(cfg.Agents) > 0 {
+		return append([]config.RuntimeAgentConfig(nil), cfg.Agents...)
+	}
+	agents := cfg.RuntimeAgents()
+	if len(agents) == 0 || agents[0].AgentID == "" {
+		return nil
+	}
+	return agents
+}
+
+func confirmReplaceConfigure(path string, agents []config.RuntimeAgentConfig) bool {
+	fmt.Fprintf(os.Stderr, "paxd configure will replace existing agents in %s.\n", path)
+	for _, agent := range agents {
+		if agent.AgentID == "" {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  - %s (%s, instance=%s)\n",
+			agent.AgentID,
+			firstNonEmpty(agent.AgentType, "unknown"),
+			firstNonEmpty(agent.InstanceID, "default"),
+		)
+	}
+	answer := strings.ToLower(promptLine("Continue? [y/N]: "))
+	return answer == "y" || answer == "yes"
+}
+
 func firstEnabledRuntimeAgent(cfg *config.Config) config.RuntimeAgentConfig {
 	for _, agent := range cfg.RuntimeAgents() {
-		if agent.Enabled == nil || *agent.Enabled {
+		if runtimeAgentEnabled(agent) {
 			return agent
 		}
 	}
 	return config.RuntimeAgentConfig{}
+}
+
+func runtimeAgentEnabled(agent config.RuntimeAgentConfig) bool {
+	return agent.Enabled == nil || *agent.Enabled
+}
+
+func firstNonZeroDuration(values ...time.Duration) time.Duration {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func hermesAPIKey(path string) (string, error) {
@@ -1108,10 +1250,15 @@ func cmdInstallService() {
 func yamlMarshal(cfg *config.Config) ([]byte, error) {
 	var sb strings.Builder
 	sb.WriteString("# paxd configuration\n")
-	sb.WriteString(fmt.Sprintf("agent_id: %s\n", yamlQuote(cfg.AgentID)))
-	sb.WriteString(fmt.Sprintf("instance_id: %s\n", yamlQuote(cfg.InstanceID)))
-	sb.WriteString(fmt.Sprintf("agent:\n  agent_id: %s\n  name: %s\n  machine_type: %s\n  hostname: %s\n",
-		yamlQuote(cfg.Agent.AgentID),
+	if len(cfg.Agents) == 0 {
+		sb.WriteString(fmt.Sprintf("agent_id: %s\n", yamlQuote(cfg.AgentID)))
+		sb.WriteString(fmt.Sprintf("instance_id: %s\n", yamlQuote(cfg.InstanceID)))
+	}
+	sb.WriteString("agent:\n")
+	if len(cfg.Agents) == 0 {
+		sb.WriteString(fmt.Sprintf("  agent_id: %s\n", yamlQuote(cfg.Agent.AgentID)))
+	}
+	sb.WriteString(fmt.Sprintf("  name: %s\n  machine_type: %s\n  hostname: %s\n",
 		yamlQuote(cfg.Agent.Name),
 		yamlQuote(cfg.Agent.MachineType),
 		yamlQuote(cfg.Agent.Hostname)))
@@ -1144,6 +1291,27 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 				yamlQuote(agent.APIKeyEnv),
 				yamlQuote(agent.Profile),
 				enabled))
+			if agentACPForwarderConfigSet(agent.ACPForwarder) {
+				sb.WriteString("    acp_forwarder:\n")
+				if agent.ACPForwarder.Enabled != nil {
+					sb.WriteString(fmt.Sprintf("      enabled: %t\n", *agent.ACPForwarder.Enabled))
+				}
+				if agent.ACPForwarder.Harness != "" {
+					sb.WriteString(fmt.Sprintf("      harness: %s\n", yamlQuote(agent.ACPForwarder.Harness)))
+				}
+				if len(agent.ACPForwarder.Command) > 0 {
+					sb.WriteString(fmt.Sprintf("      command: %s\n", yamlStringList(agent.ACPForwarder.Command)))
+				}
+				if agent.ACPForwarder.WorkingDir != "" {
+					sb.WriteString(fmt.Sprintf("      working_dir: %s\n", yamlQuote(agent.ACPForwarder.WorkingDir)))
+				}
+				if agent.ACPForwarder.TunnelPath != "" {
+					sb.WriteString(fmt.Sprintf("      tunnel_path: %s\n", yamlQuote(agent.ACPForwarder.TunnelPath)))
+				}
+				if agent.ACPForwarder.ReconnectInterval > 0 {
+					sb.WriteString(fmt.Sprintf("      reconnect_interval: %s\n", agent.ACPForwarder.ReconnectInterval))
+				}
+			}
 		}
 	}
 	sb.WriteString(fmt.Sprintf("daemon:\n  poll_interval: %s\n  status_interval: %s\n  reconcile_interval: %s\n  log_level: %s\n  db_path: %s\n",
@@ -1160,6 +1328,15 @@ func yamlMarshal(cfg *config.Config) ([]byte, error) {
 		yamlQuote(cfg.ACPForwarder.TunnelPath),
 		cfg.ACPForwarder.ReconnectInterval))
 	return []byte(sb.String()), nil
+}
+
+func agentACPForwarderConfigSet(cfg config.AgentACPForwarderConfig) bool {
+	return cfg.Enabled != nil ||
+		cfg.Harness != "" ||
+		len(cfg.Command) > 0 ||
+		cfg.WorkingDir != "" ||
+		cfg.TunnelPath != "" ||
+		cfg.ReconnectInterval > 0
 }
 
 func yamlQuote(value string) string {

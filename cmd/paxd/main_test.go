@@ -1,8 +1,14 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/store"
 )
 
 func TestPostmanTunnelURL(t *testing.T) {
@@ -90,5 +96,175 @@ func TestParseConfigureAgentSpecsMultiple(t *testing.T) {
 	}
 	if got[1].Name != "review" || got[1].Harness != "claude-code" || got[1].InstanceID != "review" {
 		t.Fatalf("got[1] = %#v", got[1])
+	}
+}
+
+func TestAgentACPForwarderConfigUsesPerAgentHarness(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Cloud: config.CloudConfig{
+			APIURL:         "https://app.example.com",
+			APIKey:         "node_key",
+			CFClientID:     "cf_id",
+			CFClientSecret: "cf_secret",
+		},
+		ACPForwarder: config.ACPForwarderConfig{
+			Enabled:           true,
+			TunnelPath:        "/api/v1/agent/tunnel",
+			ReconnectInterval: 2 * time.Second,
+		},
+	}
+	node := &store.NodeState{
+		CloudAPIURL: "https://node.example.com",
+		CloudAPIKey: "stored_node_key",
+	}
+	agent := config.RuntimeAgentConfig{
+		AgentID:    "agent_review",
+		InstanceID: "review",
+		AgentType:  "claude-code",
+		Enabled:    &enabled,
+		ACPForwarder: config.AgentACPForwarderConfig{
+			Harness:           "claude-code",
+			ReconnectInterval: 7 * time.Second,
+		},
+	}
+
+	got, ok := agentACPForwarderConfig(cfg, node, agent)
+	if !ok {
+		t.Fatal("agentACPForwarderConfig() disabled, want enabled")
+	}
+	if got.AgentID != "agent_review" || got.InstanceID != "review" {
+		t.Fatalf("agent identity = %s/%s", got.AgentID, got.InstanceID)
+	}
+	if got.CloudURL != "https://node.example.com" || got.APIKey != "stored_node_key" {
+		t.Fatalf("cloud auth = %s/%s", got.CloudURL, got.APIKey)
+	}
+	if got.ReconnectInterval != 7*time.Second {
+		t.Fatalf("ReconnectInterval = %s", got.ReconnectInterval)
+	}
+	if command := strings.Join(got.Command, " "); !strings.Contains(command, "@agentclientprotocol/claude-agent-acp") {
+		t.Fatalf("command = %#v", got.Command)
+	}
+}
+
+func TestAgentACPForwarderConfigCanDisableOneAgent(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{ACPForwarder: config.ACPForwarderConfig{Enabled: true}}
+	agent := config.RuntimeAgentConfig{
+		AgentID:   "agent_disabled",
+		AgentType: "codex",
+		ACPForwarder: config.AgentACPForwarderConfig{
+			Enabled: &disabled,
+		},
+	}
+
+	if _, ok := agentACPForwarderConfig(cfg, &store.NodeState{}, agent); ok {
+		t.Fatal("agentACPForwarderConfig() enabled disabled agent")
+	}
+}
+
+func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		AgentID:    "legacy_agent",
+		InstanceID: "legacy_instance",
+		Agent: config.AgentConfig{
+			AgentID:     "legacy_agent",
+			Name:        "node",
+			MachineType: "unknown",
+			Hostname:    "host",
+		},
+		Cloud: config.CloudConfig{
+			APIURL: "https://app.example.com",
+			NodeID: "node_123",
+			APIKey: "pax_key",
+		},
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_codex",
+			InstanceID: "codex-main",
+			Name:       "codex-main",
+			AgentType:  "codex",
+			Enabled:    &enabled,
+		}},
+	}
+
+	data, err := yamlMarshal(cfg)
+	if err != nil {
+		t.Fatalf("yamlMarshal() error = %v", err)
+	}
+	text := string(data)
+	for _, legacy := range []string{
+		"\nagent_id: \"legacy_agent\"",
+		"instance_id: \"legacy_instance\"",
+		"agent:\n  agent_id:",
+	} {
+		if strings.Contains(text, legacy) {
+			t.Fatalf("yaml contains legacy shorthand %q:\n%s", legacy, text)
+		}
+	}
+	if !strings.Contains(text, "agents:\n  - agent_id: \"agent_codex\"") {
+		t.Fatalf("yaml missing agents list:\n%s", text)
+	}
+}
+
+func TestConfigureWouldReplaceExistingAgents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paxd.yaml")
+	cfg := &config.Config{
+		Agents: []config.RuntimeAgentConfig{{AgentID: "agent_existing"}},
+	}
+
+	if configureWouldReplaceExistingAgents(path, cfg) {
+		t.Fatal("configureWouldReplaceExistingAgents() = true for missing file")
+	}
+	if err := os.WriteFile(path, []byte("agents: []\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if !configureWouldReplaceExistingAgents(path, cfg) {
+		t.Fatal("configureWouldReplaceExistingAgents() = false for existing agents")
+	}
+	if configureWouldReplaceExistingAgents(path, &config.Config{}) {
+		t.Fatal("configureWouldReplaceExistingAgents() = true for no configured agents")
+	}
+}
+
+func TestExplicitAgentsForAppendPreservesExistingAgents(t *testing.T) {
+	cfg := &config.Config{
+		Agents: []config.RuntimeAgentConfig{{
+			AgentID:    "agent_existing",
+			InstanceID: "existing",
+			AgentType:  "codex",
+		}},
+	}
+
+	got := explicitAgentsForAppend(cfg)
+	if len(got) != 1 || got[0].AgentID != "agent_existing" {
+		t.Fatalf("explicitAgentsForAppend() = %#v", got)
+	}
+	got[0].AgentID = "mutated"
+	if cfg.Agents[0].AgentID != "agent_existing" {
+		t.Fatalf("explicitAgentsForAppend() returned backing slice")
+	}
+}
+
+func TestExplicitAgentsForAppendConvertsLegacyAgent(t *testing.T) {
+	cfg := &config.Config{
+		AgentID:    "agent_legacy",
+		InstanceID: "legacy",
+		Agent: config.AgentConfig{
+			AgentID: "agent_legacy",
+			Name:    "legacy-agent",
+		},
+		Hermes: config.HermesConfig{
+			APIEndpoint: "http://localhost:8642",
+		},
+	}
+
+	got := explicitAgentsForAppend(cfg)
+	if len(got) != 1 {
+		t.Fatalf("len(explicitAgentsForAppend()) = %d", len(got))
+	}
+	if got[0].AgentID != "agent_legacy" || got[0].InstanceID != "legacy" || got[0].AgentType != "hermes" {
+		t.Fatalf("explicitAgentsForAppend() = %#v", got[0])
 	}
 }

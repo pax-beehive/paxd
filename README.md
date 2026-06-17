@@ -121,14 +121,14 @@ launchctl load ~/Library/LaunchAgents/com.toddzheng.paxd.plist
 先探测这台机器已有的 harness 和 adapter：
 
 ```bash
-scripts/paxd-bootstrap detect
+paxd harnesses
 ```
 
-安装 Codex / Claude Code 的 ACP adapter（二选一或都装）。这只安装 adapter，不安装 Codex/Claude 本体，也不配置订阅或登录态：
+如果 `paxd harnesses` 显示 Codex / Claude Code adapter 不可用，先按 adapter 项目文档安装；这一步不由 paxd 管理，也不配置 Codex/Claude 本体、订阅或登录态：
 
 ```bash
-scripts/paxd-bootstrap install-adapter --harness codex --yes
-scripts/paxd-bootstrap install-adapter --harness claude-code --yes
+npm install -g @zed-industries/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
 写入 `~/.paxd/paxd.yaml`。新机器只需要 `registration_token`，`node_id`、node `api_key`、`agent_id` 都由 paxd 通过 pax-manager 创建并写回：
@@ -150,16 +150,25 @@ paxd configure \
   --agent review:claude-code:review
 ```
 
-如果 `~/.paxd/paxd.yaml` 已经有 `cloud.api_key`，再次运行 `paxd configure` 会复用这个 node key 注册新的 agent，并替换本地 `agents` 配置；不会复用旧的 `agent_id`。
+`paxd configure` 默认是 replace 语义：会把本地 `agents` 列表替换成本次命令注册出来的 agents。检测到已有 `~/.paxd/paxd.yaml` 且即将覆盖现有 agents 时，会要求确认；自动化脚本可以加 `-y` 或 `--yes` 跳过确认。
+
+如果只想给已配置好的 node 增加 agent，用 `--append`。这种情况下会复用现有 `cloud.api_key` 注册新 agent，并把新 agent 追加到本地 `agents` 列表；不会复用旧的 `agent_id`。
+
+```bash
+paxd configure \
+  --cloud-url https://app.example.com \
+  --append \
+  --agent review:claude-code:review
+```
 
 直接启动 forwarder，不写配置：
 
 ```bash
-scripts/paxd-bootstrap run \
-  --harness codex \
-  --cloud-url https://app.example.com \
-  --api-key pax_node_key_here \
-  --agent-id agent_xxx
+PAX_CLOUD_URL=https://app.example.com \
+PAX_API_KEY=pax_node_key_here \
+PAX_AGENT_ID=agent_xxx \
+PAX_ACP_HARNESS=codex \
+paxd acp-forward
 ```
 
 如果 pax-manager 的机器侧 tunnel 也经过 Cloudflare Access，再加 `--cf-client-id` 和 `--cf-client-secret`。
@@ -208,7 +217,7 @@ ACP harness 预设：
 | `gemini` | `gemini --acp` |
 | `custom` | 必须显式配置 `command` |
 
-`--command` 或 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API。
+`agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
 
 ## 配置
 
@@ -230,6 +239,27 @@ hermes:
   api_key_from_env: ~/.hermes/.env  # Hermes API key 存放的文件路径
   profile: ""                # Hermes profile 名称（可选）
 
+agents:
+  - agent_id: agent_codex
+    instance_id: codex-main
+    name: codex-main
+    agent_type: codex
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: codex
+      command: ["codex-acp"]  # 未安装时 configure 会写 npx fallback
+
+  - agent_id: agent_review
+    instance_id: review
+    name: reviewer
+    agent_type: claude-code
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: claude-code
+      command: ["claude-agent-acp"]
+
 daemon:
   poll_interval: 5s
   status_interval: 10s
@@ -238,9 +268,9 @@ daemon:
   db_path: ~/.paxd/paxd.db
 
 acp_forwarder:
-  enabled: false
-  harness: hermes
-  command: []                 # optional override; e.g. ["codex-acp"]
+  enabled: true               # 默认是否为 enabled agent 启动 ACP forwarder
+  harness: ""                 # 可作为 agents[].acp_forwarder.harness 的默认值
+  command: []                 # 可作为 agents[].acp_forwarder.command 的默认值
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s

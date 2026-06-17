@@ -27,8 +27,9 @@ type Collector struct {
 
 // AgentRuntime binds one cloud agent to a local Hermes client.
 type AgentRuntime struct {
-	Agent        store.CloudAgent
-	HermesClient *hermes.Client
+	Agent              store.CloudAgent
+	HermesClient       *hermes.Client
+	SupportsHermesHTTP bool
 }
 
 // New creates a new Collector.
@@ -52,31 +53,33 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 	agentStatuses := make([]cloud.AgentStatus, 0, len(c.agents))
 	sessionCount := 0
 	for _, runtime := range c.agents {
-		sessions, err := runtime.HermesClient.GetSessions()
-		if err != nil {
-			log.Printf(
-				"[collector] get sessions for agent %s (non-fatal): %v",
-				runtime.Agent.AgentID,
-				err,
-			)
-			sessions = nil
+		var sessionStatuses []cloud.SessionStatus
+		if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
+			hermesSessions, err := runtime.HermesClient.GetSessions()
+			if err != nil {
+				log.Printf(
+					"[collector] get sessions for agent %s (non-fatal): %v",
+					runtime.Agent.AgentID,
+					err,
+				)
+			} else {
+				for _, s := range hermesSessions {
+					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
+						SessionID:     s.SessionID,
+						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
+						NativeID:      s.NativeID,
+						Name:          s.Name,
+						ProjectID:     s.ProjectID,
+						Preview:       s.Preview,
+						Status:        s.Status,
+						CurrentTask:   s.CurrentTask,
+						TokenUsage:    s.TokenUsage,
+						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+					})
+				}
+			}
 		}
 
-		var sessionStatuses []cloud.SessionStatus
-		for _, s := range sessions {
-			sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-				SessionID:     s.SessionID,
-				AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
-				NativeID:      s.NativeID,
-				Name:          s.Name,
-				ProjectID:     s.ProjectID,
-				Preview:       s.Preview,
-				Status:        s.Status,
-				CurrentTask:   s.CurrentTask,
-				TokenUsage:    s.TokenUsage,
-				LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
-			})
-		}
 		sessionCount += len(sessionStatuses)
 		agentStatuses = append(agentStatuses, cloud.AgentStatus{
 			AgentID:   runtime.Agent.AgentID,

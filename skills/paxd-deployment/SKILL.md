@@ -91,30 +91,27 @@ Save the returned `node_id`, `api_key`, and `agent_id`. The `api_key` is the pax
 On an already configured machine, create another hosted agent with the node API key:
 
 ```bash
-curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/agents/register" \
-  -H 'Content-Type: application/json' \
-  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-  -H "X-Pax-Key: $PAX_API_KEY" \
-  -d '{"agent":{"name":"review","agent_type":"claude-code"}}'
+paxd configure \
+  --cloud-url "$PAX_CLOUD_URL" \
+  --append \
+  --agent review:claude-code:review
 ```
 
-Save the returned `agent_id`. The ACP forwarder must send this as `agent_id` on `/api/v1/agent/tunnel`.
+Without `--append`, `paxd configure` has replace semantics and rewrites the local `agents` list to the agents registered by that invocation. If an existing config would be overwritten, it prompts for confirmation; pass `-y` or `--yes` in automation.
 
 ## Paxd Config
 
-For home-server setup, prefer the bootstrap helper when it is available:
+For home-server setup, use paxd directly:
 
 ```bash
-scripts/paxd-bootstrap detect
-scripts/paxd-bootstrap install-adapter --harness codex --yes
-scripts/paxd-bootstrap configure \
+paxd harnesses
+paxd configure \
   --harness codex \
   --cloud-url "$PAX_CLOUD_URL" \
   --registration-token "$REGISTRATION_TOKEN"
 ```
 
-Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
+Use `--harness claude-code`, `--harness gemini`, or `--harness hermes` for other local runtimes. If `paxd harnesses` reports a missing Codex or Claude Code adapter, install the corresponding adapter package outside paxd. Add `--cf-client-id` and `--cf-client-secret` when the machine-side tunnel is protected by Cloudflare Access.
 
 Create or update `~/.paxd/paxd.yaml` on the server. `cloud.api_url` is the canonical key; `cloud.url` is accepted as a compatibility alias:
 
@@ -126,20 +123,21 @@ cloud:
   cf_client_id: cf_service_token_client_id_here
   cf_client_secret: cf_service_token_client_secret_here
 
-agent_id: agent_xxx
-instance_id: default
-
 agents:
   - agent_id: agent_xxx
     instance_id: default
     name: codex
     agent_type: codex
     enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: codex
+      command: ["codex-acp"]
 
 acp_forwarder:
   enabled: true
-  harness: codex
-  command: ["codex-acp"]
+  harness: ""
+  command: []
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s
@@ -160,7 +158,7 @@ export PAX_ACP_TUNNEL_PATH="/api/v1/agent/tunnel"
 export PAX_ACP_RECONNECT_INTERVAL="2s"
 ```
 
-Supported ACP harness presets are `hermes` (`hermes acp`), `gemini` (`gemini --acp`), `codex` (`codex-acp` or `npx -y @zed-industries/codex-acp`), and `claude-code` (`claude-agent-acp` or `npx -y @agentclientprotocol/claude-agent-acp`). Run `paxd harnesses` on the target machine to inspect local adapter support. Use `custom` plus `command` for other ACP-compatible adapters. Explicit `command` overrides the preset.
+Supported ACP harness presets are `hermes` (`hermes acp`), `gemini` (`gemini --acp`), `codex` (`codex-acp` or `npx -y @zed-industries/codex-acp`), and `claude-code` (`claude-agent-acp` or `npx -y @agentclientprotocol/claude-agent-acp`). Run `paxd harnesses` on the target machine to inspect local adapter support. Use `custom` plus `command` for other ACP-compatible adapters. Per-agent `agents[].acp_forwarder.command` overrides the preset for that agent; top-level `acp_forwarder` is the default for agents that do not override it.
 
 Prefer a short reconnect interval while testing. A healthy forwarder should reset exponential backoff after any successful tunnel connection.
 
