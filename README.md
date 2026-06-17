@@ -208,7 +208,7 @@ ACP harness 预设：
 | `gemini` | `gemini --acp` |
 | `custom` | 必须显式配置 `command` |
 
-`--command` 或 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API。
+`agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
 
 ## 配置
 
@@ -230,6 +230,27 @@ hermes:
   api_key_from_env: ~/.hermes/.env  # Hermes API key 存放的文件路径
   profile: ""                # Hermes profile 名称（可选）
 
+agents:
+  - agent_id: agent_codex
+    instance_id: codex-main
+    name: codex-main
+    agent_type: codex
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: codex
+      command: ["codex-acp"]  # 未安装时 configure 会写 npx fallback
+
+  - agent_id: agent_review
+    instance_id: review
+    name: reviewer
+    agent_type: claude-code
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: claude-code
+      command: ["claude-agent-acp"]
+
 daemon:
   poll_interval: 5s
   status_interval: 10s
@@ -238,9 +259,9 @@ daemon:
   db_path: ~/.paxd/paxd.db
 
 acp_forwarder:
-  enabled: false
-  harness: hermes
-  command: []                 # optional override; e.g. ["codex-acp"]
+  enabled: true               # 默认是否为 enabled agent 启动 ACP forwarder
+  harness: ""                 # 可作为 agents[].acp_forwarder.harness 的默认值
+  command: []                 # 可作为 agents[].acp_forwarder.command 的默认值
   working_dir: ""
   tunnel_path: /api/v1/agent/tunnel
   reconnect_interval: 2s

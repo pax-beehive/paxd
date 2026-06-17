@@ -53,14 +53,15 @@ type HermesConfig struct {
 
 // RuntimeAgentConfig describes one local agent hosted by this paxd node.
 type RuntimeAgentConfig struct {
-	AgentID     string `yaml:"agent_id"`
-	InstanceID  string `yaml:"instance_id"`
-	Name        string `yaml:"name"`
-	AgentType   string `yaml:"agent_type"`
-	APIEndpoint string `yaml:"api_endpoint"`
-	APIKeyEnv   string `yaml:"api_key_from_env"`
-	Profile     string `yaml:"profile"`
-	Enabled     *bool  `yaml:"enabled"`
+	AgentID      string                  `yaml:"agent_id"`
+	InstanceID   string                  `yaml:"instance_id"`
+	Name         string                  `yaml:"name"`
+	AgentType    string                  `yaml:"agent_type"`
+	APIEndpoint  string                  `yaml:"api_endpoint"`
+	APIKeyEnv    string                  `yaml:"api_key_from_env"`
+	Profile      string                  `yaml:"profile"`
+	Enabled      *bool                   `yaml:"enabled"`
+	ACPForwarder AgentACPForwarderConfig `yaml:"acp_forwarder"`
 }
 
 // DaemonConfig controls daemon behaviour.
@@ -75,6 +76,16 @@ type DaemonConfig struct {
 // ACPForwarderConfig controls the stateless ACP tunnel forwarder.
 type ACPForwarderConfig struct {
 	Enabled           bool          `yaml:"enabled"`
+	Harness           string        `yaml:"harness"`
+	Command           []string      `yaml:"command"`
+	WorkingDir        string        `yaml:"working_dir"`
+	TunnelPath        string        `yaml:"tunnel_path"`
+	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
+}
+
+// AgentACPForwarderConfig overrides ACP forwarding for one hosted agent.
+type AgentACPForwarderConfig struct {
+	Enabled           *bool         `yaml:"enabled"`
 	Harness           string        `yaml:"harness"`
 	Command           []string      `yaml:"command"`
 	WorkingDir        string        `yaml:"working_dir"`
@@ -169,6 +180,7 @@ func Load(path string) (*Config, error) {
 	cfg.ACPForwarder.WorkingDir = expandHome(cfg.ACPForwarder.WorkingDir)
 	for i := range cfg.Agents {
 		cfg.Agents[i].APIKeyEnv = expandHome(cfg.Agents[i].APIKeyEnv)
+		cfg.Agents[i].ACPForwarder.WorkingDir = expandHome(cfg.Agents[i].ACPForwarder.WorkingDir)
 	}
 
 	return &cfg, nil
