@@ -231,6 +231,36 @@ func TestSyncConfiguredAgentsDisablesStaleCloudAgents(t *testing.T) {
 	}
 }
 
+func TestSyncConfiguredAgentsDisablesDBAgentsWhenConfigHasNoAgentIDs(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "paxd.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.SaveCloudAgent(&store.CloudAgent{
+		AgentID:    "agent_saved",
+		InstanceID: "saved",
+		Name:       "saved",
+		AgentType:  "codex",
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("save cloud agent: %v", err)
+	}
+
+	cfg := &config.Config{}
+	if err := syncConfiguredAgents(cfg, db); err != nil {
+		t.Fatalf("syncConfiguredAgents() error = %v", err)
+	}
+	agents, err := db.ListCloudAgents()
+	if err != nil {
+		t.Fatalf("ListCloudAgents() error = %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("enabled agents = %#v, want none because config has no agent IDs", agents)
+	}
+}
+
 func TestYAMLMarshalOmitsLegacyAgentShorthandForMultiAgentConfig(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{

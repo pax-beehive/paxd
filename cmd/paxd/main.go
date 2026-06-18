@@ -886,22 +886,31 @@ func nodeStateFromConfig(cfg *config.Config, db *store.Store) *store.NodeState {
 }
 
 func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
+	agents := configuredCloudAgents(cfg)
+	configuredAgentIDs := make([]string, 0, len(agents))
+	for i := range agents {
+		configuredAgentIDs = append(configuredAgentIDs, agents[i].AgentID)
+		if err := db.SaveCloudAgent(&agents[i]); err != nil {
+			return err
+		}
+	}
+	return db.DisableCloudAgentsExcept(configuredAgentIDs)
+}
+
+func configuredCloudAgents(cfg *config.Config) []store.CloudAgent {
 	runtimeAgents := cfg.RuntimeAgents()
-	configuredAgentIDs := make([]string, 0, len(runtimeAgents))
+	agents := make([]store.CloudAgent, 0, len(runtimeAgents))
 	seenAgentIDs := make(map[string]bool, len(runtimeAgents))
 	for _, runtimeAgent := range runtimeAgents {
-		if runtimeAgent.AgentID == "" {
+		if runtimeAgent.AgentID == "" || seenAgentIDs[runtimeAgent.AgentID] {
 			continue
 		}
-		if !seenAgentIDs[runtimeAgent.AgentID] {
-			configuredAgentIDs = append(configuredAgentIDs, runtimeAgent.AgentID)
-			seenAgentIDs[runtimeAgent.AgentID] = true
-		}
+		seenAgentIDs[runtimeAgent.AgentID] = true
 		enabled := true
 		if runtimeAgent.Enabled != nil {
 			enabled = *runtimeAgent.Enabled
 		}
-		agent := &store.CloudAgent{
+		agent := store.CloudAgent{
 			AgentID:    runtimeAgent.AgentID,
 			InstanceID: firstNonEmpty(runtimeAgent.InstanceID, runtimeAgent.AgentID),
 			Name:       firstNonEmpty(runtimeAgent.Name, "hermes"),
@@ -913,11 +922,9 @@ func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
 			agent.APIKeyEnv = firstNonEmpty(runtimeAgent.APIKeyEnv, cfg.Hermes.APIKeyEnv)
 			agent.Profile = runtimeAgent.Profile
 		}
-		if err := db.SaveCloudAgent(agent); err != nil {
-			return err
-		}
+		agents = append(agents, agent)
 	}
-	return db.DisableCloudAgentsExcept(configuredAgentIDs)
+	return agents
 }
 
 func buildAgentRuntimes(
@@ -925,13 +932,13 @@ func buildAgentRuntimes(
 	cloudClient *cloud.Client,
 	db *store.Store,
 ) ([]collector.AgentRuntime, map[string]*executor.Executor, error) {
-	agents, err := db.ListCloudAgents()
-	if err != nil {
-		return nil, nil, err
-	}
+	agents := configuredCloudAgents(cfg)
 	runtimes := make([]collector.AgentRuntime, 0, len(agents))
 	executors := make(map[string]*executor.Executor, len(agents))
 	for _, agent := range agents {
+		if !agent.Enabled {
+			continue
+		}
 		apiKey, err := hermesAPIKey(agent.APIKeyEnv)
 		if err != nil {
 			log.Printf("[paxd] Hermes API key for agent %s unavailable: %v", agent.AgentID, err)
