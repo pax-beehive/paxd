@@ -174,6 +174,18 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("projected parts = %d, want 2", count)
 	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id NOT LIKE 'msg_%'`).Scan(&count); err != nil {
+		t.Fatalf("count projected message ids: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("projected messages with non-msg ids = %d, want 0", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE logical_key NOT LIKE 'acp:%'`).Scan(&count); err != nil {
+		t.Fatalf("count projected logical keys: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("projected messages with non-acp logical keys = %d, want 0", count)
+	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE COALESCE(raw_json, '') != ''`).Scan(&count); err != nil {
 		t.Fatalf("count projected message raw json: %v", err)
 	}

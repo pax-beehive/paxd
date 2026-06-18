@@ -1,6 +1,7 @@
 package acpforwarder
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -54,7 +55,8 @@ func projectTransportMessage(
 		rpc.Method,
 		"acp",
 	)
-	messageID := historyMessageID(agentID, stream, seq, fields)
+	logicalKey := historyLogicalKey(agentID, stream, seq, fields)
+	messageID := historyMessageID(logicalKey)
 	msg := store.Message{
 		MessageID:   messageID,
 		AgentID:     agentID,
@@ -66,7 +68,7 @@ func projectTransportMessage(
 		MessageType: messageType,
 		TurnID:      fields.TurnID,
 		ResponseID:  fields.ResponseID,
-		LogicalKey:  messageID,
+		LogicalKey:  logicalKey,
 	}
 	if err := journal.UpsertMessage(&msg); err != nil {
 		return err
@@ -74,7 +76,7 @@ func projectTransportMessage(
 	return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, "")
 }
 
-func historyMessageID(
+func historyLogicalKey(
 	agentID string,
 	stream string,
 	seq int64,
@@ -102,6 +104,11 @@ func historyMessageID(
 		)
 	}
 	return fmt.Sprintf("acp:%s:%s:text:%d", agentID, stream, seq)
+}
+
+func historyMessageID(logicalKey string) string {
+	sum := sha256.Sum256([]byte(logicalKey))
+	return fmt.Sprintf("msg_%x", sum[:24])
 }
 
 func extractHistoryFields(payload json.RawMessage, rpc historyRPC) historyFields {
