@@ -174,6 +174,18 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("projected parts = %d, want 2", count)
 	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE COALESCE(raw_json, '') != ''`).Scan(&count); err != nil {
+		t.Fatalf("count projected message raw json: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("projected messages with raw_json = %d, want 0", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM message_parts WHERE COALESCE(payload_json, '') != ''`).Scan(&count); err != nil {
+		t.Fatalf("count projected part payload json: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("projected parts with payload_json = %d, want 0", count)
+	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id LIKE '%rpc:%'`).Scan(&count); err != nil {
 		t.Fatalf("count rpc-derived messages: %v", err)
 	}

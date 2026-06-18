@@ -67,12 +67,11 @@ func projectTransportMessage(
 		TurnID:      fields.TurnID,
 		ResponseID:  fields.ResponseID,
 		LogicalKey:  messageID,
-		RawJSON:     string(payload),
 	}
 	if err := journal.UpsertMessage(&msg); err != nil {
 		return err
 	}
-	return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, string(payload))
+	return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, "")
 }
 
 func historyMessageID(
