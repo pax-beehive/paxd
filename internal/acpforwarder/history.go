@@ -32,17 +32,17 @@ func projectTransportMessage(
 	seq int64,
 	payload json.RawMessage,
 ) error {
+	if stream != store.TransportStreamPaxdToManager {
+		return nil
+	}
 	var rpc historyRPC
 	_ = json.Unmarshal(payload, &rpc)
 	direction := store.MessageDirectionPaxdToManager
 	role := "assistant"
-	localDirection := store.TransportDirectionOutbound
-	if stream == store.TransportStreamManagerToPaxd {
-		direction = store.MessageDirectionManagerToPaxd
-		role = "user"
-		localDirection = store.TransportDirectionInbound
-	}
 	fields := extractHistoryFields(payload, rpc)
+	if !isTextUpdate(rpc, fields) {
+		return nil
+	}
 	if fields.Role != "" {
 		role = fields.Role
 	}
@@ -51,7 +51,7 @@ func projectTransportMessage(
 		rpc.Method,
 		"acp",
 	)
-	messageID := historyMessageID(agentID, stream, localDirection, seq, rpc, fields)
+	messageID := historyMessageID(agentID, stream, seq, fields)
 	msg := store.Message{
 		MessageID:   messageID,
 		AgentID:     agentID,
@@ -69,33 +69,16 @@ func projectTransportMessage(
 	if err := journal.UpsertMessage(&msg); err != nil {
 		return err
 	}
-	if isTextDelta(fields) {
-		return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, string(payload))
-	}
-	partType := store.MessagePartRawJSON
-	text := ""
-	if fields.Content != "" {
-		partType = store.MessagePartText
-		text = fields.Content
-	}
-	return journal.UpsertMessagePart(&store.MessagePart{
-		MessageID:   msg.MessageID,
-		PartIndex:   0,
-		PartType:    partType,
-		Text:        text,
-		PayloadJSON: string(payload),
-	})
+	return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, string(payload))
 }
 
 func historyMessageID(
 	agentID string,
 	stream string,
-	localDirection string,
 	seq int64,
-	rpc historyRPC,
 	fields historyFields,
 ) string {
-	if isTextDelta(fields) && fields.TurnID != "" {
+	if fields.SessionID != "" && fields.TurnID != "" {
 		return fmt.Sprintf(
 			"acp:%s:%s:%s:%s:%s",
 			agentID,
@@ -105,10 +88,16 @@ func historyMessageID(
 			firstNonEmpty(fields.Role, "_"),
 		)
 	}
-	if rpc.ID != nil {
-		return fmt.Sprintf("acp:%s:%s:rpc:%v", agentID, localDirection, rpc.ID)
+	if fields.SessionID != "" {
+		return fmt.Sprintf(
+			"acp:%s:%s:%s:%s",
+			agentID,
+			stream,
+			fields.SessionID,
+			firstNonEmpty(fields.Role, "_"),
+		)
 	}
-	return fmt.Sprintf("acp:%s:%s:%d", agentID, localDirection, seq)
+	return fmt.Sprintf("acp:%s:%s:text:%d", agentID, stream, seq)
 }
 
 func extractHistoryFields(payload json.RawMessage, rpc historyRPC) historyFields {
@@ -171,10 +160,15 @@ func findString(v any, keys ...string) string {
 	return ""
 }
 
-func isTextDelta(fields historyFields) bool {
-	return fields.Content != "" &&
-		(strings.EqualFold(fields.EntityType, "message") &&
-			strings.EqualFold(fields.EventType, "delta"))
+func isTextUpdate(rpc historyRPC, fields historyFields) bool {
+	if fields.Content == "" {
+		return false
+	}
+	if strings.EqualFold(fields.EntityType, "message") &&
+		strings.EqualFold(fields.EventType, "delta") {
+		return true
+	}
+	return rpc.Method == "session/update"
 }
 
 func firstNonEmpty(values ...string) string {

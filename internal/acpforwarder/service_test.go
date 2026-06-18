@@ -96,31 +96,29 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 		"jsonrpc":"2.0",
 		"method":"session/update",
 		"params":{
-			"entityType":"message",
-			"eventType":"delta",
 			"sessionId":"sess-1",
-			"turnId":"turn-1",
 			"role":"assistant",
-			"content":"hel"
+			"delta":"h"
 		}
 	}`)
 	second := json.RawMessage(`{
 		"jsonrpc":"2.0",
 		"method":"session/update",
 		"params":{
-			"entityType":"message",
-			"eventType":"delta",
 			"sessionId":"sess-1",
-			"turnId":"turn-1",
 			"role":"assistant",
-			"content":"lo"
+			"delta":"i"
 		}
 	}`)
+	rpcResponse := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`)
 	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 1, first); err != nil {
 		t.Fatalf("project first delta: %v", err)
 	}
 	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 2, second); err != nil {
 		t.Fatalf("project second delta: %v", err)
+	}
+	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 3, rpcResponse); err != nil {
+		t.Fatalf("project rpc response: %v", err)
 	}
 
 	db, err := sql.Open("sqlite3", dbPath)
@@ -135,14 +133,20 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 	`).Scan(&text); err != nil {
 		t.Fatalf("read projected part: %v", err)
 	}
-	if text != "hello" {
-		t.Fatalf("projected text = %q, want hello", text)
+	if text != "hi" {
+		t.Fatalf("projected text = %q, want hi", text)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM message_parts`).Scan(&count); err != nil {
 		t.Fatalf("count projected parts: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("projected parts = %d, want 1", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id LIKE '%rpc:%'`).Scan(&count); err != nil {
+		t.Fatalf("count rpc-derived messages: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rpc-derived messages = %d, want 0", count)
 	}
 }
 
