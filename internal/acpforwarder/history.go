@@ -16,13 +16,14 @@ type historyRPC struct {
 }
 
 type historyFields struct {
-	SessionID  string
-	TurnID     string
-	ResponseID string
-	EntityType string
-	EventType  string
-	Role       string
-	Content    string
+	SessionID     string
+	TurnID        string
+	ResponseID    string
+	EntityType    string
+	EventType     string
+	SessionUpdate string
+	Role          string
+	Content       string
 }
 
 func projectTransportMessage(
@@ -40,13 +41,15 @@ func projectTransportMessage(
 	direction := store.MessageDirectionPaxdToManager
 	role := "assistant"
 	fields := extractHistoryFields(payload, rpc)
-	if !isTextUpdate(rpc, fields) {
+	fields, ok := normalizeTextUpdate(rpc, fields)
+	if !ok {
 		return nil
 	}
 	if fields.Role != "" {
 		role = fields.Role
 	}
 	messageType := firstNonEmpty(
+		fields.SessionUpdate,
 		strings.Trim(fields.EntityType+":"+fields.EventType, ":"),
 		rpc.Method,
 		"acp",
@@ -80,20 +83,22 @@ func historyMessageID(
 ) string {
 	if fields.SessionID != "" && fields.TurnID != "" {
 		return fmt.Sprintf(
-			"acp:%s:%s:%s:%s:%s",
+			"acp:%s:%s:%s:%s:%s:%s",
 			agentID,
 			stream,
 			firstNonEmpty(fields.SessionID, "_"),
 			fields.TurnID,
+			firstNonEmpty(fields.SessionUpdate, "_"),
 			firstNonEmpty(fields.Role, "_"),
 		)
 	}
 	if fields.SessionID != "" {
 		return fmt.Sprintf(
-			"acp:%s:%s:%s:%s",
+			"acp:%s:%s:%s:%s:%s",
 			agentID,
 			stream,
 			fields.SessionID,
+			firstNonEmpty(fields.SessionUpdate, "_"),
 			firstNonEmpty(fields.Role, "_"),
 		)
 	}
@@ -109,6 +114,7 @@ func extractHistoryFields(payload json.RawMessage, rpc historyRPC) historyFields
 		fields.ResponseID = firstNonEmpty(fields.ResponseID, nested.ResponseID)
 		fields.EntityType = firstNonEmpty(fields.EntityType, nested.EntityType)
 		fields.EventType = firstNonEmpty(fields.EventType, nested.EventType)
+		fields.SessionUpdate = firstNonEmpty(fields.SessionUpdate, nested.SessionUpdate)
 		fields.Role = firstNonEmpty(fields.Role, nested.Role)
 		fields.Content = firstNonEmpty(fields.Content, nested.Content)
 	}
@@ -125,13 +131,14 @@ func fieldsFromRaw(raw json.RawMessage) historyFields {
 	}
 	obj, _ := v.(map[string]any)
 	return historyFields{
-		SessionID:  findString(obj, "sessionId", "session_id"),
-		TurnID:     findString(obj, "turnId", "turn_id"),
-		ResponseID: findString(obj, "responseId", "response_id"),
-		EntityType: findString(obj, "entityType", "entity_type"),
-		EventType:  findString(obj, "eventType", "event_type"),
-		Role:       findString(obj, "role"),
-		Content:    findString(obj, "content", "text", "delta"),
+		SessionID:     findString(obj, "sessionId", "session_id"),
+		TurnID:        findString(obj, "turnId", "turn_id"),
+		ResponseID:    findString(obj, "responseId", "response_id"),
+		EntityType:    findString(obj, "entityType", "entity_type"),
+		EventType:     findString(obj, "eventType", "event_type"),
+		SessionUpdate: findString(obj, "sessionUpdate", "session_update"),
+		Role:          findString(obj, "role"),
+		Content:       findString(obj, "content", "text", "delta"),
 	}
 }
 
@@ -160,15 +167,18 @@ func findString(v any, keys ...string) string {
 	return ""
 }
 
-func isTextUpdate(rpc historyRPC, fields historyFields) bool {
+func normalizeTextUpdate(rpc historyRPC, fields historyFields) (historyFields, bool) {
 	if fields.Content == "" {
-		return false
+		return fields, false
 	}
 	if strings.EqualFold(fields.EntityType, "message") &&
 		strings.EqualFold(fields.EventType, "delta") {
-		return true
+		if fields.SessionUpdate == "" {
+			fields.SessionUpdate = "message_delta"
+		}
+		return fields, true
 	}
-	return rpc.Method == "session/update"
+	return fields, rpc.Method == "session/update" && fields.SessionUpdate != ""
 }
 
 func firstNonEmpty(values ...string) string {

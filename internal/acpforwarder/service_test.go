@@ -97,8 +97,10 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 		"method":"session/update",
 		"params":{
 			"sessionId":"sess-1",
-			"role":"assistant",
-			"delta":"h"
+			"update":{
+				"sessionUpdate":"agent_message_chunk",
+				"content":{"type":"text","text":"h"}
+			}
 		}
 	}`)
 	second := json.RawMessage(`{
@@ -106,8 +108,21 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 		"method":"session/update",
 		"params":{
 			"sessionId":"sess-1",
-			"role":"assistant",
-			"delta":"i"
+			"update":{
+				"sessionUpdate":"agent_message_chunk",
+				"content":{"type":"text","text":"i"}
+			}
+		}
+	}`)
+	thought := json.RawMessage(`{
+		"jsonrpc":"2.0",
+		"method":"session/update",
+		"params":{
+			"sessionId":"sess-1",
+			"update":{
+				"sessionUpdate":"agent_thought_chunk",
+				"content":{"type":"text","text":"thinking"}
+			}
 		}
 	}`)
 	rpcResponse := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`)
@@ -117,7 +132,10 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 2, second); err != nil {
 		t.Fatalf("project second delta: %v", err)
 	}
-	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 3, rpcResponse); err != nil {
+	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 3, thought); err != nil {
+		t.Fatalf("project thought delta: %v", err)
+	}
+	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 4, rpcResponse); err != nil {
 		t.Fatalf("project rpc response: %v", err)
 	}
 
@@ -129,18 +147,32 @@ func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
 	var text string
 	var count int
 	if err := db.QueryRow(`
-		SELECT text FROM message_parts ORDER BY id LIMIT 1
+		SELECT message_parts.text
+		FROM message_parts
+		JOIN messages ON messages.message_id = message_parts.message_id
+		WHERE messages.message_type = 'agent_message_chunk'
 	`).Scan(&text); err != nil {
-		t.Fatalf("read projected part: %v", err)
+		t.Fatalf("read projected message chunk: %v", err)
 	}
 	if text != "hi" {
-		t.Fatalf("projected text = %q, want hi", text)
+		t.Fatalf("projected message text = %q, want hi", text)
+	}
+	if err := db.QueryRow(`
+		SELECT message_parts.text
+		FROM message_parts
+		JOIN messages ON messages.message_id = message_parts.message_id
+		WHERE messages.message_type = 'agent_thought_chunk'
+	`).Scan(&text); err != nil {
+		t.Fatalf("read projected thought chunk: %v", err)
+	}
+	if text != "thinking" {
+		t.Fatalf("projected thought text = %q, want thinking", text)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM message_parts`).Scan(&count); err != nil {
 		t.Fatalf("count projected parts: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("projected parts = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("projected parts = %d, want 2", count)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id LIKE '%rpc:%'`).Scan(&count); err != nil {
 		t.Fatalf("count rpc-derived messages: %v", err)
