@@ -8,6 +8,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -50,14 +51,15 @@ type HermesInstance struct {
 
 // CloudAgent maps a cloud agent under the local paxd node to a Hermes instance.
 type CloudAgent struct {
-	AgentID     string
-	InstanceID  string
-	Name        string
-	AgentType   string
-	APIEndpoint string
-	APIKeyEnv   string
-	Profile     string
-	Enabled     bool
+	AgentID         string
+	InstanceID      string
+	Name            string
+	AgentType       string
+	APIEndpoint     string
+	APIKeyEnv       string
+	APIKeySecretRef string
+	Profile         string
+	Enabled         bool
 }
 
 // OrphanedMessage is a chat message that was skipped because
@@ -131,6 +133,7 @@ func migrate(db *sql.DB) error {
 		agent_type   TEXT NOT NULL DEFAULT 'hermes',
 		api_endpoint TEXT NOT NULL,
 		api_key_env  TEXT,
+		api_key_secret_ref TEXT,
 		profile      TEXT,
 		enabled      INTEGER DEFAULT 1,
 		updated_at   TEXT DEFAULT (datetime('now'))
@@ -145,8 +148,14 @@ func migrate(db *sql.DB) error {
 		retry_count   INTEGER DEFAULT 0
 	);
 	`
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	_, err := db.Exec(`ALTER TABLE cloud_agents ADD COLUMN api_key_secret_ref TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 // --- node_state ---
@@ -259,7 +268,7 @@ func (s *Store) ListHermesInstances() ([]HermesInstance, error) {
 func (s *Store) ListCloudAgents() ([]CloudAgent, error) {
 	rows, err := s.db.Query(`
 		SELECT agent_id, instance_id, name, agent_type, api_endpoint, COALESCE(api_key_env, ''),
-			COALESCE(profile, ''), enabled
+			COALESCE(api_key_secret_ref, ''), COALESCE(profile, ''), enabled
 		FROM cloud_agents
 		WHERE enabled = 1
 		ORDER BY name, agent_id
@@ -279,6 +288,7 @@ func (s *Store) ListCloudAgents() ([]CloudAgent, error) {
 			&a.AgentType,
 			&a.APIEndpoint,
 			&a.APIKeyEnv,
+			&a.APIKeySecretRef,
 			&a.Profile,
 			&a.Enabled,
 		); err != nil {
@@ -293,19 +303,22 @@ func (s *Store) ListCloudAgents() ([]CloudAgent, error) {
 func (s *Store) SaveCloudAgent(a *CloudAgent) error {
 	_, err := s.db.Exec(`
 		INSERT INTO cloud_agents (
-			agent_id, instance_id, name, agent_type, api_endpoint, api_key_env, profile, enabled, updated_at
+			agent_id, instance_id, name, agent_type, api_endpoint, api_key_env, api_key_secret_ref,
+			profile, enabled, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(agent_id) DO UPDATE SET
 			instance_id = excluded.instance_id,
 			name = excluded.name,
 			agent_type = excluded.agent_type,
 			api_endpoint = excluded.api_endpoint,
 			api_key_env = excluded.api_key_env,
+			api_key_secret_ref = excluded.api_key_secret_ref,
 			profile = excluded.profile,
 			enabled = excluded.enabled,
 			updated_at = datetime('now')
-	`, a.AgentID, a.InstanceID, a.Name, a.AgentType, a.APIEndpoint, a.APIKeyEnv, a.Profile, a.Enabled)
+	`, a.AgentID, a.InstanceID, a.Name, a.AgentType, a.APIEndpoint, a.APIKeyEnv,
+		a.APIKeySecretRef, a.Profile, a.Enabled)
 	return err
 }
 

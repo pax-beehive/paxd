@@ -122,6 +122,45 @@ type RegisterNodeResponse struct {
 	APIKey string `json:"api_key"`
 }
 
+// ResolveSecretRequest asks pax-manager to return a secret value for an agent.
+type ResolveSecretRequest struct {
+	SecretID  string `json:"secret_id"`
+	Version   string `json:"version,omitempty"`
+	AgentID   string `json:"agent_id"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// ResolveSecretResponse is returned by POST /api/v1/node/secrets/resolve.
+type ResolveSecretResponse struct {
+	Status        string `json:"status"`
+	ApprovalID    string `json:"approval_id,omitempty"`
+	SecretID      string `json:"secret_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+	VersionNumber int64  `json:"version_number,omitempty"`
+	Value         string `json:"value,omitempty"`
+}
+
+// WriteSecretVersionRequest creates a new version in the cloud secret vault.
+type WriteSecretVersionRequest struct {
+	AgentID                  string `json:"agent_id"`
+	SessionID                string `json:"session_id,omitempty"`
+	Value                    string `json:"value"`
+	MakeCurrent              bool   `json:"make_current"`
+	ExpectedCurrentVersionID string `json:"expected_current_version_id,omitempty"`
+	IdempotencyKey           string `json:"idempotency_key,omitempty"`
+	Reason                   string `json:"reason,omitempty"`
+}
+
+// WriteSecretVersionResponse is returned by POST /api/v1/node/secrets/:id/versions.
+type WriteSecretVersionResponse struct {
+	Status        string `json:"status"`
+	ApprovalID    string `json:"approval_id,omitempty"`
+	SecretID      string `json:"secret_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+	VersionNumber int64  `json:"version_number,omitempty"`
+	Current       bool   `json:"current,omitempty"`
+}
+
 // UpgradeBinary is the response from GET /api/agent/upgrade.
 type UpgradeBinary struct {
 	Version string
@@ -300,6 +339,41 @@ func (c *Client) CreateOutbound(msg *OutboundMessage) error {
 	defer resp.Body.Close()
 
 	return checkStatus(resp, "create outbound")
+}
+
+// ResolveSecret returns a plaintext secret value, or approval_required status.
+func (c *Client) ResolveSecret(req *ResolveSecretRequest) (*ResolveSecretResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/secrets/resolve", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("resolve secret: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[ResolveSecretResponse](resp.Body, "resolve secret")
+}
+
+// WriteSecretVersion appends a secret version, or returns approval_required status.
+func (c *Client) WriteSecretVersion(
+	secretID string,
+	req *WriteSecretVersionRequest,
+) (*WriteSecretVersionResponse, error) {
+	resp, err := c.do(
+		http.MethodPost,
+		"/api/v1/node/secrets/"+url.PathEscape(secretID)+"/versions",
+		req,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("write secret version: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[WriteSecretVersionResponse](resp.Body, "write secret version")
 }
 
 // ReportCompleted marks a message as completed.

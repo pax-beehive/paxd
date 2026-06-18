@@ -12,6 +12,7 @@ cloud:
 hermes:
   api_endpoint: http://localhost:8642
   api_key_from_env: ~/.hermes/.env
+  api_key_secret_ref: ""
   profile: ""
 
 daemon:

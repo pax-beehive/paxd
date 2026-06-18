@@ -41,21 +41,23 @@ type CloudConfig struct {
 
 // HermesConfig points to the local Hermes API Server.
 type HermesConfig struct {
-	APIEndpoint string `yaml:"api_endpoint"`     // e.g. http://localhost:8642
-	APIKeyEnv   string `yaml:"api_key_from_env"` // path to Hermes .env file
-	Profile     string `yaml:"profile"`          // Hermes profile name
+	APIEndpoint     string `yaml:"api_endpoint"`       // e.g. http://localhost:8642
+	APIKeyEnv       string `yaml:"api_key_from_env"`   // path to Hermes .env file
+	APIKeySecretRef string `yaml:"api_key_secret_ref"` // cloud vault ref, e.g. sec_x@latest
+	Profile         string `yaml:"profile"`            // Hermes profile name
 }
 
 // RuntimeAgentConfig describes one local agent hosted by this paxd node.
 type RuntimeAgentConfig struct {
-	AgentID     string `yaml:"agent_id"`
-	InstanceID  string `yaml:"instance_id"`
-	Name        string `yaml:"name"`
-	AgentType   string `yaml:"agent_type"`
-	APIEndpoint string `yaml:"api_endpoint"`
-	APIKeyEnv   string `yaml:"api_key_from_env"`
-	Profile     string `yaml:"profile"`
-	Enabled     *bool  `yaml:"enabled"`
+	AgentID         string `yaml:"agent_id"`
+	InstanceID      string `yaml:"instance_id"`
+	Name            string `yaml:"name"`
+	AgentType       string `yaml:"agent_type"`
+	APIEndpoint     string `yaml:"api_endpoint"`
+	APIKeyEnv       string `yaml:"api_key_from_env"`
+	APIKeySecretRef string `yaml:"api_key_secret_ref"`
+	Profile         string `yaml:"profile"`
+	Enabled         *bool  `yaml:"enabled"`
 }
 
 // DaemonConfig controls daemon behaviour.
@@ -169,14 +171,15 @@ func (c *Config) RuntimeAgents() []RuntimeAgentConfig {
 	}
 	enabled := true
 	return []RuntimeAgentConfig{{
-		InstanceID:  "default",
-		AgentID:     c.Agent.AgentID,
-		Name:        firstNonEmpty(c.Agent.Name, "hermes"),
-		AgentType:   "hermes",
-		APIEndpoint: c.Hermes.APIEndpoint,
-		APIKeyEnv:   c.Hermes.APIKeyEnv,
-		Profile:     c.Hermes.Profile,
-		Enabled:     &enabled,
+		InstanceID:      "default",
+		AgentID:         c.Agent.AgentID,
+		Name:            firstNonEmpty(c.Agent.Name, "hermes"),
+		AgentType:       "hermes",
+		APIEndpoint:     c.Hermes.APIEndpoint,
+		APIKeyEnv:       c.Hermes.APIKeyEnv,
+		APIKeySecretRef: c.Hermes.APIKeySecretRef,
+		Profile:         c.Hermes.Profile,
+		Enabled:         &enabled,
 	}}
 }
 
@@ -191,6 +194,7 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Agent.Hostname, "PAX_HOSTNAME")
 	setStringFromEnv(&cfg.Hermes.APIEndpoint, "HERMES_API_ENDPOINT")
 	setStringFromEnv(&cfg.Hermes.APIKeyEnv, "HERMES_API_KEY_FROM_ENV")
+	setStringFromEnv(&cfg.Hermes.APIKeySecretRef, "HERMES_API_KEY_SECRET_REF")
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
 }
