@@ -124,6 +124,42 @@ type RegisterNodeResponse struct {
 	APIKey string `json:"api_key"`
 }
 
+// StartNodeRegistrationRequest starts interactive node onboarding.
+type StartNodeRegistrationRequest struct {
+	Name        string `json:"name,omitempty"`
+	Hostname    string `json:"hostname"`
+	MachineType string `json:"machine_type,omitempty"`
+	OS          string `json:"os"`
+	Arch        string `json:"arch"`
+	PaxdVersion string `json:"paxd_version,omitempty"`
+	APIEndpoint string `json:"api_endpoint,omitempty"`
+}
+
+// StartNodeRegistrationResponse contains the pairing code and poll credential.
+type StartNodeRegistrationResponse struct {
+	RegistrationID          string `json:"registration_id"`
+	PairCode                string `json:"pair_code"`
+	PollToken               string `json:"poll_token"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int64  `json:"expires_in"`
+	Interval                int64  `json:"interval"`
+	ExpiresAt               string `json:"expires_at"`
+}
+
+// PollNodeRegistrationRequest polls an interactive node onboarding session.
+type PollNodeRegistrationRequest struct {
+	RegistrationID string `json:"registration_id"`
+	PollToken      string `json:"poll_token"`
+}
+
+// PollNodeRegistrationResponse returns current onboarding status.
+type PollNodeRegistrationResponse struct {
+	Status string `json:"status"`
+	NodeID string `json:"node_id,omitempty"`
+	APIKey string `json:"api_key,omitempty"`
+}
+
 // RegisterNodeAgentRequest is the payload for POST /api/v1/node/agents/register.
 type RegisterNodeAgentRequest struct {
 	Node  *RegisterNodeRequest     `json:"node,omitempty"`
@@ -141,6 +177,45 @@ type RegisterNodeAgentResponse struct {
 	NodeID  string `json:"node_id"`
 	APIKey  string `json:"api_key,omitempty"`
 	AgentID string `json:"agent_id"`
+}
+
+// ResolveSecretRequest asks pax-manager to return a secret value for an agent.
+type ResolveSecretRequest struct {
+	SecretID  string `json:"secret_id"`
+	Version   string `json:"version,omitempty"`
+	AgentID   string `json:"agent_id"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// ResolveSecretResponse is returned by POST /api/v1/node/secrets/resolve.
+type ResolveSecretResponse struct {
+	Status        string `json:"status"`
+	ApprovalID    string `json:"approval_id,omitempty"`
+	SecretID      string `json:"secret_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+	VersionNumber int64  `json:"version_number,omitempty"`
+	Value         string `json:"value,omitempty"`
+}
+
+// WriteSecretVersionRequest creates a new version in the cloud secret vault.
+type WriteSecretVersionRequest struct {
+	AgentID                  string `json:"agent_id"`
+	SessionID                string `json:"session_id,omitempty"`
+	Value                    string `json:"value"`
+	MakeCurrent              bool   `json:"make_current"`
+	ExpectedCurrentVersionID string `json:"expected_current_version_id,omitempty"`
+	IdempotencyKey           string `json:"idempotency_key,omitempty"`
+	Reason                   string `json:"reason,omitempty"`
+}
+
+// WriteSecretVersionResponse is returned by POST /api/v1/node/secrets/:id/versions.
+type WriteSecretVersionResponse struct {
+	Status        string `json:"status"`
+	ApprovalID    string `json:"approval_id,omitempty"`
+	SecretID      string `json:"secret_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+	VersionNumber int64  `json:"version_number,omitempty"`
+	Current       bool   `json:"current,omitempty"`
 }
 
 // UpgradeBinary is the response from GET /api/agent/upgrade.
@@ -235,6 +310,38 @@ func (c *Client) RegisterNode(
 	}
 
 	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
+}
+
+// StartNodeRegistration begins interactive device-code style onboarding.
+func (c *Client) StartNodeRegistration(
+	req *StartNodeRegistrationRequest,
+) (*StartNodeRegistrationResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/registration/start", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("start node registration: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[StartNodeRegistrationResponse](resp.Body, "start node registration")
+}
+
+// PollNodeRegistration waits for the browser user to approve onboarding.
+func (c *Client) PollNodeRegistration(
+	req *PollNodeRegistrationRequest,
+) (*PollNodeRegistrationResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/registration/poll", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("poll node registration: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[PollNodeRegistrationResponse](resp.Body, "poll node registration")
 }
 
 // RegisterNodeAgent creates a cloud agent under the current node. With a
@@ -360,6 +467,41 @@ func (c *Client) CreateOutbound(msg *OutboundMessage) error {
 	defer resp.Body.Close()
 
 	return checkStatus(resp, "create outbound")
+}
+
+// ResolveSecret returns a plaintext secret value, or approval_required status.
+func (c *Client) ResolveSecret(req *ResolveSecretRequest) (*ResolveSecretResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/secrets/resolve", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("resolve secret: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[ResolveSecretResponse](resp.Body, "resolve secret")
+}
+
+// WriteSecretVersion appends a secret version, or returns approval_required status.
+func (c *Client) WriteSecretVersion(
+	secretID string,
+	req *WriteSecretVersionRequest,
+) (*WriteSecretVersionResponse, error) {
+	resp, err := c.do(
+		http.MethodPost,
+		"/api/v1/node/secrets/"+url.PathEscape(secretID)+"/versions",
+		req,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("write secret version: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[WriteSecretVersionResponse](resp.Body, "write secret version")
 }
 
 // ReportCompleted marks a message as completed.

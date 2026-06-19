@@ -54,6 +54,8 @@ func main() {
 
 	cmd := os.Args[1]
 	switch cmd {
+	case "connect":
+		cmdConnect(os.Args[2:])
 	case "configure":
 		cmdConfigure(os.Args[2:])
 	case "register":
@@ -81,6 +83,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `paxd — Pax Fleet Daemon %s
 
 Usage:
+  paxd connect --cloud-url <url>      interactive device onboarding
   paxd configure --cloud-url <url>    register node + agent config
   paxd register --cloud-url <url>     node-only registration
   paxd run                             start the daemon loop
@@ -90,6 +93,99 @@ Usage:
   paxd install-service                 install as macOS launchd service
   paxd --version                       print version
 `, version)
+}
+
+// cmdConnect performs interactive device-code style onboarding.
+func cmdConnect(args []string) {
+	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL")
+	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
+	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
+	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
+	runAfter := fs.Bool("run", false, "Run paxd after successful connection")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	cloudAPIURL := firstNonEmpty(*cloudURL, cfg.Cloud.APIURL)
+	if cloudAPIURL == "" {
+		fmt.Fprintln(os.Stderr, "--cloud-url or cloud.api_url is required")
+		os.Exit(1)
+	}
+	if *cfClientID != "" {
+		cfg.Cloud.CFClientID = *cfClientID
+	}
+	if *cfClientSecret != "" {
+		cfg.Cloud.CFClientSecret = *cfClientSecret
+	}
+
+	client := cloud.NewClient(cloudAPIURL, "").
+		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
+	hostname := cfg.Agent.Hostname
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
+	start, err := client.StartNodeRegistration(&cloud.StartNodeRegistrationRequest{
+		Name:        cfg.Agent.Name,
+		Hostname:    hostname,
+		MachineType: cfg.Agent.MachineType,
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		PaxdVersion: version,
+		APIEndpoint: cfg.Hermes.APIEndpoint,
+	})
+	if err != nil {
+		log.Fatalf("start registration: %v", err)
+	}
+
+	fmt.Println("Connect this machine to Pax:")
+	fmt.Printf("\n  Open: %s\n", firstNonEmpty(start.VerificationURIComplete, start.VerificationURI))
+	fmt.Printf("  Code: %s\n\n", start.PairCode)
+	fmt.Println("Waiting for approval...")
+
+	interval := time.Duration(start.Interval) * time.Second
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	deadline := time.Now().Add(time.Duration(start.ExpiresIn) * time.Second)
+	for {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			log.Fatal("registration expired")
+		}
+		time.Sleep(interval)
+		poll, err := client.PollNodeRegistration(&cloud.PollNodeRegistrationRequest{
+			RegistrationID: start.RegistrationID,
+			PollToken:      start.PollToken,
+		})
+		if err != nil {
+			log.Fatalf("poll registration: %v", err)
+		}
+		switch poll.Status {
+		case "pending":
+			continue
+		case "approved":
+			if poll.NodeID == "" || poll.APIKey == "" {
+				log.Fatal("registration approved without node credential")
+			}
+			configFile := saveNodeCredential(cfg, cloudAPIURL, poll.NodeID, poll.APIKey, *configPath)
+			saveNodeState(cfg, cloudAPIURL, poll.NodeID, poll.APIKey)
+			fmt.Printf("Connected successfully.\n")
+			fmt.Printf("  node_id: %s\n", poll.NodeID)
+			fmt.Printf("  config:  %s\n", configFile)
+			if *runAfter {
+				cmdRun([]string{"--config", configFile})
+			}
+			return
+		case "slow_down":
+			interval += time.Second
+		case "denied", "expired":
+			log.Fatalf("registration %s", poll.Status)
+		default:
+			log.Fatalf("registration returned unknown status %q", poll.Status)
+		}
+	}
 }
 
 type stringListFlag []string
@@ -304,25 +400,7 @@ func cmdRegister(args []string) {
 		log.Fatalf("register: %v", err)
 	}
 
-	// Save registration result
-	cfg.Cloud.APIURL = *cloudURL
-	cfg.Cloud.NodeID = resp.NodeID
-	cfg.Cloud.APIKey = resp.APIKey
-	cfg.Cloud.RegistrationToken = ""
-
-	configFile := *configPath
-	if configFile == "" {
-		configFile = config.DefaultPath()
-	}
-	os.MkdirAll(filepath.Dir(configFile), 0700)
-
-	data, err := yamlMarshal(cfg)
-	if err != nil {
-		log.Fatalf("marshal config: %v", err)
-	}
-	if err := os.WriteFile(configFile, data, 0600); err != nil {
-		log.Fatalf("write config: %v", err)
-	}
+	configFile := saveNodeCredential(cfg, *cloudURL, resp.NodeID, resp.APIKey, *configPath)
 
 	fmt.Printf("Registered successfully!\n")
 	fmt.Printf("  node_id: %s\n", resp.NodeID)
@@ -883,6 +961,52 @@ func nodeStateFromConfig(cfg *config.Config, db *store.Store) *store.NodeState {
 		return nodeState
 	}
 	return registerNodeFromConfig(cfg, db)
+}
+
+func saveNodeCredential(
+	cfg *config.Config,
+	cloudURL string,
+	nodeID string,
+	apiKey string,
+	configPath string,
+) string {
+	cfg.Cloud.APIURL = cloudURL
+	cfg.Cloud.URL = cloudURL
+	cfg.Cloud.NodeID = nodeID
+	cfg.Cloud.APIKey = apiKey
+	cfg.Cloud.RegistrationToken = ""
+
+	configFile := configPath
+	if configFile == "" {
+		configFile = config.DefaultPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(configFile), 0700); err != nil {
+		log.Fatalf("create config dir: %v", err)
+	}
+	data, err := yamlMarshal(cfg)
+	if err != nil {
+		log.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configFile, data, 0600); err != nil {
+		log.Fatalf("write config: %v", err)
+	}
+	return configFile
+}
+
+func saveNodeState(cfg *config.Config, cloudURL string, nodeID string, apiKey string) {
+	db, err := store.Open(cfg.Daemon.DBPath)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.SaveNodeState(&store.NodeState{
+		NodeID:       nodeID,
+		CloudAPIKey:  apiKey,
+		CloudAPIURL:  cloudURL,
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		log.Fatalf("save node state: %v", err)
+	}
 }
 
 func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
