@@ -83,9 +83,9 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `paxd — Pax Fleet Daemon %s
 
 Usage:
-  paxd connect --cloud-url <url>      interactive device onboarding
-  paxd configure --cloud-url <url>    register node + agent config
-  paxd register --cloud-url <url>     node-only registration
+  paxd connect [--cloud-url <url>]    interactive device onboarding
+  paxd configure [--cloud-url <url>]  register node + agent config
+  paxd register [--cloud-url <url>]   node-only registration
   paxd run                             start the daemon loop
   paxd acp-forward                     run only the ACP tunnel forwarder
   paxd postman                         print Postman WebSocket URL and smoke messages
@@ -360,19 +360,19 @@ func cmdConfigure(args []string) {
 // cmdRegister performs first-time registration with the Cloud API.
 func cmdRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
-	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL (required)")
+	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL")
 	registrationToken := fs.String("registration-token", "", "Node registration token")
 	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
 	fs.Parse(args)
 
-	if *cloudURL == "" {
-		fmt.Fprintln(os.Stderr, "--cloud-url is required")
-		os.Exit(1)
-	}
-
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+	cloudAPIURL := firstNonEmpty(*cloudURL, cfg.Cloud.APIURL)
+	if cloudAPIURL == "" {
+		fmt.Fprintln(os.Stderr, "--cloud-url or cloud.api_url is required")
+		os.Exit(1)
 	}
 
 	token := firstNonEmpty(*registrationToken, cfg.Cloud.RegistrationToken)
@@ -381,7 +381,7 @@ func cmdRegister(args []string) {
 		os.Exit(1)
 	}
 
-	client := cloud.NewClient(*cloudURL, "").
+	client := cloud.NewClient(cloudAPIURL, "").
 		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
 	hostname, _ := os.Hostname()
 
@@ -400,7 +400,7 @@ func cmdRegister(args []string) {
 		log.Fatalf("register: %v", err)
 	}
 
-	configFile := saveNodeCredential(cfg, *cloudURL, resp.NodeID, resp.APIKey, *configPath)
+	configFile := saveNodeCredential(cfg, cloudAPIURL, resp.NodeID, resp.APIKey, *configPath)
 
 	fmt.Printf("Registered successfully!\n")
 	fmt.Printf("  node_id: %s\n", resp.NodeID)

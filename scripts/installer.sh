@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PAX_DOWNLOAD_URL="${PAX_DOWNLOAD_URL:-https://api.paxtech.net}"
-PAX_CLOUD_URL="${PAX_CLOUD_URL:-https://ws.paxtech.net}"
+PAX_CLOUD_URL="${PAX_CLOUD_URL:-https://api.paxtech.net}"
 PAX_TAG="${PAX_TAG:-stable}"
 PAX_BINARY_NAME="${PAX_BINARY_NAME:-}"
 PAX_INSTALL_DIR="${PAX_INSTALL_DIR:-}"
@@ -221,13 +221,21 @@ main() {
 
   if [[ "$PAX_CONNECT_AFTER_INSTALL" == "1" ]]; then
     log "Starting interactive Pax pairing"
-    if [[ "$PAX_RUN_AFTER_CONNECT" == "1" ]]; then
-      exec "$target" connect --cloud-url "${PAX_CLOUD_URL%/}" --run
+    connect_args=(connect)
+    if [[ -n "$PAX_CLOUD_URL" ]]; then
+      connect_args+=(--cloud-url "${PAX_CLOUD_URL%/}")
     fi
-    exec "$target" connect --cloud-url "${PAX_CLOUD_URL%/}"
+    if [[ "$PAX_RUN_AFTER_CONNECT" == "1" ]]; then
+      connect_args+=(--run)
+    fi
+    exec "$target" "${connect_args[@]}"
   fi
 
-  printf '%s\n' "${green}Done.${reset} Run: ${bold}paxd connect --cloud-url ${PAX_CLOUD_URL%/}${reset}"
+  if [[ -n "$PAX_CLOUD_URL" ]]; then
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxd connect --cloud-url ${PAX_CLOUD_URL%/}${reset}"
+  else
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxd connect${reset}"
+  fi
 }
 
 main "$@"
