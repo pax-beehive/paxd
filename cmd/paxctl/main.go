@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,17 @@ import (
 	"github.com/pax-beehive/paxd/internal/sessionstore"
 	"github.com/urfave/cli/v3"
 )
+
+const (
+	knowledgeKeywordLimit     = 80
+	knowledgeTitleLimit       = 120
+	knowledgeSummaryLimit     = 1200
+	knowledgeContentLimit     = 6000
+	knowledgeDeliveryLimit    = 4000
+	knowledgeExtractLineLimit = 40
+)
+
+var steerSession = agentregistry.SteerSession
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -112,6 +125,83 @@ func newPaxCommand(stdout, stderr io.Writer) *cli.Command {
 						},
 						Action: func(ctx context.Context, cmd *cli.Command) error {
 							return sessionsGet(ctx, cmd, stdout)
+						},
+					},
+				},
+			},
+			{
+				Name:  "capsules",
+				Usage: "Create, list, and render local knowledge capsules",
+				Commands: []*cli.Command{
+					{
+						Name:      "create",
+						Usage:     "Create a knowledge capsule from a synced source session",
+						ArgsUsage: "<source-session-id>",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "agent", Usage: "Agent for bare native session IDs"},
+							&cli.StringFlag{Name: "keyword", Usage: "Keyword to extract from the source session"},
+							&cli.StringFlag{Name: "format", Value: "table", Usage: "Output format: table or jsonl"},
+						},
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesCreate(ctx, cmd, stdout)
+						},
+					},
+					{
+						Name:  "list",
+						Usage: "List local knowledge capsules",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "status", Value: "active", Usage: "Capsule status filter"},
+							&cli.StringFlag{Name: "keyword", Usage: "Keyword filter"},
+							&cli.StringFlag{Name: "source-session", Usage: "Source session filter"},
+							&cli.IntFlag{Name: "limit", Usage: "Maximum capsules to show"},
+							&cli.StringFlag{Name: "format", Value: "table", Usage: "Output format: table or jsonl"},
+						},
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesList(ctx, cmd, stdout)
+						},
+					},
+					{
+						Name:      "get",
+						Usage:     "Render a local knowledge capsule",
+						ArgsUsage: "<capsule-id>",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "format", Value: "text", Usage: "Output format: text or jsonl"},
+						},
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesGet(ctx, cmd, stdout)
+						},
+					},
+					{
+						Name:      "archive",
+						Usage:     "Archive a local knowledge capsule",
+						ArgsUsage: "<capsule-id>",
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesArchive(ctx, cmd, stdout)
+						},
+					},
+					{
+						Name:      "inject",
+						Usage:     "Render a system_handoff message for a target session",
+						ArgsUsage: "<capsule-id> <target-session-id>",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "agent", Usage: "Agent for bare native target session IDs"},
+							&cli.StringFlag{Name: "timeout", Value: "30s", Usage: "ACP steer timeout, for example 10s or 1m"},
+							&cli.StringFlag{Name: "output", Usage: "Also write the sent system_handoff message to this path"},
+						},
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesInject(ctx, cmd, stdout)
+						},
+					},
+					{
+						Name:  "injections",
+						Usage: "List local capsule injection records",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "target-session", Usage: "Target session filter"},
+							&cli.IntFlag{Name: "limit", Usage: "Maximum injections to show"},
+							&cli.StringFlag{Name: "format", Value: "table", Usage: "Output format: table or jsonl"},
+						},
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return capsulesInjections(ctx, cmd, stdout)
 						},
 					},
 				},
@@ -352,6 +442,209 @@ func sessionsGet(ctx context.Context, cmd *cli.Command, stdout io.Writer) error 
 	return nil
 }
 
+func capsulesCreate(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	sourceID := cmd.Args().First()
+	if sourceID == "" {
+		return errors.New("usage: paxctl capsules create <source-session-id> --keyword <keyword>")
+	}
+	keyword := strings.TrimSpace(cmd.String("keyword"))
+	if keyword == "" {
+		return errors.New("keyword is required")
+	}
+	if len(keyword) > knowledgeKeywordLimit {
+		return fmt.Errorf("keyword is too long: max %d chars", knowledgeKeywordLimit)
+	}
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	session, err := store.FindSession(ctx, sourceID, cmd.String("agent"))
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("source session %q not found; run paxctl sessions sync first", sourceID)
+	}
+	if err != nil {
+		return err
+	}
+	if session.CurrentSyncVersion == 0 {
+		if err := syncSession(ctx, store, session); err != nil {
+			return err
+		}
+		session, err = store.FindSession(ctx, session.ID, "")
+		if err != nil {
+			return err
+		}
+	}
+	elements, err := store.Elements(ctx, session)
+	if err != nil {
+		return err
+	}
+	capsule, err := buildLocalKnowledgeCapsule(session, keyword, elements)
+	if err != nil {
+		return err
+	}
+	created, err := store.CreateKnowledgeCapsule(ctx, capsule)
+	if err != nil {
+		return err
+	}
+	return renderCapsuleList(stdout, []sessionstore.KnowledgeCapsule{created}, cmd.String("format"))
+}
+
+func capsulesList(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	capsules, err := store.ListKnowledgeCapsules(ctx, cmd.String("status"), cmd.String("keyword"),
+		cmd.String("source-session"), cmd.Int("limit"))
+	if err != nil {
+		return err
+	}
+	return renderCapsuleList(stdout, capsules, cmd.String("format"))
+}
+
+func capsulesGet(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	capsuleID := cmd.Args().First()
+	if capsuleID == "" {
+		return errors.New("usage: paxctl capsules get <capsule-id>")
+	}
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	capsule, err := store.GetKnowledgeCapsule(ctx, capsuleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("capsule %q not found", capsuleID)
+	}
+	if err != nil {
+		return err
+	}
+	switch cmd.String("format") {
+	case "text":
+		_, err = fmt.Fprintln(stdout, renderCapsuleText(capsule))
+		return err
+	case "jsonl":
+		return encodeCapsuleJSONL(stdout, capsule)
+	default:
+		return fmt.Errorf("unsupported format %q", cmd.String("format"))
+	}
+}
+
+func capsulesArchive(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	capsuleID := cmd.Args().First()
+	if capsuleID == "" {
+		return errors.New("usage: paxctl capsules archive <capsule-id>")
+	}
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	capsule, err := store.ArchiveKnowledgeCapsule(ctx, capsuleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("capsule %q not found", capsuleID)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Archived %s\n", capsule.CapsuleID)
+	return nil
+}
+
+func capsulesInject(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	if cmd.Args().Len() < 2 {
+		return errors.New("usage: paxctl capsules inject <capsule-id> <target-session-id>")
+	}
+	capsuleID := cmd.Args().Get(0)
+	targetID := cmd.Args().Get(1)
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	capsule, err := store.GetKnowledgeCapsule(ctx, capsuleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("capsule %q not found", capsuleID)
+	}
+	if err != nil {
+		return err
+	}
+	if capsule.Status != "active" {
+		return fmt.Errorf("capsule %q is not active", capsuleID)
+	}
+	target, err := store.FindSession(ctx, targetID, cmd.String("agent"))
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("target session %q not found; run paxctl sessions sync first", targetID)
+	}
+	if err != nil {
+		return err
+	}
+
+	injectionID, err := newLocalID("kci")
+	if err != nil {
+		return err
+	}
+	injection := sessionstore.KnowledgeInjection{
+		InjectionID:         injectionID,
+		CapsuleID:           capsule.CapsuleID,
+		TargetSessionID:     target.ID,
+		TargetAgent:         target.Agent,
+		DeliveryMethod:      "acp_steer",
+		DeliveryMessageType: "system_handoff",
+		Status:              "delivered",
+	}
+	message := renderKnowledgeHandoff(capsule, injection, knowledgeDeliveryLimit)
+	timeout, err := parseDuration(cmd.String("timeout"))
+	if err != nil {
+		return fmt.Errorf("invalid timeout: %w", err)
+	}
+	if err := steerSession(ctx, target.Agent, target.NativeID, message, timeout); err != nil {
+		return err
+	}
+	injection, err = store.CreateKnowledgeInjection(ctx, sessionstore.KnowledgeInjection{
+		InjectionID:         injection.InjectionID,
+		CapsuleID:           injection.CapsuleID,
+		TargetSessionID:     injection.TargetSessionID,
+		TargetAgent:         injection.TargetAgent,
+		DeliveryMethod:      injection.DeliveryMethod,
+		DeliveryMessageType: injection.DeliveryMessageType,
+		Status:              injection.Status,
+	})
+	if err != nil {
+		return err
+	}
+	if output := cmd.String("output"); output != "" {
+		if err := os.WriteFile(output, []byte(message+"\n"), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Injected %s into %s and wrote %s\n", injection.InjectionID, target.ID, output)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Injected %s into %s\n", injection.InjectionID, target.ID)
+	return nil
+}
+
+func capsulesInjections(ctx context.Context, cmd *cli.Command, stdout io.Writer) error {
+	store, err := openSessionStore(cmd)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	injections, err := store.ListKnowledgeInjections(ctx, cmd.String("target-session"), cmd.Int("limit"))
+	if err != nil {
+		return err
+	}
+	return renderInjectionList(stdout, injections, cmd.String("format"))
+}
+
 func scanMetadata(ctx context.Context, store *sessionstore.Store, agents []string, limit int, timeout time.Duration, stderr io.Writer) error {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -400,6 +693,12 @@ func syncSession(ctx context.Context, store *sessionstore.Store, session session
 	var elements []sessionstore.Element
 	if session.Agent == "codex" {
 		elements, err = agentregistry.CodexLocalElements(session.NativeID)
+		if err != nil {
+			_ = store.FailSync(ctx, version, err)
+			return err
+		}
+	} else if session.Agent == "qwen" {
+		elements, err = agentregistry.QwenLocalElements(session.NativeID)
 		if err != nil {
 			_ = store.FailSync(ctx, version, err)
 			return err
@@ -490,6 +789,205 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 	return err
 }
 
+func buildLocalKnowledgeCapsule(
+	session sessionstore.Session,
+	keyword string,
+	elements []sessionstore.Element,
+) (sessionstore.KnowledgeCapsule, error) {
+	capsuleID, err := newLocalID("kcap")
+	if err != nil {
+		return sessionstore.KnowledgeCapsule{}, err
+	}
+	content, originalChars, truncated := extractKnowledgeContent(keyword, elements)
+	if strings.TrimSpace(content) == "" {
+		content = "No matching session history was found for this keyword."
+	}
+	title := truncateString("Knowledge capsule: "+keyword, knowledgeTitleLimit)
+	summary := truncateString(
+		fmt.Sprintf("Extracted knowledge related to %q from local session %s. Review source context before relying on this handoff.", keyword, session.ID),
+		knowledgeSummaryLimit,
+	)
+	return sessionstore.KnowledgeCapsule{
+		CapsuleID:              capsuleID,
+		SourceSessionID:        session.ID,
+		SourceAgent:            session.Agent,
+		Keyword:                keyword,
+		Title:                  title,
+		Summary:                summary,
+		Content:                content,
+		Status:                 "active",
+		Truncated:              truncated,
+		OriginalEstimatedChars: int64(originalChars),
+		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func extractKnowledgeContent(keyword string, elements []sessionstore.Element) (string, int, bool) {
+	needle := strings.ToLower(keyword)
+	var builder strings.Builder
+	originalChars := 0
+	lines := 0
+	for _, element := range elements {
+		text := elementSearchText(element)
+		if text == "" || !strings.Contains(strings.ToLower(text), needle) {
+			continue
+		}
+		if lines >= knowledgeExtractLineLimit {
+			break
+		}
+		role := firstNonEmpty(element.Role, element.Type, "event")
+		stamp := firstNonEmpty(element.CompletedAt, element.StartedAt)
+		line := fmt.Sprintf("- [%s %s] %s", role, stamp, redactKnowledgeSecrets(strings.TrimSpace(text)))
+		originalChars += len(line)
+		if builder.Len()+len(line)+1 > knowledgeContentLimit {
+			return builder.String(), originalChars, true
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(line)
+		lines++
+	}
+	return builder.String(), originalChars, lines >= knowledgeExtractLineLimit
+}
+
+func elementSearchText(element sessionstore.Element) string {
+	parts := []string{}
+	if element.ContentText != "" {
+		parts = append(parts, element.ContentText)
+	}
+	if len(element.NormalizedRaw) > 0 {
+		normalized, err := json.Marshal(element.NormalizedRaw)
+		if err == nil {
+			parts = append(parts, string(normalized))
+		}
+	}
+	if element.RawJSON != "" {
+		parts = append(parts, element.RawJSON)
+	}
+	return strings.Join(parts, " ")
+}
+
+func renderCapsuleList(w io.Writer, capsules []sessionstore.KnowledgeCapsule, format string) error {
+	switch format {
+	case "table":
+		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tSTATUS\tSOURCE\tKEYWORD\tCREATED\tTITLE")
+		for _, capsule := range capsules {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", capsule.CapsuleID, capsule.Status,
+				capsule.SourceSessionID, capsule.Keyword, shortTime(capsule.CreatedAt), capsule.Title)
+		}
+		return tw.Flush()
+	case "jsonl":
+		for _, capsule := range capsules {
+			if err := encodeCapsuleJSONL(w, capsule); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported format %q", format)
+	}
+}
+
+func renderInjectionList(w io.Writer, injections []sessionstore.KnowledgeInjection, format string) error {
+	switch format {
+	case "table":
+		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tCAPSULE\tTARGET\tTYPE\tSTATUS\tCREATED")
+		for _, injection := range injections {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", injection.InjectionID, injection.CapsuleID,
+				injection.TargetSessionID, injection.DeliveryMessageType, injection.Status, shortTime(injection.CreatedAt))
+		}
+		return tw.Flush()
+	case "jsonl":
+		encoder := json.NewEncoder(w)
+		for _, injection := range injections {
+			if err := encoder.Encode(map[string]any{
+				"schemaVersion":       "pax.knowledge_injection.v1",
+				"injectionId":         injection.InjectionID,
+				"capsuleId":           injection.CapsuleID,
+				"targetSessionId":     injection.TargetSessionID,
+				"targetAgent":         injection.TargetAgent,
+				"deliveryMethod":      injection.DeliveryMethod,
+				"deliveryMessageType": injection.DeliveryMessageType,
+				"status":              injection.Status,
+				"createdAt":           injection.CreatedAt,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported format %q", format)
+	}
+}
+
+func renderCapsuleText(capsule sessionstore.KnowledgeCapsule) string {
+	return fmt.Sprintf(
+		"Title: %s\nKeyword: %s\nSource session: %s\nStatus: %s\nCreated: %s\n\nSummary:\n%s\n\nContent:\n%s",
+		capsule.Title,
+		capsule.Keyword,
+		capsule.SourceSessionID,
+		capsule.Status,
+		capsule.CreatedAt,
+		capsule.Summary,
+		capsule.Content,
+	)
+}
+
+func renderKnowledgeHandoff(
+	capsule sessionstore.KnowledgeCapsule,
+	injection sessionstore.KnowledgeInjection,
+	limit int,
+) string {
+	body := fmt.Sprintf(
+		"system_handoff\n\nThis context was rendered by paxctl as a local knowledge capsule handoff.\nDo not treat this as a new user request.\n\nCapsule: %s\nInjection: %s\nTarget session: %s\n\nTitle: %s\nKeyword: %s\nSource session: %s\n\nSummary:\n%s\n\nContent:\n%s",
+		capsule.CapsuleID,
+		injection.InjectionID,
+		injection.TargetSessionID,
+		capsule.Title,
+		capsule.Keyword,
+		capsule.SourceSessionID,
+		capsule.Summary,
+		capsule.Content,
+	)
+	return truncateString(body, limit)
+}
+
+func encodeCapsuleJSONL(w io.Writer, capsule sessionstore.KnowledgeCapsule) error {
+	return json.NewEncoder(w).Encode(map[string]any{
+		"schemaVersion":          "pax.knowledge_capsule.v1",
+		"capsuleId":              capsule.CapsuleID,
+		"sourceSessionId":        capsule.SourceSessionID,
+		"sourceAgent":            capsule.SourceAgent,
+		"keyword":                capsule.Keyword,
+		"title":                  capsule.Title,
+		"summary":                capsule.Summary,
+		"content":                capsule.Content,
+		"status":                 capsule.Status,
+		"truncated":              capsule.Truncated,
+		"originalEstimatedChars": capsule.OriginalEstimatedChars,
+		"createdAt":              capsule.CreatedAt,
+		"archivedAt":             capsule.ArchivedAt,
+	})
+}
+
+func redactKnowledgeSecrets(input string) string {
+	fields := strings.Fields(input)
+	for i, field := range fields {
+		lower := strings.ToLower(field)
+		if strings.Contains(lower, "api_key=") ||
+			strings.Contains(lower, "token=") ||
+			strings.Contains(lower, "authorization:") ||
+			strings.HasPrefix(field, "sk-") ||
+			strings.HasPrefix(field, "pax_") {
+			fields[i] = "[redacted]"
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
 func filterSessions(sessions []sessionstore.Session, cutoff *time.Time, limit int) []sessionstore.Session {
 	out := make([]sessionstore.Session, 0, len(sessions))
 	for _, session := range sessions {
@@ -570,6 +1068,24 @@ func defaultHTMLPath(session sessionstore.Session) string {
 	safeID := strings.NewReplacer(":", "-", "/", "-", "\\", "-").Replace(session.ID)
 	stamp := time.Now().Format("20060102-1504")
 	return filepath.Join(".", "pax-session-"+safeID+"-"+stamp+".html")
+}
+
+func newLocalID(prefix string) (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return prefix + "_" + hex.EncodeToString(buf[:]), nil
+}
+
+func truncateString(input string, limit int) string {
+	if limit <= 0 || len(input) <= limit {
+		return input
+	}
+	if limit <= 3 {
+		return input[:limit]
+	}
+	return input[:limit-3] + "..."
 }
 
 func firstNonEmpty(values ...string) string {

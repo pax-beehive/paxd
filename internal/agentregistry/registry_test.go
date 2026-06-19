@@ -3,6 +3,7 @@ package agentregistry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,89 @@ func TestRegistryIncludesOpenClawGateway(t *testing.T) {
 	}
 	if agents[0].Kind != "gateway" || agents[0].Source != "gateway" {
 		t.Fatalf("openclaw kind/source = %s/%s, want gateway/gateway", agents[0].Kind, agents[0].Source)
+	}
+}
+
+func TestRegistryIncludesQwenCodeACP(t *testing.T) {
+	agents, err := Default().Agents([]string{"qwen-code", "qwen_code"})
+	if err != nil {
+		t.Fatalf("Agents(qwen-code,qwen_code) error = %v", err)
+	}
+	if len(agents) != 2 || agents[0].Name != "qwen" || agents[1].Name != "qwen" {
+		t.Fatalf("Agents(qwen aliases) = %+v, want qwen aliases to canonicalize", agents)
+	}
+	if got := agents[0].Command; len(got) != 1 || got[0] != "~/.qwen/projects" {
+		t.Fatalf("qwen command = %#v, want ~/.qwen/projects", got)
+	}
+	if got := agents[0].InstallCommands; len(got) != 1 || strings.Join(got[0], " ") != "npm install -g @qwen-code/qwen-code" {
+		t.Fatalf("qwen install commands = %#v", got)
+	}
+}
+
+func TestListQwenLocalSessions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QWEN_HOME", dir)
+	chats := filepath.Join(dir, "projects", "-tmp-project", "chats")
+	if err := os.MkdirAll(chats, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	chat := filepath.Join(chats, "qwen-session-1.jsonl")
+	if err := os.WriteFile(chat, []byte(
+		`{"uuid":"u1","sessionId":"qwen-session-1","timestamp":"2026-06-19T16:38:45.242Z","type":"user","cwd":"/tmp/project","message":{"role":"user","parts":[{"text":"hello qwen"}]}}`+"\n"+
+			`{"uuid":"u2","sessionId":"qwen-session-1","timestamp":"2026-06-19T16:39:30.021Z","type":"system","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"model":"z-ai/glm-5.2","duration_ms":44729,"input_token_count":23147,"output_token_count":17,"cached_content_token_count":0,"thoughts_token_count":0,"total_token_count":23164,"response_text":"Hello!"}}}`+"\n"+
+			`{"uuid":"u3","sessionId":"qwen-session-1","timestamp":"2026-06-19T16:39:30.022Z","type":"assistant","cwd":"/tmp/project","model":"z-ai/glm-5.2","message":{"role":"model","parts":[{"text":"Hello!"}]},"usageMetadata":{"promptTokenCount":23147,"candidatesTokenCount":17,"thoughtsTokenCount":0,"totalTokenCount":23164,"cachedContentTokenCount":0}}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	status := DetectWithProbe(Agent{Name: "qwen", Kind: "local", Command: []string{"~/.qwen/projects"}}, false)
+	if !status.Available || status.Capability != "local-log" {
+		t.Fatalf("qwen status = %+v, want local-log", status)
+	}
+	sessions, err := listQwenLocalSessions()
+	if err != nil {
+		t.Fatalf("listQwenLocalSessions() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].SessionID != "qwen:qwen-session-1" || sessions[0].Name != "hello qwen" || sessions[0].ProjectID != "/tmp/project" {
+		t.Fatalf("session = %+v, want qwen metadata", sessions[0])
+	}
+	elements, err := QwenLocalElements("qwen-session-1")
+	if err != nil {
+		t.Fatalf("QwenLocalElements() error = %v", err)
+	}
+	if len(elements) != 3 {
+		t.Fatalf("len(elements) = %d, want 3", len(elements))
+	}
+	if elements[0].Type != "message" || elements[0].Role != "user" || elements[0].ContentText != "hello qwen" {
+		t.Fatalf("first element = %+v, want user message", elements[0])
+	}
+	if elements[1].Type != "usage" || elements[1].DurationMS != 44729 || elements[1].UsageJSON == "" {
+		t.Fatalf("usage element = %+v, want telemetry usage", elements[1])
+	}
+	if elements[2].Type != "message" || elements[2].Role != "assistant" || elements[2].Model != "z-ai/glm-5.2" {
+		t.Fatalf("assistant element = %+v", elements[2])
+	}
+}
+
+func TestDetectZCodeAppOnlySource(t *testing.T) {
+	dir := t.TempDir()
+	appRoot := filepath.Join(dir, "ZCode.app")
+	if err := os.Mkdir(appRoot, 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	status := detectApp(Agent{
+		Name:     "zcode",
+		Kind:     "app",
+		AppNames: []string{appRoot},
+	})
+	if !status.Available || status.State != "installed" || status.Capability != "app" {
+		t.Fatalf("zcode status = %+v, want installed app-only", status)
+	}
+	if len(status.Command) != 1 || status.Command[0] != appRoot {
+		t.Fatalf("zcode command = %#v, want app path", status.Command)
 	}
 }
 
