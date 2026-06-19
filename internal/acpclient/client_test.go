@@ -3,6 +3,9 @@ package acpclient
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,5 +22,40 @@ func TestSessionListerTimesOutWhenACPDoesNotRespond(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("List() took %s, want fast timeout", elapsed)
+	}
+}
+
+func TestSessionPrompterSendsSessionPrompt(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "prompt.json")
+	scriptPath := filepath.Join(dir, "fake-acp.sh")
+	script := `#!/bin/sh
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}\n'
+read line
+printf '%s\n' "$line" > "$1"
+printf '{"jsonrpc":"2.0","id":2,"result":{}}\n'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	prompter := SessionPrompter{
+		Command: []string{scriptPath, logPath},
+		Timeout: time.Second,
+	}
+	err := prompter.Prompt(context.Background(), "sess-1", "system_handoff\ncontext")
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	out := string(payload)
+	if !strings.Contains(out, `"method":"session/prompt"`) ||
+		!strings.Contains(out, `"sessionId":"sess-1"`) ||
+		!strings.Contains(out, `system_handoff`) {
+		t.Fatalf("prompt payload missing fields: %s", out)
 	}
 }

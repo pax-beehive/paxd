@@ -51,6 +51,32 @@ type Element struct {
 	RawJSON       string         `json:"raw,omitempty"`
 }
 
+type KnowledgeCapsule struct {
+	CapsuleID              string
+	SourceSessionID        string
+	SourceAgent            string
+	Keyword                string
+	Title                  string
+	Summary                string
+	Content                string
+	Status                 string
+	Truncated              bool
+	OriginalEstimatedChars int64
+	CreatedAt              string
+	ArchivedAt             string
+}
+
+type KnowledgeInjection struct {
+	InjectionID         string
+	CapsuleID           string
+	TargetSessionID     string
+	TargetAgent         string
+	DeliveryMethod      string
+	DeliveryMessageType string
+	Status              string
+	CreatedAt           string
+}
+
 func DefaultPath() (string, error) {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "pax-session", "pax-session.sqlite"), nil
@@ -137,8 +163,39 @@ func migrate(db *sql.DB) error {
 		raw_json TEXT,
 		PRIMARY KEY(session_id, sync_version, seq)
 	);
-	CREATE INDEX IF NOT EXISTS idx_session_elements_current ON session_elements(session_id, sync_version, seq);
-	`)
+		CREATE INDEX IF NOT EXISTS idx_session_elements_current ON session_elements(session_id, sync_version, seq);
+
+		CREATE TABLE IF NOT EXISTS knowledge_capsules (
+			capsule_id TEXT PRIMARY KEY,
+			source_session_id TEXT NOT NULL,
+			source_agent TEXT NOT NULL,
+			keyword TEXT NOT NULL,
+			title TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			content TEXT NOT NULL,
+			status TEXT NOT NULL,
+			truncated INTEGER NOT NULL DEFAULT 0,
+			original_estimated_chars INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			archived_at TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_knowledge_capsules_status_created ON knowledge_capsules(status, created_at);
+		CREATE INDEX IF NOT EXISTS idx_knowledge_capsules_source ON knowledge_capsules(source_session_id, created_at);
+		CREATE INDEX IF NOT EXISTS idx_knowledge_capsules_keyword ON knowledge_capsules(keyword, created_at);
+
+		CREATE TABLE IF NOT EXISTS session_knowledge_injections (
+			injection_id TEXT PRIMARY KEY,
+			capsule_id TEXT NOT NULL,
+			target_session_id TEXT NOT NULL,
+			target_agent TEXT NOT NULL,
+			delivery_method TEXT NOT NULL,
+			delivery_message_type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_knowledge_injections_capsule ON session_knowledge_injections(capsule_id, created_at);
+		CREATE INDEX IF NOT EXISTS idx_session_knowledge_injections_target ON session_knowledge_injections(target_session_id, created_at);
+		`)
 	return err
 }
 
@@ -350,6 +407,165 @@ func (s *Store) Elements(ctx context.Context, session Session) ([]Element, error
 	return elements, rows.Err()
 }
 
+func (s *Store) CreateKnowledgeCapsule(ctx context.Context, capsule KnowledgeCapsule) (KnowledgeCapsule, error) {
+	if capsule.Status == "" {
+		capsule.Status = "active"
+	}
+	if capsule.CreatedAt == "" {
+		capsule.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO knowledge_capsules (
+			capsule_id, source_session_id, source_agent, keyword, title, summary, content,
+			status, truncated, original_estimated_chars, created_at, archived_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, capsule.CapsuleID, capsule.SourceSessionID, capsule.SourceAgent, capsule.Keyword, capsule.Title,
+		capsule.Summary, capsule.Content, capsule.Status, boolInt(capsule.Truncated),
+		capsule.OriginalEstimatedChars, capsule.CreatedAt, nullString(capsule.ArchivedAt))
+	return capsule, err
+}
+
+func (s *Store) ListKnowledgeCapsules(
+	ctx context.Context,
+	status string,
+	keyword string,
+	sourceSessionID string,
+	limit int,
+) ([]KnowledgeCapsule, error) {
+	where := []string{}
+	args := []any{}
+	if status != "" {
+		where = append(where, "status = ?")
+		args = append(args, status)
+	}
+	if keyword != "" {
+		where = append(where, "keyword = ?")
+		args = append(args, keyword)
+	}
+	if sourceSessionID != "" {
+		where = append(where, "source_session_id = ?")
+		args = append(args, sourceSessionID)
+	}
+	query := `SELECT capsule_id, source_session_id, source_agent, keyword, title, summary,
+		content, status, truncated, original_estimated_chars, created_at, COALESCE(archived_at, '')
+		FROM knowledge_capsules`
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY created_at DESC, capsule_id"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var capsules []KnowledgeCapsule
+	for rows.Next() {
+		capsule, err := scanKnowledgeCapsule(rows)
+		if err != nil {
+			return nil, err
+		}
+		capsules = append(capsules, capsule)
+	}
+	return capsules, rows.Err()
+}
+
+func (s *Store) GetKnowledgeCapsule(ctx context.Context, capsuleID string) (KnowledgeCapsule, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT capsule_id, source_session_id, source_agent, keyword, title, summary,
+		content, status, truncated, original_estimated_chars, created_at, COALESCE(archived_at, '')
+		FROM knowledge_capsules WHERE capsule_id = ?`, capsuleID)
+	return scanKnowledgeCapsule(row)
+}
+
+func (s *Store) ArchiveKnowledgeCapsule(ctx context.Context, capsuleID string) (KnowledgeCapsule, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE knowledge_capsules SET status = 'archived', archived_at = COALESCE(archived_at, ?)
+		WHERE capsule_id = ?
+	`, now, capsuleID)
+	if err != nil {
+		return KnowledgeCapsule{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return KnowledgeCapsule{}, err
+	}
+	if affected == 0 {
+		return KnowledgeCapsule{}, sql.ErrNoRows
+	}
+	return s.GetKnowledgeCapsule(ctx, capsuleID)
+}
+
+func (s *Store) CreateKnowledgeInjection(ctx context.Context, injection KnowledgeInjection) (KnowledgeInjection, error) {
+	if injection.DeliveryMessageType == "" {
+		injection.DeliveryMessageType = "system_handoff"
+	}
+	if injection.Status == "" {
+		injection.Status = "rendered"
+	}
+	if injection.CreatedAt == "" {
+		injection.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO session_knowledge_injections (
+			injection_id, capsule_id, target_session_id, target_agent, delivery_method,
+			delivery_message_type, status, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, injection.InjectionID, injection.CapsuleID, injection.TargetSessionID, injection.TargetAgent,
+		injection.DeliveryMethod, injection.DeliveryMessageType, injection.Status, injection.CreatedAt)
+	return injection, err
+}
+
+func (s *Store) ListKnowledgeInjections(ctx context.Context, targetSessionID string, limit int) ([]KnowledgeInjection, error) {
+	args := []any{}
+	query := `SELECT injection_id, capsule_id, target_session_id, target_agent, delivery_method,
+		delivery_message_type, status, created_at FROM session_knowledge_injections`
+	if targetSessionID != "" {
+		query += " WHERE target_session_id = ?"
+		args = append(args, targetSessionID)
+	}
+	query += " ORDER BY created_at DESC, injection_id"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var injections []KnowledgeInjection
+	for rows.Next() {
+		var injection KnowledgeInjection
+		if err := rows.Scan(&injection.InjectionID, &injection.CapsuleID, &injection.TargetSessionID,
+			&injection.TargetAgent, &injection.DeliveryMethod, &injection.DeliveryMessageType,
+			&injection.Status, &injection.CreatedAt); err != nil {
+			return nil, err
+		}
+		injections = append(injections, injection)
+	}
+	return injections, rows.Err()
+}
+
+type capsuleScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanKnowledgeCapsule(scanner capsuleScanner) (KnowledgeCapsule, error) {
+	var capsule KnowledgeCapsule
+	var truncated int
+	if err := scanner.Scan(&capsule.CapsuleID, &capsule.SourceSessionID, &capsule.SourceAgent,
+		&capsule.Keyword, &capsule.Title, &capsule.Summary, &capsule.Content, &capsule.Status,
+		&truncated, &capsule.OriginalEstimatedChars, &capsule.CreatedAt, &capsule.ArchivedAt); err != nil {
+		return KnowledgeCapsule{}, err
+	}
+	capsule.Truncated = truncated != 0
+	return capsule, nil
+}
+
 func pruneOldVersions(ctx context.Context, tx *sql.Tx, sessionID string, keep int) error {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT DISTINCT sync_version FROM session_elements
@@ -392,4 +608,18 @@ func firstNonEmpty(values ...string) string {
 func trimAgentPrefix(agent, id string) string {
 	prefix := agent + ":"
 	return strings.TrimPrefix(id, prefix)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func nullString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

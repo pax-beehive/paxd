@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,10 +18,12 @@ import (
 // Agent describes a local ACP session source.
 type Agent struct {
 	Name            string
+	Aliases         []string
 	Kind            string
 	Command         []string
 	FallbackCommand []string
 	InstallCommands [][]string
+	AppNames        []string
 	Source          string
 	InstallHint     string
 }
@@ -77,6 +81,24 @@ func Default() Registry {
 			InstallHint:     "install pi-acp and @earendil-works/pi-coding-agent; npx fallback is not run automatically by sync",
 		},
 		{
+			Name:            "qwen",
+			Aliases:         []string{"qwen-code", "qwen_code"},
+			Kind:            "local",
+			Command:         []string{"~/.qwen/projects"},
+			FallbackCommand: []string{"npx", "-y", "@qwen-code/qwen-code", "--acp"},
+			InstallCommands: [][]string{{"npm", "install", "-g", "@qwen-code/qwen-code"}},
+			Source:          "official",
+			InstallHint:     "run Qwen Code locally so ~/.qwen/projects contains chat logs",
+		},
+		{
+			Name:        "zcode",
+			Aliases:     []string{"zai-code", "zai_code", "z-ai-code", "z.ai-code"},
+			Kind:        "app",
+			AppNames:    []string{"ZCode.app", "Z.ai Code.app", "Zai Code.app"},
+			Source:      "app",
+			InstallHint: "install the Z.ai Code desktop app; local session sync needs an ACP or log adapter",
+		},
+		{
 			Name:        "openclaw",
 			Kind:        "gateway",
 			Command:     []string{"openclaw"},
@@ -100,6 +122,9 @@ func (r Registry) Agents(names []string) ([]Agent, error) {
 	byName := make(map[string]Agent, len(r.agents))
 	for _, agent := range r.agents {
 		byName[agent.Name] = agent
+		for _, alias := range agent.Aliases {
+			byName[alias] = agent
+		}
 	}
 	out := make([]Agent, 0, len(names))
 	for _, name := range names {
@@ -143,8 +168,17 @@ func DetectWithProbe(agent Agent, probe bool) Status {
 	if agent.Kind == "gateway" && agent.Name == "openclaw" {
 		return detectOpenClaw(agent, probe)
 	}
+	if agent.Kind == "app" {
+		return detectApp(agent)
+	}
 	if agent.Kind == "local" && agent.Name == "codex" {
 		if codexLocalAvailable() {
+			return Status{Agent: agent, Available: true, Command: agent.Command, State: "available", Capability: "local-log"}
+		}
+		return Status{Agent: agent, State: "missing", Reason: agent.InstallHint}
+	}
+	if agent.Kind == "local" && agent.Name == "qwen" {
+		if qwenLocalAvailable() {
 			return Status{Agent: agent, Available: true, Command: agent.Command, State: "available", Capability: "local-log"}
 		}
 		return Status{Agent: agent, State: "missing", Reason: agent.InstallHint}
@@ -176,6 +210,49 @@ func commandAvailable(command []string) bool {
 	return err == nil
 }
 
+func detectApp(agent Agent) Status {
+	path := findMacApp(agent.AppNames)
+	if path == "" {
+		return Status{Agent: agent, State: "missing", Capability: "app", Reason: agent.InstallHint}
+	}
+	return Status{
+		Agent:      agent,
+		Available:  true,
+		Command:    []string{path},
+		State:      "installed",
+		Capability: "app",
+		Reason:     "app is installed, but no ACP or local-log session adapter is available yet",
+	}
+}
+
+func findMacApp(names []string) string {
+	for _, name := range names {
+		if filepath.IsAbs(name) {
+			info, err := os.Stat(name)
+			if err == nil && info.IsDir() {
+				return name
+			}
+			continue
+		}
+		for _, root := range appSearchRoots() {
+			path := filepath.Join(root, name)
+			info, err := os.Stat(path)
+			if err == nil && info.IsDir() {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func appSearchRoots() []string {
+	roots := []string{"/Applications"}
+	if home, err := os.UserHomeDir(); err == nil {
+		roots = append(roots, filepath.Join(home, "Applications"))
+	}
+	return roots
+}
+
 // ListSessions asks an available ACP source for lightweight session metadata.
 func ListSessions(ctx context.Context, status Status, timeout time.Duration) ([]model.SessionInfo, error) {
 	if !status.Available {
@@ -184,8 +261,14 @@ func ListSessions(ctx context.Context, status Status, timeout time.Duration) ([]
 	if status.Agent.Kind == "local" && status.Agent.Name == "codex" {
 		return listCodexLocalSessions()
 	}
+	if status.Agent.Kind == "local" && status.Agent.Name == "qwen" {
+		return listQwenLocalSessions()
+	}
 	if status.Agent.Kind == "gateway" && status.Agent.Name == "openclaw" {
 		return listOpenClawSessions(ctx, status, timeout)
+	}
+	if status.Agent.Kind == "app" {
+		return nil, fmt.Errorf("%s is app-only: no ACP or local-log session adapter is available", status.Agent.Name)
 	}
 	lister := acpclient.SessionLister{Command: status.Command, Timeout: timeout}
 	sessions, err := lister.List(ctx)
@@ -202,6 +285,46 @@ func ListSessions(ctx context.Context, status Status, timeout time.Duration) ([]
 		sessions[i].SessionID = CanonicalSessionID(status.Agent.Name, sessions[i].NativeID)
 	}
 	return sessions, nil
+}
+
+// SteerSession sends a system handoff prompt to an existing local ACP session.
+func SteerSession(ctx context.Context, agentName string, nativeSessionID string, text string, timeout time.Duration) error {
+	agents, err := Default().Agents([]string{agentName})
+	if err != nil {
+		return err
+	}
+	if len(agents) == 0 {
+		return fmt.Errorf("unsupported agent %q", agentName)
+	}
+	agent := agents[0]
+	command, err := steerCommand(agent)
+	if err != nil {
+		return err
+	}
+	prompter := acpclient.SessionPrompter{Command: command, Timeout: timeout}
+	if err := prompter.Prompt(ctx, nativeSessionID, text); err != nil {
+		return fmt.Errorf("steer %s session %s: %w", agent.Name, nativeSessionID, err)
+	}
+	return nil
+}
+
+func steerCommand(agent Agent) ([]string, error) {
+	if agent.Kind == "acp" && commandAvailable(agent.Command) {
+		return agent.Command, nil
+	}
+	if len(agent.FallbackCommand) > 0 && commandAvailable(agent.FallbackCommand) {
+		return agent.FallbackCommand, nil
+	}
+	if agent.Kind == "local" {
+		return nil, fmt.Errorf("%s has local session logs but no ACP adapter for injection: %s", agent.Name, agent.InstallHint)
+	}
+	if agent.Kind == "app" {
+		return nil, fmt.Errorf("%s is app-only: no ACP adapter is available for injection", agent.Name)
+	}
+	if agent.Kind == "gateway" {
+		return nil, fmt.Errorf("%s gateway injection is not implemented yet", agent.Name)
+	}
+	return nil, fmt.Errorf("%s ACP command is unavailable: %s", agent.Name, firstNonEmpty(agent.InstallHint, "install adapter command"))
 }
 
 func CanonicalSessionID(agent, nativeID string) string {
