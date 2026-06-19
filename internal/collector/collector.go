@@ -12,10 +12,9 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 
-	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/cloud"
-	"github.com/pax-beehive/paxd/internal/hermes"
 	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 // Collector gathers and reports agent status.
@@ -30,9 +29,18 @@ type Collector struct {
 // AgentRuntime binds one cloud agent to a local Hermes client.
 type AgentRuntime struct {
 	Agent              store.CloudAgent
-	HermesClient       *hermes.Client
+	HermesClient       hermesSessionClient
 	SupportsHermesHTTP bool
-	ACPSessionLister   *acpclient.SessionLister
+	ACPSessionLister   acpSessionLister
+}
+
+type hermesSessionClient interface {
+	Ping() error
+	GetSessions() ([]model.SessionInfo, error)
+}
+
+type acpSessionLister interface {
+	List(context.Context) ([]model.SessionInfo, error)
 }
 
 // New creates a new Collector.
@@ -65,43 +73,7 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 	agentStatuses := make([]cloud.AgentStatus, 0, len(c.agents))
 	sessionCount := 0
 	for _, runtime := range c.agents {
-		var sessionStatuses []cloud.SessionStatus
-		if runtime.ACPSessionLister != nil {
-			acpSessions, err := runtime.ACPSessionLister.List(ctx)
-			if err == nil {
-				for _, s := range acpSessions {
-					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-						SessionID:     s.SessionID,
-						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
-						NativeID:      s.NativeID,
-						Name:          s.Name,
-						ProjectID:     s.ProjectID,
-						Preview:       s.Preview,
-						Status:        s.Status,
-						CurrentTask:   s.CurrentTask,
-						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
-					})
-				}
-			}
-		} else if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
-			hermesSessions, err := runtime.HermesClient.GetSessions()
-			if err == nil {
-				for _, s := range hermesSessions {
-					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-						SessionID:     s.SessionID,
-						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
-						NativeID:      s.NativeID,
-						Name:          s.Name,
-						ProjectID:     s.ProjectID,
-						Preview:       s.Preview,
-						Status:        s.Status,
-						CurrentTask:   s.CurrentTask,
-						TokenUsage:    s.TokenUsage,
-						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
-					})
-				}
-			}
-		}
+		sessionStatuses := c.collectSessions(ctx, runtime)
 
 		sessionCount += len(sessionStatuses)
 		agentStatuses = append(agentStatuses, cloud.AgentStatus{
@@ -143,6 +115,58 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 		sys.MemoryPercent,
 	)
 	return nil
+}
+
+func (c *Collector) collectSessions(ctx context.Context, runtime AgentRuntime) []cloud.SessionStatus {
+	if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
+		hermesSessions, err := runtime.HermesClient.GetSessions()
+		if err == nil {
+			return sessionStatusesFromModel(hermesSessions, runtime.Agent.AgentType, true)
+		}
+		log.Printf(
+			"[collector] Hermes session list failed for agent %s: %v",
+			runtime.Agent.AgentID,
+			err,
+		)
+	}
+	if runtime.ACPSessionLister != nil {
+		acpSessions, err := runtime.ACPSessionLister.List(ctx)
+		if err == nil {
+			return sessionStatusesFromModel(acpSessions, runtime.Agent.AgentType, false)
+		}
+		log.Printf(
+			"[collector] ACP session list failed for agent %s: %v",
+			runtime.Agent.AgentID,
+			err,
+		)
+	}
+	return nil
+}
+
+func sessionStatusesFromModel(
+	sessions []model.SessionInfo,
+	defaultAgentType string,
+	includeTokenUsage bool,
+) []cloud.SessionStatus {
+	sessionStatuses := make([]cloud.SessionStatus, 0, len(sessions))
+	for _, s := range sessions {
+		status := cloud.SessionStatus{
+			SessionID:     s.SessionID,
+			AgentType:     firstNonEmpty(s.AgentType, defaultAgentType),
+			NativeID:      s.NativeID,
+			Name:          s.Name,
+			ProjectID:     s.ProjectID,
+			Preview:       s.Preview,
+			Status:        s.Status,
+			CurrentTask:   s.CurrentTask,
+			LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+		}
+		if includeTokenUsage {
+			status.TokenUsage = s.TokenUsage
+		}
+		sessionStatuses = append(sessionStatuses, status)
+	}
+	return sessionStatuses
 }
 
 func splitReports(report *cloud.NodeStatusReport, batchSize int) []*cloud.NodeStatusReport {
