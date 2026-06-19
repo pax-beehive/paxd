@@ -31,8 +31,8 @@ Confirm these before starting:
 - The tester has a Cloudflare-authenticated user identity or cookie for user-side APIs.
 - The tester has or can obtain:
   - `PAX_CLOUD_URL`, for example `https://app.example.com`
-  - `CF_ACCESS_CLIENT_ID`
-  - `CF_ACCESS_CLIENT_SECRET`
+  - `PAX_CLOUD_CF_CLIENT_ID`
+  - `PAX_CLOUD_CF_CLIENT_SECRET`
   - a node registration token
   - or an existing node API key in `~/.paxd/paxd.yaml`
 
@@ -70,8 +70,8 @@ Use the Cloudflare-authenticated user side to create a node registration token:
 ```bash
 curl -sS -X POST "$PAX_CLOUD_URL/api/v1/user/self/node-registration-tokens" \
   -H 'Content-Type: application/json' \
-  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "CF-Access-Client-Id: $PAX_CLOUD_CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $PAX_CLOUD_CF_CLIENT_SECRET" \
   -d '{}'
 ```
 
@@ -80,8 +80,8 @@ On a new machine, register the server as a node and create the first hosted agen
 ```bash
 curl -sS -X POST "$PAX_CLOUD_URL/api/v1/node/agents/register" \
   -H 'Content-Type: application/json' \
-  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "CF-Access-Client-Id: $PAX_CLOUD_CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $PAX_CLOUD_CF_CLIENT_SECRET" \
   -H "X-Registration-Token: $REGISTRATION_TOKEN" \
   -d '{"node":{"name":"agent-node","hostname":"'"$(hostname)"'","machine_type":"server","os":"linux","arch":"amd64","paxd_version":"0.1.0"},"agent":{"name":"codex","agent_type":"codex"}}'
 ```
@@ -177,8 +177,8 @@ paxd acp-forward \
   --agent-id "$PAX_AGENT_ID" \
   --instance-id "${PAX_INSTANCE_ID:-default}" \
   --harness "${PAX_ACP_HARNESS:-hermes}" \
-  --cf-client-id "$CF_ACCESS_CLIENT_ID" \
-  --cf-client-secret "$CF_ACCESS_CLIENT_SECRET"
+  --cf-client-id "$PAX_CLOUD_CF_CLIENT_ID" \
+  --cf-client-secret "$PAX_CLOUD_CF_CLIENT_SECRET"
 ```
 
 Expected log shape:

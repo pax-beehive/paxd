@@ -157,6 +157,9 @@ func NewClient(baseURL, apiKey string) *Client {
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -227,9 +230,8 @@ func (c *Client) RegisterNode(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("register node: status %d: %s", resp.StatusCode, string(body))
+	if err := checkStatus(resp, "register node"); err != nil {
+		return nil, err
 	}
 
 	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
@@ -252,9 +254,8 @@ func (c *Client) RegisterNodeAgent(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("register node agent: status %d: %s", resp.StatusCode, string(body))
+	if err := checkStatus(resp, "register node agent"); err != nil {
+		return nil, err
 	}
 
 	return decodeEnvelope[RegisterNodeAgentResponse](resp.Body, "register node agent")
@@ -432,9 +433,18 @@ func (c *Client) FetchUpgrade(version string) (*UpgradeBinary, error) {
 }
 
 func decodeEnvelope[T any](body io.Reader, op string) (*T, error) {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("read %s response: %w", op, err)
+	}
 	var envelope APIResponse[T]
-	if err := json.NewDecoder(body).Decode(&envelope); err != nil {
-		return nil, fmt.Errorf("decode %s response: %w", op, err)
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf(
+			"decode %s response: %w; body starts with %q",
+			op,
+			err,
+			bodySnippet(data),
+		)
 	}
 	return &envelope.Data, nil
 }
@@ -442,9 +452,30 @@ func decodeEnvelope[T any](body io.Reader, op string) (*T, error) {
 func checkStatus(resp *http.Response, op string) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s: status %d: %s", op, resp.StatusCode, string(body))
+		detail := fmt.Sprintf(
+			"%s: status %d content-type %q",
+			op,
+			resp.StatusCode,
+			resp.Header.Get("Content-Type"),
+		)
+		if location := resp.Header.Get("Location"); location != "" {
+			detail += fmt.Sprintf(" location %q", location)
+		}
+		if len(body) > 0 {
+			detail += fmt.Sprintf(": %s", bodySnippet(body))
+		}
+		return fmt.Errorf("%s", detail)
 	}
 	return nil
+}
+
+func bodySnippet(body []byte) string {
+	const maxSnippetBytes = 512
+	body = bytes.TrimSpace(body)
+	if len(body) > maxSnippetBytes {
+		body = body[:maxSnippetBytes]
+	}
+	return string(body)
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {
