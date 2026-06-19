@@ -56,7 +56,12 @@ func (c *Client) Ping() error {
 
 // GetSessions fetches all active sessions from Hermes.
 func (c *Client) GetSessions() ([]model.SessionInfo, error) {
-	req, err := http.NewRequest("GET", c.endpoint+"/api/sessions", nil)
+	return c.GetSessionsContext(context.Background())
+}
+
+// GetSessionsContext fetches all active sessions from Hermes.
+func (c *Client) GetSessionsContext(ctx context.Context) ([]model.SessionInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.endpoint+"/api/sessions", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -136,9 +141,9 @@ type Turn struct {
 	SessionID   string
 	TurnID      string
 	ResponseID  string
-	Events      []any            // []*model.TurnStarted | *model.MessageDelta | *model.ToolCall | ...
+	Events      []any // []*model.TurnStarted | *model.MessageDelta | *model.ToolCall | ...
 	FileChanges []*model.FileChange
-	Status      string           // "completed" | "cancelled" | "error"
+	Status      string // "completed" | "cancelled" | "error"
 	Usage       *model.UsageInfo
 }
 

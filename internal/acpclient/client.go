@@ -70,6 +70,7 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 
 	cmd := exec.CommandContext(ctx, l.Command[0], l.Command[1:]...)
 	cmd.Dir = l.WorkingDir
+	cmd.WaitDelay = 2 * time.Second
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -161,7 +162,7 @@ func call[T any](
 		default:
 		}
 
-		line, err := reader.ReadBytes('\n')
+		line, err := readResponseLine(ctx, reader)
 		if err != nil {
 			return zero, fmt.Errorf("read response: %w", err)
 		}
@@ -186,6 +187,25 @@ func call[T any](
 			}
 		}
 		return out, nil
+	}
+}
+
+type responseLine struct {
+	line []byte
+	err  error
+}
+
+func readResponseLine(ctx context.Context, reader *bufio.Reader) ([]byte, error) {
+	ch := make(chan responseLine, 1)
+	go func() {
+		line, err := reader.ReadBytes('\n')
+		ch <- responseLine{line: line, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-ch:
+		return result.line, result.err
 	}
 }
 

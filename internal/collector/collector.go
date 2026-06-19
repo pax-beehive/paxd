@@ -16,6 +16,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/hermes"
 	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 // Collector gathers and reports agent status.
@@ -67,7 +68,7 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 	for _, runtime := range c.agents {
 		var sessionStatuses []cloud.SessionStatus
 		if runtime.ACPSessionLister != nil {
-			acpSessions, err := runtime.ACPSessionLister.List(ctx)
+			acpSessions, err := listACPSessions(ctx, runtime.ACPSessionLister)
 			if err == nil {
 				for _, s := range acpSessions {
 					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
@@ -82,9 +83,15 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
 					})
 				}
+			} else {
+				log.Printf(
+					"[collector] ACP session list error for agent %s (non-fatal): %v",
+					runtime.Agent.AgentID,
+					err,
+				)
 			}
 		} else if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
-			hermesSessions, err := runtime.HermesClient.GetSessions()
+			hermesSessions, err := listHermesSessions(ctx, runtime.HermesClient)
 			if err == nil {
 				for _, s := range hermesSessions {
 					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
@@ -100,6 +107,12 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
 					})
 				}
+			} else {
+				log.Printf(
+					"[collector] Hermes session list error for agent %s (non-fatal): %v",
+					runtime.Agent.AgentID,
+					err,
+				)
 			}
 		}
 
@@ -143,6 +156,39 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 		sys.MemoryPercent,
 	)
 	return nil
+}
+
+func listHermesSessions(ctx context.Context, client *hermes.Client) ([]model.SessionInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return client.GetSessionsContext(ctx)
+}
+
+type acpSessionListResult struct {
+	sessions []model.SessionInfo
+	err      error
+}
+
+func listACPSessions(ctx context.Context, lister *acpclient.SessionLister) ([]model.SessionInfo, error) {
+	timeout := lister.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout+time.Second)
+	defer cancel()
+
+	resultCh := make(chan acpSessionListResult, 1)
+	go func() {
+		sessions, err := lister.List(ctx)
+		resultCh <- acpSessionListResult{sessions: sessions, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		return result.sessions, result.err
+	}
 }
 
 func splitReports(report *cloud.NodeStatusReport, batchSize int) []*cloud.NodeStatusReport {

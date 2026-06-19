@@ -2,9 +2,12 @@ package acpclient
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -79,6 +82,28 @@ func TestHelperProcess(t *testing.T) {
 		default:
 			fmt.Printf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32601,"message":"not found"}}`+"\n", req.ID)
 		}
+	}
+}
+
+func TestCallTimesOutWaitingForResponseLine(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdoutReader.Close()
+	defer stdoutWriter.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	var stdin bytes.Buffer
+	_, err := call[map[string]any](
+		ctx,
+		&stdin,
+		bufio.NewReader(stdoutReader),
+		1,
+		"session/list",
+		map[string]any{},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("call() error = %v, want context deadline exceeded", err)
 	}
 }
 
