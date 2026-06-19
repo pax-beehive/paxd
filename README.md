@@ -13,6 +13,40 @@ paxd 是 Pax 平台的 agent 侧守护进程。它常驻在运行 Hermes（或�
 
 paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中继**。
 
+## How to install
+
+推荐使用 Pax 托管的 installer。它会自动检测当前机器平台，下载最新 `stable` paxd binary，校验 sha256，安装到 PATH，然后启动交互式 pairing：
+
+```bash
+curl -fsSL https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
+```
+
+installer 脚本由 pax-manager 的稳定 public API endpoint 托管：
+
+```text
+https://api.paxtech.net/api/v1/public/paxd/install.sh
+```
+
+脚本实际存放在 GCS：
+
+```text
+gs://pax-tech-bucket/script/installer.sh
+```
+
+支持的 stable binary 平台链接：
+
+```text
+https://api.paxtech.net/api/v1/public/paxd/download?platform=darwin/arm64&tags=stable
+https://api.paxtech.net/api/v1/public/paxd/download?platform=darwin/amd64&tags=stable
+https://api.paxtech.net/api/v1/public/paxd/download?platform=linux/arm64&tags=stable
+https://api.paxtech.net/api/v1/public/paxd/download?platform=linux/amd64&tags=stable
+https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=stable
+```
+
+安装完成后，pairing/login 的用户入口是 `https://ws.paxtech.net`。
+
+如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行上面的 `curl | bash` 命令。安装器会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
+
 ## 架构
 
 ```
