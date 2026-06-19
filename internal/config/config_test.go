@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+func TestLoadDefaultsCloudAPIURL(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Cloud.APIURL != DefaultCloudAPIURL {
+		t.Fatalf("Cloud.APIURL = %q, want %q", cfg.Cloud.APIURL, DefaultCloudAPIURL)
+	}
+	if cfg.Cloud.URL != DefaultCloudAPIURL {
+		t.Fatalf("Cloud.URL = %q, want %q", cfg.Cloud.URL, DefaultCloudAPIURL)
+	}
+}
+
 func TestLoadAcceptsDeploymentAliases(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "paxd.yaml")

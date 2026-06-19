@@ -43,7 +43,7 @@ https://api.paxtech.net/api/v1/public/paxd/download?platform=linux/amd64&tags=st
 https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=stable
 ```
 
-安装完成后，pairing/login 的用户入口是 `https://ws.paxtech.net`。
+安装器和 binary 下载接口走 `https://api.paxtech.net`。paxd 默认也使用 `https://api.paxtech.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://ws.paxtech.net`。
 
 如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行上面的 `curl | bash` 命令。安装器会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
 

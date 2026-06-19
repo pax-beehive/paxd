@@ -13,6 +13,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const DefaultCloudAPIURL = "https://api.paxtech.net"
+
 // Config represents the full daemon configuration.
 type Config struct {
 	AgentID      string               `yaml:"agent_id"`    // legacy/top-level shorthand
@@ -102,6 +104,10 @@ func DefaultConfig() Config {
 	return Config{
 		Agent: AgentConfig{
 			MachineType: "unknown",
+		},
+		Cloud: CloudConfig{
+			URL:    DefaultCloudAPIURL,
+			APIURL: DefaultCloudAPIURL,
 		},
 		Hermes: HermesConfig{
 			APIEndpoint: "http://localhost:8642",
@@ -263,10 +269,13 @@ func applyEnv(cfg *Config) {
 }
 
 func normalizeAliases(cfg *Config) {
-	if cfg.Cloud.APIURL == "" {
+	if cfg.Cloud.APIURL == "" ||
+		(cfg.Cloud.APIURL == DefaultCloudAPIURL &&
+			cfg.Cloud.URL != "" &&
+			cfg.Cloud.URL != DefaultCloudAPIURL) {
 		cfg.Cloud.APIURL = cfg.Cloud.URL
 	}
-	if cfg.Cloud.URL == "" {
+	if cfg.Cloud.URL == "" || cfg.Cloud.URL != cfg.Cloud.APIURL {
 		cfg.Cloud.URL = cfg.Cloud.APIURL
 	}
 	if cfg.Agent.AgentID == "" {

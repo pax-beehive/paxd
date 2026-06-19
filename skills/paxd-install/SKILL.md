@@ -18,10 +18,10 @@ curl -fsSL https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
 The installer detects the local platform, downloads the newest `stable` paxd binary, verifies sha256, installs it into PATH, then runs:
 
 ```bash
-paxd connect --cloud-url https://ws.paxtech.net
+paxd connect --cloud-url https://api.paxtech.net
 ```
 
-Use `api.paxtech.net` for installer and binary download endpoints. Use `ws.paxtech.net` as the human-facing Pax entry for login and pairing.
+Use `api.paxtech.net` for installer, binary download, and paxd API calls. The verification URL printed by paxd is returned by pax-manager and should use `ws.paxtech.net` as the human-facing Pax entry for login and pairing.
 
 ## Pairing
 
@@ -52,5 +52,5 @@ paxd run
 
 - If `curl` or `python3` is missing, install it with the system package manager and rerun the installer.
 - If the installer cannot write to the selected PATH directory, rerun with `PAX_INSTALL_DIR=$HOME/.local/bin` and ensure that directory is on PATH.
-- If pairing expires, rerun `paxd connect --cloud-url https://ws.paxtech.net`.
+- If pairing expires, rerun `paxd connect --cloud-url https://api.paxtech.net`.
 - If the machine is behind a restricted network, verify it can reach `https://api.paxtech.net`, `https://ws.paxtech.net`, and Google Cloud Storage.
