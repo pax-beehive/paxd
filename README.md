@@ -31,10 +31,10 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 
 ```
 cmd/paxd
-├── main.go              CLI: register | run | install-service | --version
+├── main.go              CLI: configure | register | run | install-service | --version
 │
 internal/
-├── config/config.go     YAML 配置 (~/.pax/paxd.yaml)
+├── config/config.go     YAML 配置 (~/.paxd/paxd.yaml)
 ├── store/store.go       本地 SQLite (agent 身份 + orphaned messages)
 ├── state/state.go       生命周期状态机
 ├── cloud/client.go      Cloud HTTP API (register, status)
@@ -61,7 +61,7 @@ STARTING → REGISTERING → RUNNING → STOPPING → STOPPED
 | 状态 | 行为 |
 |------|------|
 | **STARTING** | 加载配置，检查 Hermes 可达性 |
-| **REGISTERING** | 向 Cloud 注册，获取 agent_id + api_key |
+| **REGISTERING** | 向 Cloud 注册，获取 node_id + api_key |
 | **RUNNING** | 主循环：Status Collector + Message Poller + WS |
 | **STOPPING** | 完成当前消息（30s 超时），flush offset |
 | **STOPPED** | 退出 |
@@ -105,8 +105,8 @@ paxd 解析 Hermes SSE 流，产生结构化 `model.*` 事件，实时推送回 
 ```bash
 # 前置条件：本地有 Hermes 在 localhost:8642 运行
 
-# 注册到 Cloud
-paxd register --cloud-url https://pax.example.com
+# 注册 node + agent 并写入配置
+paxd configure --cloud-url https://pax.example.com --registration-token token_xxx
 
 # 运行守护进程
 paxd run
@@ -116,9 +116,112 @@ paxd install-service
 launchctl load ~/Library/LaunchAgents/com.toddzheng.paxd.plist
 ```
 
+### 家用服务器 Bootstrap
+
+先探测这台机器已有的 harness 和 adapter：
+
+```bash
+paxd harnesses
+```
+
+如果 `paxd harnesses` 显示 Codex / Claude Code adapter 不可用，先按 adapter 项目文档安装；这一步不由 paxd 管理，也不配置 Codex/Claude 本体、订阅或登录态：
+
+```bash
+npm install -g @zed-industries/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+```
+
+写入 `~/.paxd/paxd.yaml`。新机器只需要 `registration_token`，`node_id`、node `api_key`、`agent_id` 都由 paxd 通过 pax-manager 创建并写回：
+
+```bash
+paxd configure \
+  --harness codex \
+  --cloud-url https://app.example.com \
+  --registration-token token_xxx
+```
+
+也可以一次注册多个 agent；同一个 harness 可以注册多个 agent：
+
+```bash
+paxd configure \
+  --cloud-url https://app.example.com \
+  --registration-token token_xxx \
+  --agent work:codex:work \
+  --agent review:claude-code:review
+```
+
+`paxd configure` 默认是 replace 语义：会把本地 `agents` 列表替换成本次命令注册出来的 agents。检测到已有 `~/.paxd/paxd.yaml` 且即将覆盖现有 agents 时，会要求确认；自动化脚本可以加 `-y` 或 `--yes` 跳过确认。
+
+如果只想给已配置好的 node 增加 agent，用 `--append`。这种情况下会复用现有 `cloud.api_key` 注册新 agent，并把新 agent 追加到本地 `agents` 列表；不会复用旧的 `agent_id`。
+
+```bash
+paxd configure \
+  --cloud-url https://app.example.com \
+  --append \
+  --agent review:claude-code:review
+```
+
+直接启动 forwarder，不写配置：
+
+```bash
+PAX_CLOUD_URL=https://app.example.com \
+PAX_API_KEY=pax_node_key_here \
+PAX_AGENT_ID=agent_xxx \
+PAX_ACP_HARNESS=codex \
+paxd acp-forward
+```
+
+如果 pax-manager 的机器侧 tunnel 也经过 Cloudflare Access，再加 `--cf-client-id` 和 `--cf-client-secret`。
+
+### ACP + Postman 快速路径
+
+如果只想启动 ACP forwarder 并用 Postman 连用户侧 WebSocket，可以直接用配置或环境变量：
+
+```bash
+export PAX_CLOUD_URL="https://app.example.com"
+export PAX_API_KEY="pax_node_key_here"
+export PAX_AGENT_ID="agent_xxx"
+export PAX_INSTANCE_ID="default"
+export PAX_CLOUD_CF_CLIENT_ID="cf_service_token_client_id_here"
+export PAX_CLOUD_CF_CLIENT_SECRET="cf_service_token_client_secret_here"
+export PAX_ACP_HARNESS="codex"
+
+paxd acp-forward
+```
+
+也可以不写环境变量，直接临时传参：
+
+```bash
+paxd acp-forward \
+  --cloud-url https://app.example.com \
+  --api-key pax_node_key_here \
+  --agent-id agent_xxx \
+  --harness codex \
+  --cf-client-id cf_service_token_client_id_here \
+  --cf-client-secret cf_service_token_client_secret_here
+```
+
+给 Postman 生成 WebSocket URL 和烟测消息：
+
+```bash
+paxd postman --cloud-url https://app.example.com --agent-id agent_xxx
+```
+
+ACP harness 预设：
+
+| harness | 默认命令 |
+|---------|----------|
+| `hermes` | `hermes acp` |
+| `codex` | `codex-acp`，若未安装则 `npx -y @zed-industries/codex-acp` |
+| `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp` |
+| `gemini` | `gemini --acp` |
+| `custom` | 必须显式配置 `command` |
+
+`agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
+
 ## 配置
 
-默认路径：`~/.pax/paxd.yaml`
+默认路径：`~/.paxd/paxd.yaml`，旧的 `~/.pax/paxd.yaml` 仍作为兼容 fallback 读取。
 
 ```yaml
 agent:
@@ -126,31 +229,144 @@ agent:
 
 cloud:
   api_url: https://pax-manager-xxxxx-uc.a.run.app
-  api_key: "key-xxxxx"       # register 后自动写入
+  node_id: "node_xxxxx"      # configure 后自动写入
+  api_key: "key-xxxxx"       # node API key，configure 后自动写入
+  cf_client_id: ""            # Cloudflare Access service token（可选）
+  cf_client_secret: ""        # Cloudflare Access service token（可选）
 
-hermes:
-  api_endpoint: http://localhost:8642
-  api_key_from_env: ~/.hermes/.env  # Hermes API key 存放的文件路径
-  profile: ""                # Hermes profile 名称（可选）
+agents:
+  - agent_id: agent_codex
+    instance_id: codex-main
+    name: codex-main
+    agent_type: codex
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: codex
+      command: ["codex-acp"]  # 未安装时 configure 会写 npx fallback
+
+  - agent_id: agent_review
+    instance_id: review
+    name: reviewer
+    agent_type: claude-code
+    enabled: true
+    acp_forwarder:
+      enabled: true
+      harness: claude-code
+      command: ["claude-agent-acp"]
 
 daemon:
   poll_interval: 5s
   status_interval: 10s
   reconcile_interval: 30s
   log_level: info
-  db_path: ~/.pax/paxd.db
+  db_path: ~/.paxd/paxd.db
+
+acp_forwarder:
+  enabled: true               # 默认是否为 enabled agent 启动 ACP forwarder
+  harness: ""                 # 可作为 agents[].acp_forwarder.harness 的默认值
+  command: []                 # 可作为 agents[].acp_forwarder.command 的默认值
+  working_dir: ""
+  tunnel_path: /api/v1/agent/tunnel
+  reconnect_interval: 2s
 ```
+
+只有 `agent_type: hermes` 的 legacy/Hermes HTTP agent 需要 `hermes.api_endpoint`、`api_key_from_env` 和 `profile`；Codex/Claude/Gemini ACP agent 不需要这些字段。
 
 ### Hermes API Key
 
 从 `hermes.api_key_from_env` 指定的文件中读取 key。文件格式：
 ```
-HERMES_API_KEY=your-key-here
+API_SERVER_KEY=your-key-here
 ```
+
+## ACP Forwarder
+
+paxd can also run a stateless Agent Client Protocol forwarder. It assumes
+pax-manager exposes a WebSocket tunnel endpoint, defaulting to
+`/api/v1/agent/tunnel`.
+
+```
+paxd acp-forward
+```
+
+The forwarder starts the configured ACP CLI locally, forwards every WebSocket
+message from pax-manager to the CLI's stdin, and forwards every stdout line back
+to the tunnel. It does not parse JSON-RPC or persist session state.
+
+### ACP WebSocket Smoke Tester
+
+`cmd/acp-smoke` connects to the user-side ACP tunnel, sends the standard
+initialize/auth/session/prompt flow, prints every WebSocket frame exactly as it
+was sent or received, and also prints an aggregate view of streaming
+`session/update` text chunks.
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --interactive
+```
+
+The cookie value can be either raw cookie pairs or a copied browser header such
+as `Cookie: CF_Authorization=...; other=value`. A bare Cloudflare token can also
+be passed with `--cf-authorization "$CF_AUTHORIZATION"`.
+
+List the agents visible to the cookie-backed user:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --list-agents
+```
+
+If exactly one online agent is visible, `cmd/acp-smoke` selects it automatically.
+When multiple online agents are visible, pass either the exact `--agent-id` or
+the agent's configured name with `--agent-name`:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url "$PAX_CLOUD_URL" \
+  --cookie "$PAX_COOKIE" \
+  --agent-name review \
+  --interactive
+```
+
+For local pax-manager tests:
+
+```bash
+go run ./cmd/acp-smoke \
+  --url http://127.0.0.1:9879 \
+  --agent-name codex \
+  --user-email local@example.local
+```
+
+Useful options:
+
+- `--interactive` creates a session and then lets you type prompts until
+  `/quit`.
+- `--prompt "..."` can be repeated to replace the built-in prompt sequence.
+- `--messages-file test.ndjson` sends custom JSON-RPC messages after the smoke
+  flow; use `{{sessionId}}` as a placeholder.
+- `--raw-only` disables aggregate helper output while keeping raw frames.
+- `--raw-stream stderr|stdout|off` controls where raw WebSocket frames are
+  printed. The default is `stderr`, while aggregate output stays on `stdout`.
+- `--no-color` disables ANSI colors.
+- `--header 'Name: value'` can be repeated for extra auth or debugging headers.
+
+Environment overrides:
+
+| Env | Meaning |
+|-----|---------|
+| `PAX_ACP_FORWARD_ENABLED` | Enable ACP forwarding inside `paxd run` |
+| `PAX_ACP_COMMAND` | Space-separated local ACP command |
+| `PAX_ACP_WORKING_DIR` | Working directory for the ACP command |
+| `PAX_ACP_TUNNEL_PATH` | pax-manager tunnel path |
 
 ## 本地 SQLite
 
-数据库文件：`~/.pax/paxd.db`
+数据库文件：`~/.paxd/paxd.db`
 
 | 表 | 用途 |
 |----|------|

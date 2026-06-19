@@ -8,6 +8,11 @@ agent:
 cloud:
   api_url: https://fleet.example.com
   api_key: ""
+  cf_client_id: ""
+  cf_client_secret: ""
+
+agent_id: ""
+instance_id: default
 
 hermes:
   api_endpoint: http://localhost:8642
@@ -18,5 +23,18 @@ hermes:
 daemon:
   poll_interval: 5s
   status_interval: 10s
+  reconcile_interval: 15s
+  session_batch_size: 100
   log_level: info
   db_path: ~/.pax/paxd.db
+
+acp_forwarder:
+  enabled: false
+  # Presets: hermes, codex, claude-code, gemini, custom.
+  # Explicit command wins over harness.
+  harness: hermes
+  # Example: ["gemini", "--experimental-acp"]
+  command: []
+  working_dir: ""
+  tunnel_path: /api/v1/agent/tunnel
+  reconnect_interval: 2s

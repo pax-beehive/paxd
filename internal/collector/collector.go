@@ -12,6 +12,7 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 
+	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/hermes"
 	"github.com/pax-beehive/paxd/internal/store"
@@ -23,12 +24,15 @@ type Collector struct {
 	cloudClient *cloud.Client
 	store       *store.Store
 	hostname    string
+	batchSize   int
 }
 
 // AgentRuntime binds one cloud agent to a local Hermes client.
 type AgentRuntime struct {
-	Agent        store.CloudAgent
-	HermesClient *hermes.Client
+	Agent              store.CloudAgent
+	HermesClient       *hermes.Client
+	SupportsHermesHTTP bool
+	ACPSessionLister   *acpclient.SessionLister
 }
 
 // New creates a new Collector.
@@ -43,7 +47,16 @@ func New(
 		cloudClient: cloudClient,
 		store:       s,
 		hostname:    hostname,
+		batchSize:   100,
 	}
+}
+
+// WithBatchSize overrides the maximum number of sessions per status report.
+func (c *Collector) WithBatchSize(batchSize int) *Collector {
+	if batchSize > 0 {
+		c.batchSize = batchSize
+	}
+	return c
 }
 
 // CollectAndReport gathers all session statuses and system metrics,
@@ -52,31 +65,44 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 	agentStatuses := make([]cloud.AgentStatus, 0, len(c.agents))
 	sessionCount := 0
 	for _, runtime := range c.agents {
-		sessions, err := runtime.HermesClient.GetSessions()
-		if err != nil {
-			log.Printf(
-				"[collector] get sessions for agent %s (non-fatal): %v",
-				runtime.Agent.AgentID,
-				err,
-			)
-			sessions = nil
+		var sessionStatuses []cloud.SessionStatus
+		if runtime.ACPSessionLister != nil {
+			acpSessions, err := runtime.ACPSessionLister.List(ctx)
+			if err == nil {
+				for _, s := range acpSessions {
+					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
+						SessionID:     s.SessionID,
+						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
+						NativeID:      s.NativeID,
+						Name:          s.Name,
+						ProjectID:     s.ProjectID,
+						Preview:       s.Preview,
+						Status:        s.Status,
+						CurrentTask:   s.CurrentTask,
+						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+					})
+				}
+			}
+		} else if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
+			hermesSessions, err := runtime.HermesClient.GetSessions()
+			if err == nil {
+				for _, s := range hermesSessions {
+					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
+						SessionID:     s.SessionID,
+						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
+						NativeID:      s.NativeID,
+						Name:          s.Name,
+						ProjectID:     s.ProjectID,
+						Preview:       s.Preview,
+						Status:        s.Status,
+						CurrentTask:   s.CurrentTask,
+						TokenUsage:    s.TokenUsage,
+						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+					})
+				}
+			}
 		}
 
-		var sessionStatuses []cloud.SessionStatus
-		for _, s := range sessions {
-			sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-				SessionID:     s.SessionID,
-				AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
-				NativeID:      s.NativeID,
-				Name:          s.Name,
-				ProjectID:     s.ProjectID,
-				Preview:       s.Preview,
-				Status:        s.Status,
-				CurrentTask:   s.CurrentTask,
-				TokenUsage:    s.TokenUsage,
-				LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
-			})
-		}
 		sessionCount += len(sessionStatuses)
 		agentStatuses = append(agentStatuses, cloud.AgentStatus{
 			AgentID:   runtime.Agent.AgentID,
@@ -95,24 +121,85 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 		sys = cloud.SystemMetrics{} // send what we can
 	}
 
-	report := &cloud.NodeStatusReport{
+	baseReport := &cloud.NodeStatusReport{
 		Hostname: c.hostname,
 		Agents:   agentStatuses,
 		System:   sys,
 	}
 
-	if err := c.cloudClient.PostNodeStatus(report); err != nil {
-		return fmt.Errorf("post status: %w", err)
+	reports := splitReports(baseReport, c.batchSize)
+	for i := range reports {
+		if err := c.cloudClient.PostNodeStatus(reports[i]); err != nil {
+			return fmt.Errorf("post status batch %d/%d: %w", i+1, len(reports), err)
+		}
 	}
 
 	log.Printf(
-		"[collector] reported %d agents, %d sessions, cpu=%.1f%%, mem=%.1f%%",
+		"[collector] reported %d agents, %d sessions in %d batch(es), cpu=%.1f%%, mem=%.1f%%",
 		len(agentStatuses),
 		sessionCount,
+		len(reports),
 		sys.CPUPercent,
 		sys.MemoryPercent,
 	)
 	return nil
+}
+
+func splitReports(report *cloud.NodeStatusReport, batchSize int) []*cloud.NodeStatusReport {
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	var reports []*cloud.NodeStatusReport
+	current := cloneReportWithoutAgents(report)
+	currentSessions := 0
+
+	flush := func() {
+		if len(current.Agents) == 0 {
+			return
+		}
+		reports = append(reports, current)
+		current = cloneReportWithoutAgents(report)
+		currentSessions = 0
+	}
+
+	for _, agent := range report.Agents {
+		if len(agent.Sessions) == 0 {
+			current.Agents = append(current.Agents, agent)
+			continue
+		}
+
+		for start := 0; start < len(agent.Sessions); start += batchSize {
+			end := start + batchSize
+			if end > len(agent.Sessions) {
+				end = len(agent.Sessions)
+			}
+			chunk := agent
+			chunk.Sessions = append([]cloud.SessionStatus(nil), agent.Sessions[start:end]...)
+			chunkSize := len(chunk.Sessions)
+			if currentSessions > 0 && currentSessions+chunkSize > batchSize {
+				flush()
+			}
+			current.Agents = append(current.Agents, chunk)
+			currentSessions += chunkSize
+			if currentSessions >= batchSize {
+				flush()
+			}
+		}
+	}
+	flush()
+	if len(reports) == 0 {
+		reports = append(reports, cloneReportWithoutAgents(report))
+	}
+	return reports
+}
+
+func cloneReportWithoutAgents(report *cloud.NodeStatusReport) *cloud.NodeStatusReport {
+	return &cloud.NodeStatusReport{
+		NodeID:   report.NodeID,
+		Hostname: report.Hostname,
+		System:   report.System,
+		Metadata: report.Metadata,
+	}
 }
 
 // collectSystemMetrics gathers CPU, memory, and uptime.
