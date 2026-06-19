@@ -85,8 +85,22 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start acp command: %w", err)
 	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdin.Close()
+			_ = stdout.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		case <-done:
+		}
+	}()
 	defer func() {
+		close(done)
 		_ = stdin.Close()
+		_ = stdout.Close()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
@@ -163,6 +177,9 @@ func call[T any](
 
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			if ctx.Err() != nil {
+				return zero, ctx.Err()
+			}
 			return zero, fmt.Errorf("read response: %w", err)
 		}
 		line = bytes.TrimSpace(line)

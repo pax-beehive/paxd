@@ -43,9 +43,9 @@ func TestACPCommandForHarness(t *testing.T) {
 		want    string
 	}{
 		{harness: "hermes", want: "hermes acp"},
-		{harness: "codex", want: "@zed-industries/codex-acp"},
-		{harness: "claude", want: "@agentclientprotocol/claude-agent-acp"},
-		{harness: "claude_code", want: "@agentclientprotocol/claude-agent-acp"},
+		{harness: "codex", want: "codex-acp"},
+		{harness: "claude", want: "claude-agent-acp"},
+		{harness: "claude_code", want: "claude-agent-acp"},
 		{harness: "gemini", want: "gemini --acp"},
 		{harness: "custom", want: ""},
 	}
@@ -142,7 +142,7 @@ func TestAgentACPForwarderConfigUsesPerAgentHarness(t *testing.T) {
 	if got.ReconnectInterval != 7*time.Second {
 		t.Fatalf("ReconnectInterval = %s", got.ReconnectInterval)
 	}
-	if command := strings.Join(got.Command, " "); !strings.Contains(command, "@agentclientprotocol/claude-agent-acp") {
+	if command := strings.Join(got.Command, " "); !strings.Contains(command, "claude-agent-acp") {
 		t.Fatalf("command = %#v", got.Command)
 	}
 }
