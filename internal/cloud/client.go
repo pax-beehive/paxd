@@ -122,6 +122,42 @@ type RegisterNodeResponse struct {
 	APIKey string `json:"api_key"`
 }
 
+// StartNodeRegistrationRequest starts interactive node onboarding.
+type StartNodeRegistrationRequest struct {
+	Name        string `json:"name,omitempty"`
+	Hostname    string `json:"hostname"`
+	MachineType string `json:"machine_type,omitempty"`
+	OS          string `json:"os"`
+	Arch        string `json:"arch"`
+	PaxdVersion string `json:"paxd_version,omitempty"`
+	APIEndpoint string `json:"api_endpoint,omitempty"`
+}
+
+// StartNodeRegistrationResponse contains the pairing code and poll credential.
+type StartNodeRegistrationResponse struct {
+	RegistrationID          string `json:"registration_id"`
+	PairCode                string `json:"pair_code"`
+	PollToken               string `json:"poll_token"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int64  `json:"expires_in"`
+	Interval                int64  `json:"interval"`
+	ExpiresAt               string `json:"expires_at"`
+}
+
+// PollNodeRegistrationRequest polls an interactive node onboarding session.
+type PollNodeRegistrationRequest struct {
+	RegistrationID string `json:"registration_id"`
+	PollToken      string `json:"poll_token"`
+}
+
+// PollNodeRegistrationResponse returns current onboarding status.
+type PollNodeRegistrationResponse struct {
+	Status string `json:"status"`
+	NodeID string `json:"node_id,omitempty"`
+	APIKey string `json:"api_key,omitempty"`
+}
+
 // ResolveSecretRequest asks pax-manager to return a secret value for an agent.
 type ResolveSecretRequest struct {
 	SecretID  string `json:"secret_id"`
@@ -238,6 +274,38 @@ func (c *Client) RegisterNode(
 	}
 
 	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
+}
+
+// StartNodeRegistration begins interactive device-code style onboarding.
+func (c *Client) StartNodeRegistration(
+	req *StartNodeRegistrationRequest,
+) (*StartNodeRegistrationResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/registration/start", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("start node registration: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[StartNodeRegistrationResponse](resp.Body, "start node registration")
+}
+
+// PollNodeRegistration waits for the browser user to approve onboarding.
+func (c *Client) PollNodeRegistration(
+	req *PollNodeRegistrationRequest,
+) (*PollNodeRegistrationResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/registration/poll", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("poll node registration: status %d: %s", resp.StatusCode, string(body))
+	}
+	return decodeEnvelope[PollNodeRegistrationResponse](resp.Body, "poll node registration")
 }
 
 // PostNodeStatus sends a status report to POST /api/v1/node/status.
