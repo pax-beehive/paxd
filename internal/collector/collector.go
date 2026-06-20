@@ -66,24 +66,7 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 	sessionCount := 0
 	for _, runtime := range c.agents {
 		var sessionStatuses []cloud.SessionStatus
-		if runtime.ACPSessionLister != nil {
-			acpSessions, err := runtime.ACPSessionLister.List(ctx)
-			if err == nil {
-				for _, s := range acpSessions {
-					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
-						SessionID:     s.SessionID,
-						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
-						NativeID:      s.NativeID,
-						Name:          s.Name,
-						ProjectID:     s.ProjectID,
-						Preview:       s.Preview,
-						Status:        s.Status,
-						CurrentTask:   s.CurrentTask,
-						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
-					})
-				}
-			}
-		} else if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
+		if runtime.SupportsHermesHTTP && runtime.HermesClient != nil {
 			hermesSessions, err := runtime.HermesClient.GetSessions()
 			if err == nil {
 				for _, s := range hermesSessions {
@@ -97,6 +80,24 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 						Status:        s.Status,
 						CurrentTask:   s.CurrentTask,
 						TokenUsage:    s.TokenUsage,
+						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
+					})
+				}
+			}
+		}
+		if len(sessionStatuses) == 0 && runtime.ACPSessionLister != nil {
+			acpSessions, err := runtime.ACPSessionLister.List(ctx)
+			if err == nil {
+				for _, s := range acpSessions {
+					sessionStatuses = append(sessionStatuses, cloud.SessionStatus{
+						SessionID:     s.SessionID,
+						AgentType:     firstNonEmpty(s.AgentType, runtime.Agent.AgentType),
+						NativeID:      s.NativeID,
+						Name:          s.Name,
+						ProjectID:     s.ProjectID,
+						Preview:       s.Preview,
+						Status:        s.Status,
+						CurrentTask:   s.CurrentTask,
 						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
 					})
 				}

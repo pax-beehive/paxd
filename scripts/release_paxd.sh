@@ -23,6 +23,8 @@ Environment overrides:
   PAX_RELEASE_TAGS     Comma-separated tags. Overrides the second argument.
   PAX_RELEASE_PLATFORMS Space-separated GOOS/GOARCH platforms.
   PAX_RELEASE_BUILD_ID Build id stored in metadata. Defaults to git short SHA.
+  PAX_RELEASE_CGO_ENABLED cgo setting for paxd builds. Defaults to 1 because
+                       paxd uses go-sqlite3.
   PAX_RELEASE_TOKEN    Bearer token for admin publish. Defaults to gcloud identity token.
   PAX_RELEASE_SKIP_UPLOAD=1
   PAX_RELEASE_SKIP_PUBLISH=1
@@ -84,6 +86,43 @@ content_type_for() {
     windows/*) printf '%s' "application/x-msdownload" ;;
     *) printf '%s' "application/octet-stream" ;;
   esac
+}
+
+smoke_native_paxd_binary() {
+  local binary="$1"
+  local os="$2"
+  local arch="$3"
+  local host_os host_arch tmp_dir config output status
+
+  host_os="$(go env GOHOSTOS)"
+  host_arch="$(go env GOHOSTARCH)"
+  if [[ "$os" != "$host_os" || "$arch" != "$host_arch" ]]; then
+    return
+  fi
+
+  tmp_dir="$(mktemp -d)"
+  config="${tmp_dir}/paxd.yaml"
+  cat >"$config" <<EOF
+daemon:
+  db_path: ${tmp_dir}/paxd.db
+EOF
+
+  set +e
+  output="$("$binary" run --config "$config" 2>&1)"
+  status=$?
+  set -e
+  rm -rf "$tmp_dir"
+
+  if printf '%s' "$output" | grep -q "go-sqlite3 requires cgo"; then
+    fail "${os}/${arch} binary was built without usable cgo SQLite support"
+  fi
+  if [[ "$status" -eq 0 ]]; then
+    fail "${os}/${arch} smoke run unexpectedly succeeded without cloud agents"
+  fi
+  if ! printf '%s' "$output" | grep -Eq "not registered|no cloud agents configured"; then
+    printf '%s\n' "$output" >&2
+    fail "${os}/${arch} smoke run did not reach post-SQLite startup checks"
+  fi
 }
 
 artifact_name_for() {
@@ -221,6 +260,7 @@ main() {
   local platforms="${PAX_RELEASE_PLATFORMS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64}"
   local dist_dir="${PAX_RELEASE_DIST_DIR:-dist}"
   local build_id="${PAX_RELEASE_BUILD_ID:-}"
+  local cgo_enabled="${PAX_RELEASE_CGO_ENABLED:-1}"
   local tags_json endpoint token
 
   require_cmd go
@@ -235,6 +275,9 @@ main() {
 
   if [[ -z "$build_id" ]]; then
     build_id="$(git rev-parse --short HEAD)"
+  fi
+  if [[ "$cgo_enabled" != "1" && "${PAX_RELEASE_ALLOW_CGO_DISABLED:-0}" != "1" ]]; then
+    fail "paxd uses go-sqlite3; set PAX_RELEASE_CGO_ENABLED=1 or explicitly set PAX_RELEASE_ALLOW_CGO_DISABLED=1"
   fi
 
   tags_json="$(tag_json_array "$tags")"
@@ -258,8 +301,9 @@ main() {
     log "building ${platform} -> ${output}"
     GOCACHE="${GOCACHE:-/tmp/paxd-go-cache-release-${version//./-}}" \
       GOMODCACHE="${GOMODCACHE:-/tmp/paxd-go-mod-cache-release-${version//./-}}" \
-      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+      CGO_ENABLED="$cgo_enabled" GOOS="$os" GOARCH="$arch" \
       go build -trimpath -ldflags="-s -w -X main.version=${version}" -o "$output" ./cmd/paxd
+    smoke_native_paxd_binary "$output" "$os" "$arch"
 
     sha="$(sha256_file "$output")"
     size="$(python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$output")"
