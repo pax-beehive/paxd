@@ -1,0 +1,7 @@
+{
+  "command_id": "cmd_agent_connection_restart_missing_1",
+  "type": "agent_connection.restart",
+  "restart_agent_connection": {
+    "connection_id": "conn_missing"
+  }
+}

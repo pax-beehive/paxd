@@ -1,0 +1,6 @@
+{
+  "type": "remotes.list",
+  "list_remotes": {
+    "include_disabled": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "command_id": "cmd_remote_create_1",
+  "type": "remote.create",
+  "create_remote": {
+    "remote": {
+      "id": "remote_prod",
+      "name": "Production",
+      "cloud_api_url": "https://api.example.test",
+      "node_id": "node_1",
+      "enabled": true,
+      "is_default": true
+    },
+    "cloud_api_key": "node_key_ref"
+  }
+}
