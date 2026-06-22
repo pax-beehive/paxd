@@ -46,7 +46,7 @@ id TEXT PRIMARY KEY
 name TEXT NOT NULL
 cloud_api_url TEXT NOT NULL
 node_id TEXT
-cloud_api_key TEXT
+cloud_api_key_ref TEXT
 enabled INTEGER NOT NULL DEFAULT 1
 is_default INTEGER NOT NULL DEFAULT 0
 generation INTEGER NOT NULL DEFAULT 1
@@ -60,7 +60,8 @@ UNIQUE(cloud_api_url)
 Notes:
 
 - `cloud_api_url` defines the Pax manager endpoint.
-- `node_id` and `cloud_api_key` are node credentials for that remote.
+- `node_id` is the Pax manager node identity for that remote.
+- `cloud_api_key_ref` is a secret ref for the Pax node key used to authenticate outbound manager calls.
 - Cloudflare Access and future gateway credentials do not live in this table.
 - Mutating runtime-affecting fields increments `generation`.
 - Manual restart increments `restart_nonce`.

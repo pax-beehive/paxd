@@ -164,7 +164,7 @@ func TestRemoteAuthMaterialAndStatusViews(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRemoteAuthMaterial() error = %v", err)
 	}
-	if material.CloudAPIKey != "node_key_ref" || material.AuthKind != control.RemoteAuthCloudflareAccess {
+	if material.CloudAPIKeyRef != "env:PAX_NODE_KEY" || material.AuthKind != control.RemoteAuthCloudflareAccess {
 		t.Fatalf("auth material = %+v", material)
 	}
 	if material.CloudflareAccess == nil || material.CloudflareAccess.ClientSecretRef != "env:PAX_CF_SECRET" {
@@ -731,6 +731,6 @@ func createRemoteCommand(id string, url string) control.CreateRemoteCommand {
 			NodeID:      "node_1",
 			Enabled:     &enabled,
 		},
-		CloudAPIKey: "node_key_ref",
+		CloudAPIKeyRef: "env:PAX_NODE_KEY",
 	}
 }

@@ -364,7 +364,7 @@ func TestCommandPayloadValidateAcceptsValidFields(t *testing.T) {
 		},
 		{
 			name:    "update remote api key only",
-			payload: UpdateRemoteCommand{RemoteID: "remote_prod", CloudAPIKey: &key},
+			payload: UpdateRemoteCommand{RemoteID: "remote_prod", CloudAPIKeyRef: &key},
 		},
 		{
 			name:    "delete remote",

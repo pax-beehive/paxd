@@ -593,7 +593,7 @@ id TEXT PRIMARY KEY
 name TEXT NOT NULL
 cloud_api_url TEXT NOT NULL
 node_id TEXT
-cloud_api_key TEXT
+cloud_api_key_ref TEXT
 enabled INTEGER NOT NULL DEFAULT 1
 is_default INTEGER NOT NULL DEFAULT 0
 generation INTEGER NOT NULL DEFAULT 1
@@ -637,7 +637,7 @@ file:/absolute/path
 inline:value        -- dev/debug only; not recommended
 ```
 
-Future resolvers can add platform credential stores such as macOS Keychain without changing the remote schema.
+Future resolvers can add remote vaults, platform credential stores such as macOS Keychain, or KMS-backed refs without changing the remote schema or control contract.
 
 ### remote_status
 
@@ -896,7 +896,7 @@ Acceptance:
 
 - Implement `auth.HeaderProvider` and `SecretResolver`.
 - Support `env:`, `file:`, and dev-only `inline:` secret refs.
-- Use `remote_auth` for Cloudflare Access headers and `remote` for node API key.
+- Use `remote_auth` for Cloudflare Access headers and `remote.cloud_api_key_ref` for the Pax node key ref.
 
 Acceptance:
 

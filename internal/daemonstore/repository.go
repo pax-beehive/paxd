@@ -72,14 +72,7 @@ type AgentConnectionDesiredSpec struct {
 	RestartNonce int64
 }
 
-type RemoteAuthMaterial struct {
-	RemoteID         string
-	CloudAPIURL      string
-	NodeID           string
-	CloudAPIKey      string
-	AuthKind         control.RemoteAuthKind
-	CloudflareAccess *control.CloudflareAccessAuth
-}
+type RemoteAuthMaterial = control.RemoteAuthMaterial
 
 type RemoteRegistrationUpdate struct {
 	RemoteID           string
@@ -101,17 +94,17 @@ func (s *Store) CreateRemote(ctx context.Context, cmd control.CreateRemoteComman
 		id = "remote_" + strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cmd.Remote.Name), " ", "_"))
 	}
 	remote := Remote{
-		ID:           id,
-		Name:         cmd.Remote.Name,
-		CloudAPIURL:  cmd.Remote.CloudAPIURL,
-		NodeID:       cmd.Remote.NodeID,
-		CloudAPIKey:  cmd.CloudAPIKey,
-		Enabled:      boolDefault(cmd.Remote.Enabled, true),
-		IsDefault:    boolDefault(cmd.Remote.IsDefault, false),
-		Generation:   1,
-		RestartNonce: 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:             id,
+		Name:           cmd.Remote.Name,
+		CloudAPIURL:    cmd.Remote.CloudAPIURL,
+		NodeID:         cmd.Remote.NodeID,
+		CloudAPIKeyRef: cmd.CloudAPIKeyRef,
+		Enabled:        boolDefault(cmd.Remote.Enabled, true),
+		IsDefault:      boolDefault(cmd.Remote.IsDefault, false),
+		Generation:     1,
+		RestartNonce:   0,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := s.db.WithContext(ctx).Select("*").Create(&remote).Error; err != nil {
 		return control.RemoteView{}, mapCreateErr(err)
@@ -139,8 +132,8 @@ func (s *Store) UpdateRemote(ctx context.Context, cmd control.UpdateRemoteComman
 	if cmd.Remote.IsDefault != nil {
 		remote.IsDefault = *cmd.Remote.IsDefault
 	}
-	if cmd.CloudAPIKey != nil {
-		remote.CloudAPIKey = *cmd.CloudAPIKey
+	if cmd.CloudAPIKeyRef != nil {
+		remote.CloudAPIKeyRef = *cmd.CloudAPIKeyRef
 	}
 	remote.Generation++
 	remote.UpdatedAt = s.currentTime()
@@ -256,11 +249,11 @@ func (s *Store) GetRemoteAuthMaterial(ctx context.Context, remoteID string) (Rem
 		return RemoteAuthMaterial{}, err
 	}
 	material := RemoteAuthMaterial{
-		RemoteID:    remote.ID,
-		CloudAPIURL: remote.CloudAPIURL,
-		NodeID:      remote.NodeID,
-		CloudAPIKey: remote.CloudAPIKey,
-		AuthKind:    control.RemoteAuthNone,
+		RemoteID:       remote.ID,
+		CloudAPIURL:    remote.CloudAPIURL,
+		NodeID:         remote.NodeID,
+		CloudAPIKeyRef: remote.CloudAPIKeyRef,
+		AuthKind:       control.RemoteAuthNone,
 	}
 	auth, err := s.getRemoteAuth(ctx, remoteID)
 	if err != nil {

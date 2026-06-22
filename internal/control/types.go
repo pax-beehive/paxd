@@ -102,14 +102,14 @@ type RemotePatch struct {
 }
 
 type CreateRemoteCommand struct {
-	Remote      Remote `json:"remote"`
-	CloudAPIKey string `json:"cloud_api_key,omitempty"`
+	Remote         Remote `json:"remote"`
+	CloudAPIKeyRef string `json:"cloud_api_key_ref,omitempty"`
 }
 
 type UpdateRemoteCommand struct {
-	RemoteID    string      `json:"remote_id"`
-	Remote      RemotePatch `json:"remote,omitempty"`
-	CloudAPIKey *string     `json:"cloud_api_key,omitempty"`
+	RemoteID       string      `json:"remote_id"`
+	Remote         RemotePatch `json:"remote,omitempty"`
+	CloudAPIKeyRef *string     `json:"cloud_api_key_ref,omitempty"`
 }
 
 type DeleteRemoteCommand struct {
@@ -141,6 +141,15 @@ type CloudflareAccessAuth struct {
 
 type ClearRemoteAuthCommand struct {
 	RemoteID string `json:"remote_id"`
+}
+
+type RemoteAuthMaterial struct {
+	RemoteID         string
+	CloudAPIURL      string
+	NodeID           string
+	CloudAPIKeyRef   string
+	AuthKind         RemoteAuthKind
+	CloudflareAccess *CloudflareAccessAuth
 }
 
 type DesiredState string

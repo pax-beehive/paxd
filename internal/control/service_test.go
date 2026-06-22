@@ -754,7 +754,7 @@ func createRemoteCommand(commandID, remoteID, url string) control.Command {
 				CloudAPIURL: url,
 				Enabled:     &enabled,
 			},
-			CloudAPIKey: "node_key_ref",
+			CloudAPIKeyRef: "env:PAX_NODE_KEY",
 		},
 	}
 }

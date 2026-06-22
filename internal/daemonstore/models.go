@@ -3,18 +3,18 @@ package daemonstore
 import "time"
 
 type Remote struct {
-	ID           string     `gorm:"primaryKey;type:text"`
-	Name         string     `gorm:"type:text;not null"`
-	CloudAPIURL  string     `gorm:"type:text;not null;uniqueIndex:idx_remote_cloud_api_url"`
-	NodeID       string     `gorm:"type:text"`
-	CloudAPIKey  string     `gorm:"type:text"`
-	Enabled      bool       `gorm:"not null"`
-	IsDefault    bool       `gorm:"not null"`
-	Generation   int64      `gorm:"not null;default:1"`
-	RestartNonce int64      `gorm:"not null;default:0"`
-	RegisteredAt *time.Time `gorm:"column:registered_at"`
-	CreatedAt    time.Time  `gorm:"column:created_at;not null"`
-	UpdatedAt    time.Time  `gorm:"column:updated_at;not null"`
+	ID             string     `gorm:"primaryKey;type:text"`
+	Name           string     `gorm:"type:text;not null"`
+	CloudAPIURL    string     `gorm:"type:text;not null;uniqueIndex:idx_remote_cloud_api_url"`
+	NodeID         string     `gorm:"type:text"`
+	CloudAPIKeyRef string     `gorm:"column:cloud_api_key_ref;type:text"`
+	Enabled        bool       `gorm:"not null"`
+	IsDefault      bool       `gorm:"not null"`
+	Generation     int64      `gorm:"not null;default:1"`
+	RestartNonce   int64      `gorm:"not null;default:0"`
+	RegisteredAt   *time.Time `gorm:"column:registered_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at;not null"`
 }
 
 func (Remote) TableName() string { return "remote" }

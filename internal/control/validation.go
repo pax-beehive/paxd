@@ -117,7 +117,7 @@ func (cmd UpdateRemoteCommand) Validate() error {
 	if strings.TrimSpace(cmd.RemoteID) == "" {
 		return invalid("update_remote.remote_id", "remote id is required")
 	}
-	if cmd.Remote.IsZero() && cmd.CloudAPIKey == nil {
+	if cmd.Remote.IsZero() && cmd.CloudAPIKeyRef == nil {
 		return invalid("update_remote", "at least one update field is required")
 	}
 	return nil

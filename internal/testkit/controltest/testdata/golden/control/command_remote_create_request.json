@@ -10,6 +10,6 @@
       "enabled": true,
       "is_default": true
     },
-    "cloud_api_key": "node_key_ref"
+    "cloud_api_key_ref": "env:PAX_NODE_KEY"
   }
 }

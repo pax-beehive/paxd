@@ -32,8 +32,8 @@ func TestLoadRemoteCreateCommandRequest(t *testing.T) {
 	if cmd.CreateRemote.Remote.ID != "remote_prod" {
 		t.Fatalf("Remote.ID = %q", cmd.CreateRemote.Remote.ID)
 	}
-	if cmd.CreateRemote.CloudAPIKey != "node_key_ref" {
-		t.Fatalf("CloudAPIKey = %q", cmd.CreateRemote.CloudAPIKey)
+	if cmd.CreateRemote.CloudAPIKeyRef != "env:PAX_NODE_KEY" {
+		t.Fatalf("CloudAPIKeyRef = %q", cmd.CreateRemote.CloudAPIKeyRef)
 	}
 }
 
