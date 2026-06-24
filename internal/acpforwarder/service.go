@@ -23,7 +23,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -35,7 +34,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pax-beehive/paxd/internal/acphistory"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxkit/reliablemq"
+	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 )
 
 // Config controls the stateless ACP forwarder service.
@@ -44,6 +47,7 @@ type Config struct {
 	APIKey            string
 	CFClientID        string
 	CFClientSecret    string
+	ConnectionID      string
 	AgentID           string
 	InstanceID        string
 	Command           []string
@@ -51,6 +55,7 @@ type Config struct {
 	TunnelPath        string
 	ReconnectInterval time.Duration
 	Journal           *store.Store
+	History           *daemonstore.Store
 }
 
 // Service maintains one ACP tunnel session at a time.
@@ -60,20 +65,6 @@ type Service struct {
 }
 
 const maxReconnectBackoff = 30 * time.Second
-
-type tunnelEnvelope struct {
-	Type    string          `json:"type"`
-	Stream  string          `json:"stream"`
-	Seq     int64           `json:"seq"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-}
-
-const (
-	tunnelTypeAck             = "ack"
-	tunnelTypeData            = "data"
-	tunnelStreamManagerToPaxd = "manager_to_paxd"
-	tunnelStreamPaxdToManager = "paxd_to_manager"
-)
 
 // New creates a forwarder service.
 func New(cfg Config) *Service {
@@ -141,10 +132,14 @@ func (s *Service) validate() error {
 		return fmt.Errorf("cloud url is required")
 	case s.cfg.APIKey == "":
 		return fmt.Errorf("api key is required")
+	case s.cfg.ConnectionID == "":
+		return fmt.Errorf("connection id is required")
 	case len(s.cfg.Command) == 0:
 		return fmt.Errorf("acp command is required")
 	case s.cfg.Journal == nil:
 		return fmt.Errorf("transport journal is required")
+	case s.cfg.History == nil:
+		return fmt.Errorf("history store is required")
 	}
 	if !strings.ContainsAny(s.cfg.Command[0], `/\`) {
 		if _, err := exec.LookPath(s.cfg.Command[0]); err != nil {
@@ -164,6 +159,7 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	}
 
 	q := tunnelURL.Query()
+	q.Set("connection_id", s.cfg.ConnectionID)
 	if s.cfg.AgentID != "" {
 		q.Set("agent_id", s.cfg.AgentID)
 	}
@@ -215,9 +211,20 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	log.Printf("[acp-forwarder] connected %s -> %s", tunnelURL.Redacted(), s.cfg.Command[0])
 
 	var wsWriteMu sync.Mutex
+	engine, err := s.newReliableEngine(conn, stdin, &wsWriteMu)
+	if err != nil {
+		return true, err
+	}
+	if err := engine.ReplayInbound(runCtx, s.cfg.ConnectionID, reliablemq.StreamACP, 1000); err != nil {
+		return true, fmt.Errorf("replay inbound frames: %w", err)
+	}
+	if err := engine.ReplayOutbound(runCtx, s.cfg.ConnectionID, reliablemq.StreamACP, 1000); err != nil {
+		return true, fmt.Errorf("replay outbound frames: %w", err)
+	}
+
 	errCh := make(chan error, 3)
-	go func() { errCh <- s.copyWSToStdin(conn, stdin, &wsWriteMu) }()
-	go func() { errCh <- s.copyStdoutToWS(stdout, conn, &wsWriteMu) }()
+	go func() { errCh <- s.copyWSToStdinWithEngine(conn, engine) }()
+	go func() { errCh <- s.copyStdoutToWSWithEngine(stdout, engine) }()
 	go logStderr(stderr)
 
 	waitCh := make(chan error, 1)
@@ -255,7 +262,14 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 }
 
 func (s *Service) copyWSToStdin(conn *websocket.Conn, stdin io.WriteCloser, wsWriteMu *sync.Mutex) error {
-	defer stdin.Close()
+	engine, err := s.newReliableEngine(conn, stdin, wsWriteMu)
+	if err != nil {
+		return err
+	}
+	return s.copyWSToStdinWithEngine(conn, engine)
+}
+
+func (s *Service) copyWSToStdinWithEngine(conn *websocket.Conn, engine *reliablemq.Engine) error {
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -264,77 +278,28 @@ func (s *Service) copyWSToStdin(conn *websocket.Conn, stdin io.WriteCloser, wsWr
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 			continue
 		}
-		env, err := decodeTunnelEnvelope(payload)
+		env, err := reliablemq.UnmarshalEnvelope(payload)
 		if err != nil {
 			return err
 		}
-		if env.Type == tunnelTypeAck {
-			if env.Stream == tunnelStreamPaxdToManager {
-				if err := s.cfg.Journal.AckOutboundTransportFrames(
-					s.cfg.AgentID,
-					store.TransportStreamPaxdToManager,
-					env.Seq,
-				); err != nil {
-					return fmt.Errorf("ack outbound frame: %w", err)
-				}
-			}
-			continue
+		if env.QueueID != s.cfg.ConnectionID {
+			return fmt.Errorf("unexpected reliablemq queue_id %q", env.QueueID)
 		}
-		rawPayload, ok, err := unwrapManagerToPaxdEnvelope(env)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		inserted, err := s.cfg.Journal.SaveTransportFrameIfAbsent(&store.TransportFrame{
-			AgentID:        s.cfg.AgentID,
-			Stream:         store.TransportStreamManagerToPaxd,
-			Seq:            env.Seq,
-			LocalDirection: store.TransportDirectionInbound,
-			PayloadJSON:    string(rawPayload),
-			Status:         store.TransportStatusReceived,
-		})
-		if err != nil {
-			return fmt.Errorf("save inbound frame: %w", err)
-		}
-		if err := projectTransportMessage(
-			s.cfg.Journal,
-			s.cfg.AgentID,
-			store.TransportStreamManagerToPaxd,
-			env.Seq,
-			rawPayload,
-		); err != nil {
-			return fmt.Errorf("project inbound message history: %w", err)
-		}
-		if err := writeTunnelAck(conn, wsWriteMu, tunnelStreamManagerToPaxd, env.Seq); err != nil {
-			return err
-		}
-		if !inserted {
-			continue
-		}
-		if _, err := stdin.Write(rawPayload); err != nil {
-			return fmt.Errorf("write acp stdin: %w", err)
-		}
-		if !bytes.HasSuffix(rawPayload, []byte("\n")) {
-			if _, err := stdin.Write([]byte("\n")); err != nil {
-				return fmt.Errorf("write acp stdin delimiter: %w", err)
-			}
-		}
-		if err := s.cfg.Journal.UpdateTransportFrameStatus(
-			s.cfg.AgentID,
-			store.TransportStreamManagerToPaxd,
-			env.Seq,
-			store.TransportDirectionInbound,
-			store.TransportStatusApplied,
-			"",
-		); err != nil {
-			return fmt.Errorf("mark inbound frame applied: %w", err)
+		if err := engine.Receive(context.Background(), env); err != nil {
+			return fmt.Errorf("receive reliablemq envelope: %w", err)
 		}
 	}
 }
 
 func (s *Service) copyStdoutToWS(stdout io.Reader, conn *websocket.Conn, wsWriteMu *sync.Mutex) error {
+	engine, err := s.newReliableEngine(conn, io.Discard, wsWriteMu)
+	if err != nil {
+		return err
+	}
+	return s.copyStdoutToWSWithEngine(stdout, engine)
+}
+
+func (s *Service) copyStdoutToWSWithEngine(stdout io.Reader, engine *reliablemq.Engine) error {
 	reader := bufio.NewReader(stdout)
 
 	for {
@@ -342,52 +307,15 @@ func (s *Service) copyStdoutToWS(stdout io.Reader, conn *websocket.Conn, wsWrite
 		if len(line) > 0 {
 			line = trimLineDelimiter(line)
 			if len(line) > 0 {
-				seq, err := s.cfg.Journal.NextTransportSeq(
-					s.cfg.AgentID,
-					store.TransportStreamPaxdToManager,
-					store.TransportDirectionOutbound,
-				)
-				if err != nil {
-					return fmt.Errorf("next outbound seq: %w", err)
-				}
-				if err := s.cfg.Journal.SaveTransportFrame(&store.TransportFrame{
-					AgentID:        s.cfg.AgentID,
-					Stream:         store.TransportStreamPaxdToManager,
-					Seq:            seq,
-					LocalDirection: store.TransportDirectionOutbound,
-					PayloadJSON:    string(line),
-					Status:         store.TransportStatusPending,
+				if _, err := engine.Send(context.Background(), reliablemq.OutboundMessage{
+					QueueID: s.cfg.ConnectionID,
+					Stream:  reliablemq.StreamACP,
+					Payload: append([]byte(nil), line...),
+					Metadata: reliablemq.Metadata{
+						"agent_id": s.cfg.AgentID,
+					},
 				}); err != nil {
-					return fmt.Errorf("save outbound frame: %w", err)
-				}
-				if err := projectTransportMessage(
-					s.cfg.Journal,
-					s.cfg.AgentID,
-					store.TransportStreamPaxdToManager,
-					seq,
-					line,
-				); err != nil {
-					return fmt.Errorf("project outbound message history: %w", err)
-				}
-				enveloped, err := wrapPaxdToManager(seq, line)
-				if err != nil {
-					return err
-				}
-				wsWriteMu.Lock()
-				writeErr := conn.WriteMessage(websocket.TextMessage, enveloped)
-				wsWriteMu.Unlock()
-				if writeErr != nil {
-					return fmt.Errorf("write tunnel: %w", writeErr)
-				}
-				if err := s.cfg.Journal.UpdateTransportFrameStatus(
-					s.cfg.AgentID,
-					store.TransportStreamPaxdToManager,
-					seq,
-					store.TransportDirectionOutbound,
-					store.TransportStatusSent,
-					"",
-				); err != nil {
-					return fmt.Errorf("mark outbound frame sent: %w", err)
+					return fmt.Errorf("send reliablemq frame: %w", err)
 				}
 			}
 		}
@@ -406,66 +334,58 @@ func trimLineDelimiter(line []byte) []byte {
 	return line
 }
 
-func decodeTunnelEnvelope(payload []byte) (tunnelEnvelope, error) {
-	var env tunnelEnvelope
-	if err := json.Unmarshal(payload, &env); err != nil {
-		return tunnelEnvelope{}, fmt.Errorf("decode tunnel envelope: %w", err)
-	}
-	return env, nil
-}
-
-func unwrapManagerToPaxd(payload []byte) ([]byte, bool, error) {
-	env, err := decodeTunnelEnvelope(payload)
+func (s *Service) newReliableEngine(conn *websocket.Conn, stdin io.Writer, wsWriteMu *sync.Mutex) (*reliablemq.Engine, error) {
+	mqStore, err := sqlstore.NewSQLite(s.cfg.Journal.DB(), sqlstore.WithTableName("transport_journal"))
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return unwrapManagerToPaxdEnvelope(env)
-}
-
-func unwrapManagerToPaxdEnvelope(env tunnelEnvelope) ([]byte, bool, error) {
-	if env.Type != tunnelTypeData {
-		return nil, false, nil
-	}
-	if env.Stream != tunnelStreamManagerToPaxd {
-		return nil, false, fmt.Errorf("unexpected tunnel stream %q", env.Stream)
-	}
-	if env.Seq <= 0 {
-		return nil, false, fmt.Errorf("invalid tunnel seq %d", env.Seq)
-	}
-	if len(env.Payload) == 0 {
-		return nil, false, fmt.Errorf("missing tunnel payload")
-	}
-	return env.Payload, true, nil
-}
-
-func writeTunnelAck(conn *websocket.Conn, wsWriteMu *sync.Mutex, stream string, seq int64) error {
-	data, err := json.Marshal(tunnelEnvelope{
-		Type:   tunnelTypeAck,
-		Stream: stream,
-		Seq:    seq,
+	sender := reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
+		if env.Type == reliablemq.EnvelopeTypeData {
+			if err := acphistory.ProjectOutbound(
+				ctx,
+				s.cfg.History,
+				s.cfg.AgentID,
+				env.Seq,
+				env.Payload,
+			); err != nil {
+				log.Printf("[acp-forwarder] project outbound history failed: %v", err)
+			}
+		}
+		data, err := reliablemq.MarshalEnvelope(env)
+		if err != nil {
+			return err
+		}
+		wsWriteMu.Lock()
+		defer wsWriteMu.Unlock()
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return fmt.Errorf("write reliablemq envelope: %w", err)
+		}
+		return nil
 	})
-	if err != nil {
-		return err
+	dispatcher := reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		if err := writeACPStdin(stdin, frame.Payload); err != nil {
+			return err
+		}
+		return nil
+	})
+	return reliablemq.NewEngine(
+		reliablemq.Config{},
+		mqStore,
+		sender,
+		dispatcher,
+	), nil
+}
+
+func writeACPStdin(stdin io.Writer, payload []byte) error {
+	if _, err := stdin.Write(payload); err != nil {
+		return fmt.Errorf("write acp stdin: %w", err)
 	}
-	wsWriteMu.Lock()
-	defer wsWriteMu.Unlock()
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		return fmt.Errorf("write tunnel ack: %w", err)
+	if !bytes.HasSuffix(payload, []byte("\n")) {
+		if _, err := stdin.Write([]byte("\n")); err != nil {
+			return fmt.Errorf("write acp stdin delimiter: %w", err)
+		}
 	}
 	return nil
-}
-
-func wrapPaxdToManager(seq int64, payload []byte) ([]byte, error) {
-	var raw json.RawMessage
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return nil, fmt.Errorf("wrap acp frame: payload must be JSON: %w", err)
-	}
-	return json.Marshal(tunnelEnvelope{
-		Type:    tunnelTypeData,
-		Stream:  tunnelStreamPaxdToManager,
-		Seq:     seq,
-		Payload: raw,
-	})
 }
 
 func logStderr(stderr io.Reader) {

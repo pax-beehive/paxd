@@ -1,22 +1,33 @@
-package acpforwarder
+package acphistory
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
 )
 
-type historyRPC struct {
+type Store interface {
+	UpsertMessage(context.Context, *daemonstore.Message) error
+	AppendMessagePartText(context.Context, string, int, string, string) error
+}
+
+const (
+	messageSourceACP    = "acp_tunnel"
+	messageDirectionOut = "paxd_to_manager"
+)
+
+type rpcMessage struct {
 	ID     any             `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
-type historyFields struct {
+type messageFields struct {
 	SessionID     string
 	TurnID        string
 	ResponseID    string
@@ -27,21 +38,20 @@ type historyFields struct {
 	Content       string
 }
 
-func projectTransportMessage(
-	journal *store.Store,
+func ProjectOutbound(
+	ctx context.Context,
+	store Store,
 	agentID string,
-	stream string,
 	seq int64,
 	payload json.RawMessage,
 ) error {
-	if stream != store.TransportStreamPaxdToManager {
+	if store == nil {
 		return nil
 	}
-	var rpc historyRPC
+	var rpc rpcMessage
 	_ = json.Unmarshal(payload, &rpc)
-	direction := store.MessageDirectionPaxdToManager
 	role := "assistant"
-	fields := extractHistoryFields(payload, rpc)
+	fields := extractFields(payload, rpc)
 	fields, ok := normalizeTextUpdate(rpc, fields)
 	if !ok {
 		return nil
@@ -55,38 +65,33 @@ func projectTransportMessage(
 		rpc.Method,
 		"acp",
 	)
-	logicalKey := historyLogicalKey(agentID, stream, seq, fields)
-	messageID := historyMessageID(logicalKey)
-	msg := store.Message{
+	logicalKey := logicalKey(agentID, seq, fields)
+	messageID := messageID(logicalKey)
+	msg := daemonstore.Message{
 		MessageID:   messageID,
 		AgentID:     agentID,
 		SessionID:   fields.SessionID,
-		Source:      store.MessageSourceACPTunnel,
-		Direction:   direction,
+		Source:      messageSourceACP,
+		Direction:   messageDirectionOut,
 		Role:        role,
 		Status:      "received",
 		MessageType: messageType,
 		TurnID:      fields.TurnID,
 		ResponseID:  fields.ResponseID,
-		LogicalKey:  logicalKey,
+		LogicalKey:  stringPtr(logicalKey),
 	}
-	if err := journal.UpsertMessage(&msg); err != nil {
+	if err := store.UpsertMessage(ctx, &msg); err != nil {
 		return err
 	}
-	return journal.AppendMessagePartText(msg.MessageID, 0, fields.Content, "")
+	return store.AppendMessagePartText(ctx, msg.MessageID, 0, fields.Content, "")
 }
 
-func historyLogicalKey(
-	agentID string,
-	stream string,
-	seq int64,
-	fields historyFields,
-) string {
+func logicalKey(agentID string, seq int64, fields messageFields) string {
 	if fields.SessionID != "" && fields.TurnID != "" {
 		return fmt.Sprintf(
 			"acp:%s:%s:%s:%s:%s:%s",
 			agentID,
-			stream,
+			messageDirectionOut,
 			firstNonEmpty(fields.SessionID, "_"),
 			fields.TurnID,
 			firstNonEmpty(fields.SessionUpdate, "_"),
@@ -97,21 +102,28 @@ func historyLogicalKey(
 		return fmt.Sprintf(
 			"acp:%s:%s:%s:%s:%s",
 			agentID,
-			stream,
+			messageDirectionOut,
 			fields.SessionID,
 			firstNonEmpty(fields.SessionUpdate, "_"),
 			firstNonEmpty(fields.Role, "_"),
 		)
 	}
-	return fmt.Sprintf("acp:%s:%s:text:%d", agentID, stream, seq)
+	return fmt.Sprintf("acp:%s:%s:text:%d", agentID, messageDirectionOut, seq)
 }
 
-func historyMessageID(logicalKey string) string {
+func messageID(logicalKey string) string {
 	sum := sha256.Sum256([]byte(logicalKey))
 	return fmt.Sprintf("msg_%x", sum[:24])
 }
 
-func extractHistoryFields(payload json.RawMessage, rpc historyRPC) historyFields {
+func stringPtr(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func extractFields(payload json.RawMessage, rpc rpcMessage) messageFields {
 	fields := fieldsFromRaw(payload)
 	for _, raw := range []json.RawMessage{rpc.Params, rpc.Result} {
 		nested := fieldsFromRaw(raw)
@@ -127,16 +139,16 @@ func extractHistoryFields(payload json.RawMessage, rpc historyRPC) historyFields
 	return fields
 }
 
-func fieldsFromRaw(raw json.RawMessage) historyFields {
+func fieldsFromRaw(raw json.RawMessage) messageFields {
 	if len(raw) == 0 {
-		return historyFields{}
+		return messageFields{}
 	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return historyFields{}
+		return messageFields{}
 	}
 	obj, _ := v.(map[string]any)
-	return historyFields{
+	return messageFields{
 		SessionID:     findString(obj, "sessionId", "session_id"),
 		TurnID:        findString(obj, "turnId", "turn_id"),
 		ResponseID:    findString(obj, "responseId", "response_id"),
@@ -173,7 +185,7 @@ func findString(v any, keys ...string) string {
 	return ""
 }
 
-func normalizeTextUpdate(rpc historyRPC, fields historyFields) (historyFields, bool) {
+func normalizeTextUpdate(rpc rpcMessage, fields messageFields) (messageFields, bool) {
 	if fields.Content == "" {
 		return fields, false
 	}

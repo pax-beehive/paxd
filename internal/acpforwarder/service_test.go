@@ -2,8 +2,7 @@ package acpforwarder
 
 import (
 	"bytes"
-	"database/sql"
-	"encoding/json"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,7 +13,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/pax-beehive/paxkit/reliablemq"
+	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 )
 
 func TestTunnelURLFromHTTP(t *testing.T) {
@@ -84,134 +86,14 @@ func TestNextReconnectBackoffResetsAfterConnectedTunnel(t *testing.T) {
 	}
 }
 
-func TestProjectTransportMessageAggregatesDeltasIntoOnePart(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "paxd.db")
-	journal, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer journal.Close()
-
-	first := json.RawMessage(`{
-		"jsonrpc":"2.0",
-		"method":"session/update",
-		"params":{
-			"sessionId":"sess-1",
-			"update":{
-				"sessionUpdate":"agent_message_chunk",
-				"content":{"type":"text","text":"h"}
-			}
-		}
-	}`)
-	second := json.RawMessage(`{
-		"jsonrpc":"2.0",
-		"method":"session/update",
-		"params":{
-			"sessionId":"sess-1",
-			"update":{
-				"sessionUpdate":"agent_message_chunk",
-				"content":{"type":"text","text":"i"}
-			}
-		}
-	}`)
-	thought := json.RawMessage(`{
-		"jsonrpc":"2.0",
-		"method":"session/update",
-		"params":{
-			"sessionId":"sess-1",
-			"update":{
-				"sessionUpdate":"agent_thought_chunk",
-				"content":{"type":"text","text":"thinking"}
-			}
-		}
-	}`)
-	rpcResponse := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`)
-	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 1, first); err != nil {
-		t.Fatalf("project first delta: %v", err)
-	}
-	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 2, second); err != nil {
-		t.Fatalf("project second delta: %v", err)
-	}
-	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 3, thought); err != nil {
-		t.Fatalf("project thought delta: %v", err)
-	}
-	if err := projectTransportMessage(journal, "agent-1", store.TransportStreamPaxdToManager, 4, rpcResponse); err != nil {
-		t.Fatalf("project rpc response: %v", err)
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite for assertion: %v", err)
-	}
-	defer db.Close()
-	var text string
-	var count int
-	if err := db.QueryRow(`
-		SELECT message_parts.text
-		FROM message_parts
-		JOIN messages ON messages.message_id = message_parts.message_id
-		WHERE messages.message_type = 'agent_message_chunk'
-	`).Scan(&text); err != nil {
-		t.Fatalf("read projected message chunk: %v", err)
-	}
-	if text != "hi" {
-		t.Fatalf("projected message text = %q, want hi", text)
-	}
-	if err := db.QueryRow(`
-		SELECT message_parts.text
-		FROM message_parts
-		JOIN messages ON messages.message_id = message_parts.message_id
-		WHERE messages.message_type = 'agent_thought_chunk'
-	`).Scan(&text); err != nil {
-		t.Fatalf("read projected thought chunk: %v", err)
-	}
-	if text != "thinking" {
-		t.Fatalf("projected thought text = %q, want thinking", text)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM message_parts`).Scan(&count); err != nil {
-		t.Fatalf("count projected parts: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("projected parts = %d, want 2", count)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id NOT LIKE 'msg_%'`).Scan(&count); err != nil {
-		t.Fatalf("count projected message ids: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("projected messages with non-msg ids = %d, want 0", count)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE logical_key NOT LIKE 'acp:%'`).Scan(&count); err != nil {
-		t.Fatalf("count projected logical keys: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("projected messages with non-acp logical keys = %d, want 0", count)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE COALESCE(raw_json, '') != ''`).Scan(&count); err != nil {
-		t.Fatalf("count projected message raw json: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("projected messages with raw_json = %d, want 0", count)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM message_parts WHERE COALESCE(payload_json, '') != ''`).Scan(&count); err != nil {
-		t.Fatalf("count projected part payload json: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("projected parts with payload_json = %d, want 0", count)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE message_id LIKE '%rpc:%'`).Scan(&count); err != nil {
-		t.Fatalf("count rpc-derived messages: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("rpc-derived messages = %d, want 0", count)
-	}
-}
-
 func TestValidateRejectsMissingACPCommandExecutable(t *testing.T) {
 	s := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"definitely-not-a-real-paxd-acp-command"},
-		Journal:  openTestJournal(t),
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		ConnectionID: "conn_1",
+		Command:      []string{"definitely-not-a-real-paxd-acp-command"},
+		Journal:      openTestJournal(t),
+		History:      openTestHistory(t, filepath.Join(t.TempDir(), "history.db")),
 	})
 	defer s.cfg.Journal.Close()
 
@@ -224,122 +106,51 @@ func TestValidateRejectsMissingACPCommandExecutable(t *testing.T) {
 	}
 }
 
-func TestTunnelEnvelopeUnwrapsManagerToPaxdPayload(t *testing.T) {
+func TestReliableMQEnvelopeUnwrapsACPPayload(t *testing.T) {
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := json.Marshal(tunnelEnvelope{
-		Type:    tunnelTypeData,
-		Stream:  tunnelStreamManagerToPaxd,
+	frame, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:    reliablemq.EnvelopeTypeData,
+		QueueID: "conn_1",
+		Stream:  reliablemq.StreamACP,
 		Seq:     7,
-		Payload: json.RawMessage(payload),
+		Payload: payload,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, ok, err := unwrapManagerToPaxd(frame)
+	env, err := reliablemq.UnmarshalEnvelope(frame)
 	if err != nil {
-		t.Fatalf("unwrapManagerToPaxd() error = %v", err)
+		t.Fatalf("UnmarshalEnvelope() error = %v", err)
 	}
-	if !ok {
-		t.Fatal("unwrapManagerToPaxd() ok = false")
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("payload = %s, want %s", got, payload)
-	}
-}
-
-func TestTunnelEnvelopeUnwrapDecisionTable(t *testing.T) {
-	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1}`)
-	cases := []struct {
-		name    string
-		env     tunnelEnvelope
-		wantOK  bool
-		wantErr string
-	}{
-		{
-			name: "valid data",
-			env: tunnelEnvelope{
-				Type:    tunnelTypeData,
-				Stream:  tunnelStreamManagerToPaxd,
-				Seq:     1,
-				Payload: payload,
-			},
-			wantOK: true,
-		},
-		{
-			name: "ack is ignored by data unwrap",
-			env: tunnelEnvelope{
-				Type:   tunnelTypeAck,
-				Stream: tunnelStreamManagerToPaxd,
-				Seq:    1,
-			},
-		},
-		{
-			name: "wrong stream errors",
-			env: tunnelEnvelope{
-				Type:    tunnelTypeData,
-				Stream:  tunnelStreamPaxdToManager,
-				Seq:     1,
-				Payload: payload,
-			},
-			wantErr: "unexpected tunnel stream",
-		},
-		{
-			name: "non-positive seq errors",
-			env: tunnelEnvelope{
-				Type:    tunnelTypeData,
-				Stream:  tunnelStreamManagerToPaxd,
-				Seq:     0,
-				Payload: payload,
-			},
-			wantErr: "invalid tunnel seq",
-		},
-		{
-			name: "missing payload errors",
-			env: tunnelEnvelope{
-				Type:   tunnelTypeData,
-				Stream: tunnelStreamManagerToPaxd,
-				Seq:    1,
-			},
-			wantErr: "missing tunnel payload",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok, err := unwrapManagerToPaxdEnvelope(tc.env)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error = %v", err)
-			}
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if tc.wantOK && string(got) != string(payload) {
-				t.Fatalf("payload = %s, want %s", got, payload)
-			}
-		})
+	if env.Type != reliablemq.EnvelopeTypeData || env.QueueID != "conn_1" ||
+		env.Stream != reliablemq.StreamACP || env.Seq != 7 ||
+		string(env.Payload) != string(payload) {
+		t.Fatalf("envelope = %+v", env)
 	}
 }
 
-func TestTunnelEnvelopeWrapsPaxdToManagerPayload(t *testing.T) {
+func TestReliableMQEnvelopeWrapsPaxdToManagerPayload(t *testing.T) {
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`)
-
-	frame, err := wrapPaxdToManager(3, payload)
+	frame, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:     reliablemq.EnvelopeTypeData,
+		QueueID:  "conn_1",
+		Stream:   reliablemq.StreamACP,
+		Seq:      3,
+		Metadata: reliablemq.Metadata{"agent_id": "agent_1"},
+		Payload:  payload,
+	})
 	if err != nil {
-		t.Fatalf("wrapPaxdToManager() error = %v", err)
+		t.Fatalf("MarshalEnvelope() error = %v", err)
 	}
 
-	var env tunnelEnvelope
-	if err := json.Unmarshal(frame, &env); err != nil {
-		t.Fatalf("decode wrapped frame: %v", err)
+	env, err := reliablemq.UnmarshalEnvelope(frame)
+	if err != nil {
+		t.Fatalf("decode wrapped envelope: %v", err)
 	}
-	if env.Type != tunnelTypeData || env.Stream != tunnelStreamPaxdToManager || env.Seq != 3 {
+	if env.Type != reliablemq.EnvelopeTypeData || env.QueueID != "conn_1" ||
+		env.Metadata["agent_id"] != "agent_1" ||
+		env.Stream != reliablemq.StreamACP || env.Seq != 3 {
 		t.Fatalf("wrapped envelope = %+v", env)
 	}
 	if string(env.Payload) != string(payload) {
@@ -350,12 +161,15 @@ func TestTunnelEnvelopeWrapsPaxdToManagerPayload(t *testing.T) {
 func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T) {
 	journal := openTestJournal(t)
 	defer journal.Close()
+	history := openTestHistory(t, filepath.Join(t.TempDir(), "history.db"))
 	svc := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"test-acp"},
-		AgentID:  "agent_1",
-		Journal:  journal,
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		Command:      []string{"test-acp"},
+		ConnectionID: "conn_1",
+		AgentID:      "agent_1",
+		Journal:      journal,
+		History:      history,
 	})
 	stdin := &recordingWriteCloser{written: make(chan []byte, 4)}
 	var writeMu sync.Mutex
@@ -381,12 +195,7 @@ func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T)
 	defer client.Close()
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := json.Marshal(tunnelEnvelope{
-		Type:    tunnelTypeData,
-		Stream:  tunnelStreamManagerToPaxd,
-		Seq:     7,
-		Payload: json.RawMessage(payload),
-	})
+	frame, err := testDataEnvelope(7, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,11 +207,9 @@ func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T)
 		if err != nil {
 			t.Fatalf("read ack %d: %v", i, err)
 		}
-		var ack tunnelEnvelope
-		if err := json.Unmarshal(ackBytes, &ack); err != nil {
-			t.Fatalf("decode ack %d: %v", i, err)
-		}
-		if ack.Type != tunnelTypeAck || ack.Stream != tunnelStreamManagerToPaxd || ack.Seq != 7 {
+		ack := decodeTestEnvelope(t, ackBytes)
+		if ack.Type != reliablemq.EnvelopeTypeAck || ack.QueueID != "conn_1" ||
+			ack.Stream != reliablemq.StreamACP || ack.Seq != 7 {
 			t.Fatalf("ack %d = %+v", i, ack)
 		}
 	}
@@ -425,12 +232,15 @@ func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T)
 func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 	journal := openTestJournal(t)
 	defer journal.Close()
+	history := openTestHistory(t, filepath.Join(t.TempDir(), "history.db"))
 	svc := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"test-acp"},
-		AgentID:  "agent_1",
-		Journal:  journal,
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		Command:      []string{"test-acp"},
+		ConnectionID: "conn_1",
+		AgentID:      "agent_1",
+		Journal:      journal,
+		History:      history,
 	})
 	stdin := &recordingWriteCloser{written: make(chan []byte, 2)}
 	var writeMu sync.Mutex
@@ -456,12 +266,7 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 	defer client.Close()
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := json.Marshal(tunnelEnvelope{
-		Type:    tunnelTypeData,
-		Stream:  tunnelStreamManagerToPaxd,
-		Seq:     9,
-		Payload: json.RawMessage(payload),
-	})
+	frame, err := testDataEnvelope(9, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,11 +278,9 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ack: %v", err)
 	}
-	var ack tunnelEnvelope
-	if err := json.Unmarshal(ackBytes, &ack); err != nil {
-		t.Fatalf("decode ack: %v", err)
-	}
-	if ack.Type != tunnelTypeAck || ack.Stream != tunnelStreamManagerToPaxd || ack.Seq != 9 {
+	ack := decodeTestEnvelope(t, ackBytes)
+	if ack.Type != reliablemq.EnvelopeTypeAck || ack.QueueID != "conn_1" ||
+		ack.Stream != reliablemq.StreamACP || ack.Seq != 9 {
 		t.Fatalf("ack = %+v", ack)
 	}
 
@@ -490,16 +293,13 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 		t.Fatal("timed out waiting for stdin write")
 	}
 
-	stored, err := journal.GetTransportFrame(
-		"agent_1",
-		store.TransportStreamManagerToPaxd,
-		9,
-		store.TransportDirectionInbound,
-	)
-	if err != nil {
-		t.Fatalf("GetTransportFrame() error = %v", err)
-	}
-	if stored == nil || stored.Status != store.TransportStatusApplied || stored.PayloadJSON != string(payload) {
+	stored := mustGetReliableFrame(t, journal, reliablemq.FrameKey{
+		QueueID:   "conn_1",
+		Stream:    reliablemq.StreamACP,
+		Seq:       9,
+		Direction: reliablemq.DirectionInbound,
+	})
+	if stored.Status != reliablemq.StatusApplied || string(stored.Payload) != string(payload) {
 		t.Fatalf("stored frame = %+v", stored)
 	}
 }
@@ -507,12 +307,15 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 	journal := openTestJournal(t)
 	defer journal.Close()
+	history := openTestHistory(t, filepath.Join(t.TempDir(), "history.db"))
 	svc := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"test-acp"},
-		AgentID:  "agent_1",
-		Journal:  journal,
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		Command:      []string{"test-acp"},
+		ConnectionID: "conn_1",
+		AgentID:      "agent_1",
+		Journal:      journal,
+		History:      history,
 	})
 	stdin := &failingWriteCloser{}
 	var writeMu sync.Mutex
@@ -536,12 +339,7 @@ func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 	defer client.Close()
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := json.Marshal(tunnelEnvelope{
-		Type:    tunnelTypeData,
-		Stream:  tunnelStreamManagerToPaxd,
-		Seq:     11,
-		Payload: json.RawMessage(payload),
-	})
+	frame, err := testDataEnvelope(11, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,62 +349,43 @@ func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 	if _, _, err := client.ReadMessage(); err != nil {
 		t.Fatalf("read ack: %v", err)
 	}
-
+	_ = client.Close()
 	select {
-	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "write acp stdin") {
-			t.Fatalf("copyWSToStdin() error = %v, want stdin write failure", err)
-		}
+	case <-errCh:
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for copyWSToStdin error")
+		t.Fatal("timed out waiting for copyWSToStdin to exit")
 	}
 
-	stored, err := journal.GetTransportFrame(
-		"agent_1",
-		store.TransportStreamManagerToPaxd,
-		11,
-		store.TransportDirectionInbound,
-	)
-	if err != nil {
-		t.Fatalf("GetTransportFrame() error = %v", err)
-	}
-	if stored == nil || stored.Status != store.TransportStatusReceived || stored.AppliedAt != "" {
+	stored := mustGetReliableFrame(t, journal, reliablemq.FrameKey{
+		QueueID:   "conn_1",
+		Stream:    reliablemq.StreamACP,
+		Seq:       11,
+		Direction: reliablemq.DirectionInbound,
+	})
+	if stored.Status != reliablemq.StatusReceived {
 		t.Fatalf("stored frame = %+v, want received and not applied", stored)
+	}
+	if !strings.Contains(stored.ErrorMessage, "write acp stdin") {
+		t.Fatalf("stored error = %q, want stdin failure", stored.ErrorMessage)
 	}
 }
 
 func TestCopyWSToStdinAckUpdatesOnlyPaxdToManagerOutbound(t *testing.T) {
 	journal := openTestJournal(t)
 	defer journal.Close()
+	history := openTestHistory(t, filepath.Join(t.TempDir(), "history.db"))
 	svc := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"test-acp"},
-		AgentID:  "agent_1",
-		Journal:  journal,
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		Command:      []string{"test-acp"},
+		ConnectionID: "conn_1",
+		AgentID:      "agent_1",
+		Journal:      journal,
+		History:      history,
 	})
-	for seq := int64(1); seq <= 2; seq++ {
-		if err := journal.SaveTransportFrame(&store.TransportFrame{
-			AgentID:        "agent_1",
-			Stream:         store.TransportStreamPaxdToManager,
-			Seq:            seq,
-			LocalDirection: store.TransportDirectionOutbound,
-			PayloadJSON:    `{"jsonrpc":"2.0"}`,
-			Status:         store.TransportStatusSent,
-		}); err != nil {
-			t.Fatalf("SaveTransportFrame outbound %d: %v", seq, err)
-		}
-	}
-	if err := journal.SaveTransportFrame(&store.TransportFrame{
-		AgentID:        "agent_1",
-		Stream:         store.TransportStreamManagerToPaxd,
-		Seq:            1,
-		LocalDirection: store.TransportDirectionOutbound,
-		PayloadJSON:    `{"jsonrpc":"2.0"}`,
-		Status:         store.TransportStatusSent,
-	}); err != nil {
-		t.Fatalf("SaveTransportFrame wrong stream: %v", err)
-	}
+	first := appendSentReliableFrame(t, journal, reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0"}`))
+	second := appendSentReliableFrame(t, journal, reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0"}`))
+	wrongStreamSeed := appendSentReliableFrame(t, journal, reliablemq.StreamControl, []byte(`{"jsonrpc":"2.0"}`))
 
 	var writeMu sync.Mutex
 	errCh := make(chan error, 1)
@@ -625,11 +404,7 @@ func TestCopyWSToStdinAckUpdatesOnlyPaxdToManagerOutbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	ack, err := json.Marshal(tunnelEnvelope{
-		Type:   tunnelTypeAck,
-		Stream: tunnelStreamPaxdToManager,
-		Seq:    1,
-	})
+	ack, err := reliablemq.MarshalEnvelope(reliablemq.AckEnvelope("conn_1", reliablemq.StreamACP, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,25 +414,16 @@ func TestCopyWSToStdinAckUpdatesOnlyPaxdToManagerOutbound(t *testing.T) {
 	_ = client.Close()
 	<-errCh
 
-	got1, err := journal.GetTransportFrame("agent_1", store.TransportStreamPaxdToManager, 1, store.TransportDirectionOutbound)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got2, err := journal.GetTransportFrame("agent_1", store.TransportStreamPaxdToManager, 2, store.TransportDirectionOutbound)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrongStream, err := journal.GetTransportFrame("agent_1", store.TransportStreamManagerToPaxd, 1, store.TransportDirectionOutbound)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got1.Status != store.TransportStatusAcked {
+	got1 := mustGetReliableFrame(t, journal, first.Key)
+	got2 := mustGetReliableFrame(t, journal, second.Key)
+	wrongStream := mustGetReliableFrame(t, journal, wrongStreamSeed.Key)
+	if got1.Status != reliablemq.StatusAcked {
 		t.Fatalf("seq 1 status = %q, want acked", got1.Status)
 	}
-	if got2.Status != store.TransportStatusSent {
+	if got2.Status != reliablemq.StatusSent {
 		t.Fatalf("seq 2 status = %q, want sent", got2.Status)
 	}
-	if wrongStream.Status != store.TransportStatusSent {
+	if wrongStream.Status != reliablemq.StatusSent {
 		t.Fatalf("wrong stream status = %q, want sent", wrongStream.Status)
 	}
 }
@@ -665,12 +431,15 @@ func TestCopyWSToStdinAckUpdatesOnlyPaxdToManagerOutbound(t *testing.T) {
 func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 	journal := openTestJournal(t)
 	defer journal.Close()
+	history := openTestHistory(t, filepath.Join(t.TempDir(), "history.db"))
 	svc := New(Config{
-		CloudURL: "https://fleet.example.com",
-		APIKey:   "pax_key",
-		Command:  []string{"test-acp"},
-		AgentID:  "agent_1",
-		Journal:  journal,
+		CloudURL:     "https://fleet.example.com",
+		APIKey:       "pax_key",
+		Command:      []string{"test-acp"},
+		ConnectionID: "conn_1",
+		AgentID:      "agent_1",
+		Journal:      journal,
+		History:      history,
 	})
 	var writeMu sync.Mutex
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
@@ -698,30 +467,45 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read frame: %v", err)
 	}
-	var env tunnelEnvelope
-	if err := json.Unmarshal(frameBytes, &env); err != nil {
-		t.Fatalf("decode frame: %v", err)
-	}
-	if env.Type != tunnelTypeData || env.Stream != tunnelStreamPaxdToManager ||
+	env := decodeTestEnvelope(t, frameBytes)
+	if env.Type != reliablemq.EnvelopeTypeData || env.QueueID != "conn_1" ||
+		env.Stream != reliablemq.StreamACP ||
 		env.Seq != 1 || string(env.Payload) != string(payload) {
 		t.Fatalf("frame = %+v", env)
 	}
 
-	stored, err := journal.GetTransportFrame(
-		"agent_1",
-		store.TransportStreamPaxdToManager,
-		1,
-		store.TransportDirectionOutbound,
-	)
-	if err != nil {
-		t.Fatalf("GetTransportFrame() error = %v", err)
-	}
-	if stored == nil || stored.Status != store.TransportStatusSent || stored.PayloadJSON != string(payload) {
+	stored := mustGetReliableFrame(t, journal, reliablemq.FrameKey{
+		QueueID:   "conn_1",
+		Stream:    reliablemq.StreamACP,
+		Seq:       1,
+		Direction: reliablemq.DirectionOutbound,
+	})
+	if stored.Status != reliablemq.StatusSent || string(stored.Payload) != string(payload) {
 		t.Fatalf("stored frame = %+v", stored)
 	}
 }
 
 var testUpgrader = websocket.Upgrader{}
+
+func testDataEnvelope(seq int64, payload []byte) ([]byte, error) {
+	return reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:     reliablemq.EnvelopeTypeData,
+		QueueID:  "conn_1",
+		Stream:   reliablemq.StreamACP,
+		Seq:      seq,
+		Metadata: reliablemq.Metadata{"agent_id": "agent_1"},
+		Payload:  append([]byte(nil), payload...),
+	})
+}
+
+func decodeTestEnvelope(t *testing.T, payload []byte) reliablemq.Envelope {
+	t.Helper()
+	env, err := reliablemq.UnmarshalEnvelope(payload)
+	if err != nil {
+		t.Fatalf("decode reliablemq envelope: %v", err)
+	}
+	return env
+}
 
 type recordingWriteCloser struct {
 	written chan []byte
@@ -770,4 +554,61 @@ func openTestJournal(t *testing.T) *store.Store {
 		t.Fatalf("open test journal: %v", err)
 	}
 	return journal
+}
+
+func openTestHistory(t *testing.T, path string) *daemonstore.Store {
+	t.Helper()
+	history, err := daemonstore.OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open test history: %v", err)
+	}
+	if err := history.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate test history: %v", err)
+	}
+	return history
+}
+
+func openReliableStore(t *testing.T, journal *store.Store) *sqlstore.Store {
+	t.Helper()
+	mqStore, err := sqlstore.NewSQLite(journal.DB(), sqlstore.WithTableName("transport_journal"))
+	if err != nil {
+		t.Fatalf("open reliablemq store: %v", err)
+	}
+	return mqStore
+}
+
+func mustGetReliableFrame(t *testing.T, journal *store.Store, key reliablemq.FrameKey) reliablemq.Frame {
+	t.Helper()
+	frame, ok, err := openReliableStore(t, journal).Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get reliablemq frame: %v", err)
+	}
+	if !ok {
+		t.Fatalf("missing reliablemq frame: %+v", key)
+	}
+	return frame
+}
+
+func appendSentReliableFrame(
+	t *testing.T,
+	journal *store.Store,
+	stream reliablemq.Stream,
+	payload []byte,
+) reliablemq.Frame {
+	t.Helper()
+	mqStore := openReliableStore(t, journal)
+	frame, err := mqStore.AppendOutboundData(
+		context.Background(),
+		"conn_1",
+		stream,
+		payload,
+		reliablemq.Metadata{"agent_id": "agent_1"},
+	)
+	if err != nil {
+		t.Fatalf("append reliablemq outbound frame: %v", err)
+	}
+	if err := mqStore.MarkSent(context.Background(), frame.Key); err != nil {
+		t.Fatalf("mark reliablemq frame sent: %v", err)
+	}
+	return frame
 }

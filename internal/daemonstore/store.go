@@ -62,6 +62,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&HarnessInventory{},
 		&LocalSession{},
 		&LocalSessionElement{},
+		&Message{},
+		&MessagePart{},
 		&Setting{},
 	)
 }

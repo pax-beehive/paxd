@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -47,30 +48,9 @@ type AgentConnectionStatusUpdate struct {
 	DetailsJSON          string
 }
 
-type RemoteDesiredSpec struct {
-	RemoteID     string
-	Name         string
-	CloudAPIURL  string
-	NodeID       string
-	Generation   int64
-	RestartNonce int64
-}
+type RemoteDesiredSpec = runtimes.RemoteSpec
 
-type AgentConnectionDesiredSpec struct {
-	ConnectionID string
-	RemoteID     string
-	CloudAPIURL  string
-	CloudAgentID string
-	InstanceID   string
-	AgentType    string
-	Harness      string
-	Command      []string
-	WorkingDir   string
-	TunnelPath   string
-	Env          map[string]string
-	Generation   int64
-	RestartNonce int64
-}
+type AgentConnectionDesiredSpec = runtimes.AgentConnectionSpec
 
 type RemoteAuthMaterial = control.RemoteAuthMaterial
 

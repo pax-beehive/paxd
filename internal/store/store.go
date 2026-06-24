@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 )
 
 // Store wraps the SQLite connection and provides domain queries.
@@ -73,41 +74,6 @@ type OrphanedMessage struct {
 	RetryCount int
 }
 
-// Message is durable local business history. It is separate from
-// transport_journal, which is only the reliable WebSocket queue.
-type Message struct {
-	ID              int64
-	MessageID       string
-	AgentID         string
-	SessionID       string
-	Source          string
-	Direction       string
-	Role            string
-	Status          string
-	MessageType     string
-	ParentMessageID string
-	TurnID          string
-	ResponseID      string
-	LogicalKey      string
-	RawJSON         string
-	CreatedAt       string
-	UpdatedAt       string
-}
-
-// MessagePart stores text, raw JSON, or future artifact references. Streaming
-// deltas append to a text part instead of creating one row per token.
-type MessagePart struct {
-	ID          int64
-	MessageID   string
-	PartIndex   int
-	PartType    string
-	Text        string
-	PayloadJSON string
-	ArtifactURI string
-	CreatedAt   string
-	UpdatedAt   string
-}
-
 // Open opens (or creates) the SQLite database at the given path.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
@@ -132,7 +98,16 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB exposes the underlying SQLite handle for shared storage adapters.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 func migrate(db *sql.DB) error {
+	if err := hardMigrateTransportJournal(db); err != nil {
+		return err
+	}
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS node_state (
 		node_id       TEXT PRIMARY KEY,
@@ -183,66 +158,6 @@ func migrate(db *sql.DB) error {
 		retry_count   INTEGER DEFAULT 0
 	);
 
-	CREATE TABLE IF NOT EXISTS messages (
-		id                INTEGER PRIMARY KEY AUTOINCREMENT,
-		message_id        TEXT UNIQUE NOT NULL,
-		agent_id          TEXT NOT NULL,
-		session_id        TEXT,
-		source            TEXT NOT NULL,
-		direction         TEXT NOT NULL,
-		role              TEXT,
-		status            TEXT,
-		message_type      TEXT,
-		parent_message_id TEXT,
-		turn_id           TEXT,
-		response_id       TEXT,
-		logical_key       TEXT UNIQUE,
-		raw_json          TEXT,
-		created_at        TEXT NOT NULL,
-		updated_at        TEXT NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS message_parts (
-		id           INTEGER PRIMARY KEY AUTOINCREMENT,
-		message_id   TEXT NOT NULL,
-		part_index   INTEGER NOT NULL,
-		part_type    TEXT NOT NULL,
-		text         TEXT,
-		payload_json TEXT,
-		artifact_uri TEXT,
-		created_at   TEXT NOT NULL,
-		updated_at   TEXT NOT NULL,
-		UNIQUE(message_id, part_index),
-		FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_agent_created ON messages(agent_id, created_at, id);
-	CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at, id);
-	CREATE INDEX IF NOT EXISTS idx_message_parts_message ON message_parts(message_id, part_index);
-
-	CREATE TABLE IF NOT EXISTS transport_journal (
-		id              INTEGER PRIMARY KEY AUTOINCREMENT,
-		agent_id        TEXT NOT NULL,
-		stream          TEXT NOT NULL,
-		seq             INTEGER NOT NULL,
-		local_direction TEXT NOT NULL,
-		payload_json    TEXT NOT NULL,
-		status          TEXT NOT NULL,
-		error           TEXT,
-		retry_count     INTEGER NOT NULL DEFAULT 0,
-		created_at      TEXT NOT NULL,
-		updated_at      TEXT NOT NULL,
-		sent_at         TEXT,
-		received_at     TEXT,
-		acked_at        TEXT,
-		applied_at      TEXT,
-		UNIQUE(agent_id, stream, seq, local_direction)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_transport_journal_pending
-		ON transport_journal(agent_id, stream, local_direction, status, seq);
-	CREATE INDEX IF NOT EXISTS idx_transport_journal_cleanup
-		ON transport_journal(status, updated_at);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return err
@@ -251,7 +166,59 @@ func migrate(db *sql.DB) error {
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	if _, err := sqlstore.NewSQLite(db, sqlstore.WithTableName("transport_journal")); err != nil {
+		return err
+	}
 	return nil
+}
+
+func hardMigrateTransportJournal(db *sql.DB) error {
+	var tableName string
+	err := db.QueryRow(`
+		SELECT name
+		FROM sqlite_master
+		WHERE type = 'table' AND name = 'transport_journal'
+	`).Scan(&tableName)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	hasQueueID, err := tableHasColumn(db, "transport_journal", "queue_id")
+	if err != nil {
+		return err
+	}
+	if hasQueueID {
+		return nil
+	}
+	_, err = db.Exec(`DROP TABLE transport_journal`)
+	return err
+}
+
+func tableHasColumn(db *sql.DB, tableName string, columnName string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // --- node_state ---

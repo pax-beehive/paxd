@@ -37,62 +37,91 @@ import (
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/collector"
 	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/executor"
 	"github.com/pax-beehive/paxd/internal/hermes"
 	"github.com/pax-beehive/paxd/internal/poller"
 	"github.com/pax-beehive/paxd/internal/state"
 	"github.com/pax-beehive/paxd/internal/store"
+	"github.com/urfave/cli/v3"
 )
 
 var version = "0.1.0"
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+	app := &cli.Command{
+		Name:    "paxd",
+		Usage:   "Pax Fleet Daemon",
+		Version: version,
+		Commands: []*cli.Command{
+			{
+				Name:            "connect",
+				Usage:           "interactive device onboarding",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdConnect(cmd.Args().Slice())
+					return nil
+				},
+			},
+			cmdConfigureCommand(),
+			{
+				Name:            "register",
+				Usage:           "node-only registration",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdRegister(cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:            "run",
+				Usage:           "start the daemon loop",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdRun(cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:            "acp-forward",
+				Usage:           "run only the ACP tunnel forwarder",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdACPForward(cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:            "postman",
+				Usage:           "print Postman WebSocket URL and smoke messages",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdPostman(cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:            "harnesses",
+				Usage:           "inspect local ACP harness support",
+				SkipFlagParsing: true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdHarnesses(cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:  "install-service",
+				Usage: "install as macOS launchd service",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdInstallService()
+					return nil
+				},
+			},
+		},
 	}
-
-	cmd := os.Args[1]
-	switch cmd {
-	case "connect":
-		cmdConnect(os.Args[2:])
-	case "configure":
-		cmdConfigure(os.Args[2:])
-	case "register":
-		cmdRegister(os.Args[2:])
-	case "run":
-		cmdRun(os.Args[2:])
-	case "acp-forward":
-		cmdACPForward(os.Args[2:])
-	case "postman":
-		cmdPostman(os.Args[2:])
-	case "harnesses":
-		cmdHarnesses(os.Args[2:])
-	case "install-service":
-		cmdInstallService()
-	case "--version", "version":
-		fmt.Println("paxd", version)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
-		printUsage()
-		os.Exit(1)
+	if err := app.Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
 	}
-}
-
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `paxd — Pax Fleet Daemon %s
-
-Usage:
-  paxd connect [--cloud-url <url>]    interactive device onboarding
-  paxd configure [--cloud-url <url>]  register node + agent config
-  paxd register [--cloud-url <url>]   node-only registration
-  paxd run                             start the daemon loop
-  paxd acp-forward                     run only the ACP tunnel forwarder
-  paxd postman                         print Postman WebSocket URL and smoke messages
-  paxd harnesses                       inspect local ACP harness support
-  paxd install-service                 install as macOS launchd service
-  paxd --version                       print version
-`, version)
 }
 
 // cmdConnect performs interactive device-code style onboarding.
@@ -188,103 +217,97 @@ func cmdConnect(args []string) {
 	}
 }
 
-type stringListFlag []string
-
-func (f *stringListFlag) String() string {
-	return strings.Join(*f, ",")
-}
-
-func (f *stringListFlag) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-
 type configureAgentSpec struct {
 	Name       string
 	Harness    string
 	InstanceID string
 }
 
-// cmdConfigure registers this node and its hosted agents, then writes paxd.yaml.
-func cmdConfigure(args []string) {
-	fs := flag.NewFlagSet("configure", flag.ExitOnError)
-	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL")
-	registrationToken := fs.String("registration-token", "", "Node registration token for first bootstrap")
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
-	nodeName := fs.String("node-name", "", "Node display name")
-	machineType := fs.String("machine-type", "", "Machine type label")
-	harness := fs.String("harness", "codex", "Default ACP harness when --agent is omitted")
-	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
-	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
-	appendAgents := fs.Bool("append", false, "Append newly registered agents instead of replacing agents")
-	assumeYes := fs.Bool("y", false, "Assume yes for destructive configure prompts")
-	fs.BoolVar(assumeYes, "yes", false, "Assume yes for destructive configure prompts")
-	var agentFlags stringListFlag
-	fs.Var(&agentFlags, "agent", "Agent spec name:harness[:instance_id], repeatable")
-	fs.Parse(args)
+func cmdConfigureCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "configure",
+		Usage: "register node + agent config",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "cloud-url", Usage: "Fleet Cloud API URL"},
+			&cli.StringFlag{Name: "registration-token", Usage: "Node registration token for first bootstrap"},
+			&cli.StringFlag{Name: "config", Usage: "Config file path (default: ~/.paxd/paxd.yaml)"},
+			&cli.StringFlag{Name: "node-name", Usage: "Node display name"},
+			&cli.StringFlag{Name: "machine-type", Usage: "Machine type label"},
+			&cli.StringFlag{Name: "harness", Value: "codex", Usage: "Default ACP harness when --agent is omitted"},
+			&cli.StringFlag{Name: "cf-client-id", Usage: "Cloudflare Access service token client ID"},
+			&cli.StringFlag{Name: "cf-client-secret", Usage: "Cloudflare Access service token secret"},
+			&cli.BoolFlag{Name: "append", Usage: "Append newly registered agents instead of replacing agents"},
+			&cli.BoolFlag{Name: "y", Aliases: []string{"yes"}, Usage: "Assume yes for destructive configure prompts"},
+			&cli.StringSliceFlag{Name: "agent", Usage: "Agent spec name:harness[:instance_id], repeatable"},
+		},
+		Action: cmdConfigure,
+	}
+}
 
-	targetPath := *configPath
+// cmdConfigure registers this node and its hosted agents, then writes paxd.yaml.
+func cmdConfigure(ctx context.Context, cmd *cli.Command) error {
+	configPath := cmd.String("config")
+	targetPath := configPath
 	if targetPath == "" {
 		targetPath = config.DefaultPath()
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
-	cfg.Cloud.APIURL = firstNonEmpty(*cloudURL, cfg.Cloud.APIURL)
+	cfg.Cloud.APIURL = firstNonEmpty(cmd.String("cloud-url"), cfg.Cloud.APIURL)
 	cfg.Cloud.URL = cfg.Cloud.APIURL
 	if cfg.Cloud.APIURL == "" {
-		fmt.Fprintln(os.Stderr, "--cloud-url, cloud.api_url, or PAX_CLOUD_URL is required")
-		os.Exit(1)
+		return cli.Exit("--cloud-url, cloud.api_url, or PAX_CLOUD_URL is required", 1)
 	}
 
-	if *nodeName != "" {
-		cfg.Agent.Name = *nodeName
+	if v := cmd.String("node-name"); v != "" {
+		cfg.Agent.Name = v
 	}
-	if *machineType != "" {
-		cfg.Agent.MachineType = *machineType
+	if v := cmd.String("machine-type"); v != "" {
+		cfg.Agent.MachineType = v
 	}
 	if cfg.Agent.Hostname == "" {
 		hostname, _ := os.Hostname()
 		cfg.Agent.Hostname = hostname
 	}
-	if *cfClientID != "" {
-		cfg.Cloud.CFClientID = *cfClientID
+	if v := cmd.String("cf-client-id"); v != "" {
+		cfg.Cloud.CFClientID = v
 	}
-	if *cfClientSecret != "" {
-		cfg.Cloud.CFClientSecret = *cfClientSecret
+	if v := cmd.String("cf-client-secret"); v != "" {
+		cfg.Cloud.CFClientSecret = v
 	}
 
-	specs, err := parseConfigureAgentSpecs(agentFlags, *harness)
+	specs, err := parseConfigureAgentSpecs(cmd.StringSlice("agent"), cmd.String("harness"))
 	if err != nil {
-		log.Fatalf("parse agents: %v", err)
+		return fmt.Errorf("parse agents: %w", err)
 	}
 
 	nodeAPIKey := cfg.Cloud.APIKey
-	token := firstNonEmpty(*registrationToken, cfg.Cloud.RegistrationToken)
+	token := firstNonEmpty(cmd.String("registration-token"), cfg.Cloud.RegistrationToken)
 	if nodeAPIKey == "" && token == "" {
 		token = promptLine("Registration token: ")
 	}
 	if nodeAPIKey == "" && token == "" {
-		fmt.Fprintln(os.Stderr, "--registration-token, cloud.registration_token, or PAX_REGISTRATION_TOKEN is required")
-		os.Exit(1)
+		return cli.Exit("--registration-token, cloud.registration_token, or PAX_REGISTRATION_TOKEN is required", 1)
 	}
-	if nodeAPIKey != "" && *registrationToken != "" {
-		fmt.Fprintln(os.Stderr, "config already has cloud.api_key; omit --registration-token or remove the existing key")
-		os.Exit(1)
+	if nodeAPIKey != "" && cmd.String("registration-token") != "" {
+		return cli.Exit("config already has cloud.api_key; omit --registration-token or remove the existing key", 1)
 	}
 
-	if !*appendAgents && configureWouldReplaceExistingAgents(targetPath, cfg) && !*assumeYes {
+	appendAgents := cmd.Bool("append")
+	assumeYes := cmd.Bool("y")
+
+	if !appendAgents && configureWouldReplaceExistingAgents(targetPath, cfg) && !assumeYes {
 		if !confirmReplaceConfigure(targetPath, cfg.RuntimeAgents()) {
-			fmt.Fprintln(os.Stderr, "configure cancelled")
-			os.Exit(1)
+			return cli.Exit("configure cancelled", 1)
 		}
 	}
 
 	existingAgents := explicitAgentsForAppend(cfg)
-	if *appendAgents {
+	if appendAgents {
 		cfg.Agents = existingAgents
 	} else {
 		cfg.Agents = cfg.Agents[:0]
@@ -314,7 +337,7 @@ func cmdConfigure(args []string) {
 			WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret).
 			RegisterNodeAgent(req, regToken)
 		if err != nil {
-			log.Fatalf("register agent %s: %v", spec.Name, err)
+			return fmt.Errorf("register agent %s: %w", spec.Name, err)
 		}
 		if resp.NodeID != "" {
 			cfg.Cloud.NodeID = resp.NodeID
@@ -324,11 +347,11 @@ func cmdConfigure(args []string) {
 			cfg.Cloud.APIKey = resp.APIKey
 		}
 		if resp.AgentID == "" {
-			log.Fatalf("register agent %s: response missing agent_id", spec.Name)
+			return fmt.Errorf("register agent %s: response missing agent_id", spec.Name)
 		}
 		newAgent := runtimeAgentConfigFromSpec(resp.AgentID, spec, cfg)
 		cfg.Agents = append(cfg.Agents, newAgent)
-		if i == 0 && !*appendAgents {
+		if i == 0 && !appendAgents {
 			applyPrimaryConfiguredAgent(cfg, newAgent, spec)
 		} else if cfg.Agent.AgentID == "" {
 			cfg.Agent.AgentID = resp.AgentID
@@ -341,20 +364,21 @@ func cmdConfigure(args []string) {
 	cfg.Cloud.RegistrationToken = ""
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
-		log.Fatalf("create config dir: %v", err)
+		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := yamlMarshal(cfg)
 	if err != nil {
-		log.Fatalf("marshal config: %v", err)
+		return fmt.Errorf("marshal config: %w", err)
 	}
 	if err := os.WriteFile(targetPath, data, 0600); err != nil {
-		log.Fatalf("write config: %v", err)
+		return fmt.Errorf("write config: %w", err)
 	}
 
 	fmt.Printf("Configured paxd successfully.\n")
 	fmt.Printf("  node_id: %s\n", cfg.Cloud.NodeID)
 	fmt.Printf("  config:  %s\n", targetPath)
 	fmt.Printf("\nRun: paxd run\n")
+	return nil
 }
 
 // cmdRegister performs first-time registration with the Cloud API.
@@ -435,6 +459,11 @@ func cmdRun(args []string) {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
+	history, closeHistory, err := openDaemonStore(cfg.Daemon.DBPath)
+	if err != nil {
+		log.Fatalf("open daemonstore: %v", err)
+	}
+	defer closeHistory()
 
 	// Check if registered
 	nodeState, err := db.GetNodeState()
@@ -502,7 +531,7 @@ func cmdRun(args []string) {
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
-	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState, db)
+	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState, db, history)
 	log.Printf("[paxd] RUNNING (node=%s, agents=%d, poll=%s, status=%s, orphan=%s)",
 		nodeState.NodeID,
 		len(runtimes),
@@ -605,6 +634,11 @@ func cmdACPForward(args []string) {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
+	history, closeHistory, err := openDaemonStore(cfg.Daemon.DBPath)
+	if err != nil {
+		log.Fatalf("open daemonstore: %v", err)
+	}
+	defer closeHistory()
 	if nodeState.CloudAPIKey == "" || nodeState.CloudAPIURL == "" {
 		saved, err := db.GetNodeState()
 		if err != nil {
@@ -634,6 +668,7 @@ func cmdACPForward(args []string) {
 	cfg.ACPForwarder.Enabled = true
 	forwardCfg := acpForwarderConfig(cfg, nodeState)
 	forwardCfg.Journal = db
+	forwardCfg.History = history
 	log.Printf("[paxd] ACP forwarder starting (tunnel=%s, command=%q)",
 		forwardCfg.TunnelPath,
 		forwardCfg.Command)
@@ -1009,6 +1044,28 @@ func saveNodeState(cfg *config.Config, cloudURL string, nodeID string, apiKey st
 	}
 }
 
+func openDaemonStore(path string) (*daemonstore.Store, func(), error) {
+	history, err := daemonstore.OpenSQLite(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := history.Migrate(context.Background()); err != nil {
+		closeDaemonStore(history)
+		return nil, nil, err
+	}
+	return history, func() { closeDaemonStore(history) }, nil
+}
+
+func closeDaemonStore(store *daemonstore.Store) {
+	if store == nil {
+		return
+	}
+	db, err := store.DB().DB()
+	if err == nil {
+		_ = db.Close()
+	}
+}
+
 func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
 	agents := configuredCloudAgents(cfg)
 	configuredAgentIDs := make([]string, 0, len(agents))
@@ -1107,7 +1164,13 @@ func runtimeAgentByID(cfg *config.Config, agentID string) (config.RuntimeAgentCo
 	return config.RuntimeAgentConfig{}, false
 }
 
-func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *store.NodeState, db *store.Store) int {
+func startACPForwarders(
+	ctx context.Context,
+	cfg *config.Config,
+	nodeState *store.NodeState,
+	db *store.Store,
+	history *daemonstore.Store,
+) int {
 	count := 0
 	for _, agent := range cfg.RuntimeAgents() {
 		forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
@@ -1115,6 +1178,7 @@ func startACPForwarders(ctx context.Context, cfg *config.Config, nodeState *stor
 			continue
 		}
 		forwardCfg.Journal = db
+		forwardCfg.History = history
 		count++
 		go func(forwardCfg acpforwarder.Config) {
 			log.Printf(
@@ -1175,6 +1239,7 @@ func agentACPForwarderConfig(
 		APIKey:            firstNonEmpty(nodeState.CloudAPIKey, cfg.Cloud.APIKey),
 		CFClientID:        cfg.Cloud.CFClientID,
 		CFClientSecret:    cfg.Cloud.CFClientSecret,
+		ConnectionID:      legacyACPConnectionID(agent),
 		AgentID:           agent.AgentID,
 		InstanceID:        agent.InstanceID,
 		Command:           command,
@@ -1182,6 +1247,10 @@ func agentACPForwarderConfig(
 		TunnelPath:        firstNonEmpty(agent.ACPForwarder.TunnelPath, cfg.ACPForwarder.TunnelPath),
 		ReconnectInterval: firstNonZeroDuration(agent.ACPForwarder.ReconnectInterval, cfg.ACPForwarder.ReconnectInterval),
 	}, true
+}
+
+func legacyACPConnectionID(agent config.RuntimeAgentConfig) string {
+	return firstNonEmpty(agent.InstanceID, agent.AgentID)
 }
 
 func acpCommandForHarness(harness string) []string {

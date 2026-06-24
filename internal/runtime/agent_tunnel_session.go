@@ -1,0 +1,337 @@
+package runtime
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/pax-beehive/paxd/internal/auth"
+	"github.com/pax-beehive/paxkit/reliablemq"
+)
+
+const replayLimit = 1000
+
+// AgentTunnelSessionDeps are process-wide dependencies used to run one ACP
+// tunnel attempt. The desired connection data lives in AgentConnectionSpec.
+type AgentTunnelSessionDeps struct {
+	Headers               auth.HeaderProvider
+	Dialer                WebSocketDialer
+	LocalACPProcessRunner LocalACPProcessRunner
+	ReliableEngineFactory ReliableEngineFactory
+	Heartbeat             HeartbeatConfig
+	SessionEventSink      SessionEventSink
+}
+
+type AgentTunnelSession struct {
+	spec AgentConnectionSpec
+	deps AgentTunnelSessionDeps
+}
+
+type ReliableEngine interface {
+	Send(ctx context.Context, msg reliablemq.OutboundMessage) (reliablemq.Frame, error)
+	Receive(ctx context.Context, env reliablemq.Envelope) error
+	ReplayInbound(ctx context.Context, queueID string, stream reliablemq.Stream, limit int) error
+	ReplayOutbound(ctx context.Context, queueID string, stream reliablemq.Stream, limit int) error
+}
+
+type ReliableEngineFactory interface {
+	NewReliableEngine(sender reliablemq.Sender, dispatcher reliablemq.Dispatcher) ReliableEngine
+}
+
+type ReliableEngineFactoryFunc func(sender reliablemq.Sender, dispatcher reliablemq.Dispatcher) ReliableEngine
+
+func (f ReliableEngineFactoryFunc) NewReliableEngine(sender reliablemq.Sender, dispatcher reliablemq.Dispatcher) ReliableEngine {
+	if f == nil {
+		return nil
+	}
+	return f(sender, dispatcher)
+}
+
+func ReliableEngineFromStore(store reliablemq.DurableStore, opts ...reliablemq.Option) ReliableEngineFactory {
+	return ReliableEngineFactoryFunc(func(sender reliablemq.Sender, dispatcher reliablemq.Dispatcher) ReliableEngine {
+		return reliablemq.NewEngine(reliablemq.Config{}, store, sender, dispatcher, opts...)
+	})
+}
+
+func NewAgentTunnelSession(spec AgentConnectionSpec, deps AgentTunnelSessionDeps) *AgentTunnelSession {
+	if deps.LocalACPProcessRunner == nil {
+		deps.LocalACPProcessRunner = ExecLocalACPProcessRunner{}
+	}
+	if deps.SessionEventSink == nil {
+		deps.SessionEventSink = NoopSessionEventSink{}
+	}
+	return &AgentTunnelSession{spec: spec, deps: deps}
+}
+
+func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
+	if exit := s.validate(); exit.Class != "" {
+		return exit
+	}
+	header, err := s.deps.Headers.Headers(ctx, s.spec.RemoteID)
+	if err != nil {
+		return AuthExit("auth_headers_failed", err.Error())
+	}
+	wsURL, err := websocketURLFromHTTP(s.spec.CloudAPIURL, firstNonEmpty(s.spec.TunnelPath, DefaultAgentTunnelPath))
+	if err != nil {
+		return ConfigExit("invalid_cloud_url", err.Error())
+	}
+	q := wsURL.Query()
+	q.Set("connection_id", s.spec.ConnectionID)
+	q.Set("agent_id", s.spec.CloudAgentID)
+	if s.spec.InstanceID != "" {
+		q.Set("instance_id", s.spec.InstanceID)
+	}
+	wsURL.RawQuery = q.Encode()
+
+	s.emit(PhaseConnecting, nil)
+	conn, resp, err := s.deps.Dialer.Dial(ctx, wsURL.String(), header)
+	closeResponse(resp)
+	if err != nil {
+		return classifyDialExit(err, resp)
+	}
+	if conn == nil {
+		return TransientExit("dial_no_connection", "websocket dialer returned nil connection")
+	}
+
+	hbConn := newHeartbeatConn(conn, s.deps.Heartbeat)
+	hbConn.Start()
+	defer hbConn.Close()
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go closeOnContextDone(watchCtx, hbConn)
+
+	s.emit(PhaseConnected, nil)
+	s.emit(PhaseStarting, nil)
+	proc, err := s.deps.LocalACPProcessRunner.Start(ctx, LocalACPProcessSpec{
+		Command:    s.spec.Command,
+		WorkingDir: s.spec.WorkingDir,
+		Env:        s.spec.Env,
+	})
+	if err != nil {
+		_ = hbConn.Close()
+		return classifyProcessStartExit(err)
+	}
+	defer s.terminateProcess(proc)
+	go io.Copy(io.Discard, proc.Stderr())
+
+	engine := s.newReliableEngine(hbConn, proc.Stdin())
+	if err := s.replayInbound(ctx, engine); err != nil {
+		return TransientExit("replay_inbound_failed", err.Error())
+	}
+	if err := s.replayOutbound(ctx, engine); err != nil {
+		return TransientExit("replay_outbound_failed", err.Error())
+	}
+
+	s.emit(PhaseRunning, nil)
+	errCh := make(chan error, 3)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() { errCh <- s.copyWSToStdin(runCtx, hbConn, engine) }()
+	go func() { errCh <- s.copyStdoutToWS(runCtx, proc.Stdout(), engine) }()
+	go func() { errCh <- proc.Wait() }()
+
+	var result error
+	select {
+	case result = <-errCh:
+		cancel()
+	case <-ctx.Done():
+		cancel()
+		result = ctx.Err()
+	}
+
+	s.emit(PhaseStopping, nil)
+	_ = hbConn.Close()
+	_ = proc.Stdin().Close()
+
+	if hbConn.TimedOut() {
+		return TransientExit("heartbeat_timeout", "websocket heartbeat timed out")
+	}
+	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+		return CanceledExit(result)
+	}
+	if result == nil {
+		return TransientExit("session_ended", "agent tunnel session ended")
+	}
+	return TransientExit("session_error", result.Error())
+}
+
+func (s *AgentTunnelSession) validate() Exit {
+	switch {
+	case s.spec.ConnectionID == "":
+		return ConfigExit("missing_connection_id", "connection id is required")
+	case s.spec.RemoteID == "":
+		return ConfigExit("missing_remote_id", "remote id is required")
+	case s.spec.CloudAgentID == "":
+		return ConfigExit("missing_cloud_agent_id", "cloud agent id is required")
+	case s.spec.CloudAPIURL == "":
+		return ConfigExit("missing_cloud_url", "cloud api url is required")
+	case len(s.spec.Command) == 0:
+		return ConfigExit("missing_command", "acp command is required")
+	case s.deps.Headers == nil:
+		return ConfigExit("missing_auth_provider", "auth header provider is required")
+	case s.deps.Dialer == nil:
+		return ConfigExit("missing_dialer", "websocket dialer is required")
+	case s.deps.LocalACPProcessRunner == nil:
+		return ConfigExit("missing_process_runner", "process runner is required")
+	case s.deps.ReliableEngineFactory == nil:
+		return ConfigExit("missing_reliable_engine", "reliablemq engine factory is required")
+	}
+	if s.spec.WorkingDir != "" {
+		info, err := os.Stat(s.spec.WorkingDir)
+		if err != nil {
+			return ConfigExit("missing_working_dir", err.Error())
+		}
+		if !info.IsDir() {
+			return ConfigExit("invalid_working_dir", "working directory is not a directory")
+		}
+	}
+	return Exit{}
+}
+
+func (s *AgentTunnelSession) replayInbound(ctx context.Context, engine ReliableEngine) error {
+	return engine.ReplayInbound(ctx, s.spec.ConnectionID, reliablemq.StreamACP, replayLimit)
+}
+
+func (s *AgentTunnelSession) replayOutbound(ctx context.Context, engine ReliableEngine) error {
+	return engine.ReplayOutbound(ctx, s.spec.ConnectionID, reliablemq.StreamACP, replayLimit)
+}
+
+func (s *AgentTunnelSession) copyWSToStdin(ctx context.Context, conn WebSocketConn, engine ReliableEngine) error {
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("read tunnel: %w", err)
+		}
+		if messageType != websocketTextMessage && messageType != websocketBinaryMessage {
+			continue
+		}
+		env, err := reliablemq.UnmarshalEnvelope(payload)
+		if err != nil {
+			return err
+		}
+		if env.QueueID != s.spec.ConnectionID {
+			return fmt.Errorf("unexpected reliablemq queue_id %q", env.QueueID)
+		}
+		if err := engine.Receive(ctx, env); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *AgentTunnelSession) copyStdoutToWS(ctx context.Context, stdout io.Reader, engine ReliableEngine) error {
+	reader := bufio.NewReader(stdout)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			line = trimLineDelimiter(line)
+			if len(line) > 0 {
+				if !json.Valid(line) {
+					return fmt.Errorf("acp stdout payload must be JSON")
+				}
+				if err := s.sendOutbound(ctx, line, engine); err != nil {
+					return err
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("read acp stdout: %w", err)
+		}
+	}
+}
+
+func (s *AgentTunnelSession) sendOutbound(ctx context.Context, payload []byte, engine ReliableEngine) error {
+	_, err := engine.Send(ctx, reliablemq.OutboundMessage{
+		QueueID: s.spec.ConnectionID,
+		Stream:  reliablemq.StreamACP,
+		Payload: append([]byte(nil), payload...),
+		Metadata: reliablemq.Metadata{
+			"agent_id": s.spec.CloudAgentID,
+		},
+	})
+	return err
+}
+
+func (s *AgentTunnelSession) newReliableEngine(conn WebSocketConn, stdin io.Writer) ReliableEngine {
+	sender := reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
+		_ = ctx
+		data, err := reliablemq.MarshalEnvelope(env)
+		if err != nil {
+			return err
+		}
+		return conn.WriteMessage(websocketTextMessage, data)
+	})
+	dispatcher := reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		_ = ctx
+		return writeACPStdin(stdin, frame.Payload)
+	})
+	return s.deps.ReliableEngineFactory.NewReliableEngine(sender, dispatcher)
+}
+
+func (s *AgentTunnelSession) terminateProcess(proc LocalACPProcess) {
+	if proc == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = proc.Terminate(ctx)
+}
+
+func (s *AgentTunnelSession) emit(phase Phase, pid *int) {
+	s.deps.SessionEventSink.OnSessionEvent(SessionEvent{
+		Kind:         SessionAgentTunnel,
+		Phase:        phase,
+		RemoteID:     s.spec.RemoteID,
+		ConnectionID: s.spec.ConnectionID,
+		Generation:   s.spec.Generation,
+		RestartNonce: s.spec.RestartNonce,
+		PID:          pid,
+		At:           time.Now(),
+	})
+}
+
+func classifyProcessStartExit(err error) Exit {
+	if errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found") ||
+		strings.Contains(err.Error(), "no such file or directory") {
+		return ConfigExit("command_not_found", err.Error())
+	}
+	return TransientExit("process_start_failed", err.Error())
+}
+
+func writeACPStdin(stdin io.Writer, payload []byte) error {
+	if _, err := stdin.Write(payload); err != nil {
+		return fmt.Errorf("write acp stdin: %w", err)
+	}
+	if !bytes.HasSuffix(payload, []byte("\n")) {
+		if _, err := stdin.Write([]byte("\n")); err != nil {
+			return fmt.Errorf("write acp stdin delimiter: %w", err)
+		}
+	}
+	return nil
+}
+
+func trimLineDelimiter(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	line = bytes.TrimSuffix(line, []byte("\r"))
+	return line
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}

@@ -2,7 +2,7 @@
 
 These scenarios define the expected behavior of the GORM-backed daemon/control store.
 
-`daemonstore` owns desired-state tables, status tables, command audit/idempotency, local harness/session cache, settings, and migrations for the new control-plane model. It does not own the raw-SQL ACP transport journal.
+`daemonstore` owns desired-state tables, status tables, command audit/idempotency, local harness/session cache, local message history, settings, and migrations for the new control-plane model. It does not own the paxkit ACP transport journal.
 
 ## Module boundaries
 
@@ -17,7 +17,7 @@ Upstream callers:
 Downstream dependencies:
 
 - SQLite through GORM for target control-plane tables.
-- Existing `internal/store` raw SQL store remains separate for `transport_journal`, `messages`, and `message_parts`.
+- Existing `internal/store` raw SQL store remains separate for legacy daemon state and the shared SQL handle used by paxkit `transport_journal`.
 
 What to mock in `daemonstore` tests:
 
@@ -42,7 +42,7 @@ Boundary rule:
 
 Given an empty SQLite database  
 When daemonstore migrations run  
-Then the database contains `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, and `setting`
+Then the database contains `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, `messages`, `message_parts`, and `setting`
 
 ### Scenario: migrations are idempotent
 

@@ -136,6 +136,9 @@ func TestAgentACPForwarderConfigUsesPerAgentHarness(t *testing.T) {
 	if got.AgentID != "agent_review" || got.InstanceID != "review" {
 		t.Fatalf("agent identity = %s/%s", got.AgentID, got.InstanceID)
 	}
+	if got.ConnectionID != "review" {
+		t.Fatalf("connection id = %q, want review", got.ConnectionID)
+	}
 	if got.CloudURL != "https://node.example.com" || got.APIKey != "stored_node_key" {
 		t.Fatalf("cloud auth = %s/%s", got.CloudURL, got.APIKey)
 	}

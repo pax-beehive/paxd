@@ -13,11 +13,13 @@ It owns tables such as:
 - `harness_inventory`
 - `local_session`
 - `local_session_element`
+- `messages`
+- `message_parts`
 - `setting`
 
 This package owns:
 
-- GORM models and migrations for new control-plane tables
+- GORM models and migrations for daemon-owned tables
 - typed repository methods used by `internal/control` and supervisors
 - transactional desired-state mutations
 - conditional status updates guarded by generation/restart nonce
@@ -29,7 +31,7 @@ This package must not:
 - parse HTTP or WebSocket requests
 - resolve secrets directly except through an injected resolver where necessary
 
-The existing `internal/store` raw SQL code should continue to own SQL-heavy ACP transport journal and message-history behavior.
+The existing `internal/store` raw SQL code should not own message-history behavior. ACP transport durability is provided by paxkit reliablemq using the shared SQLite handle.
 
 ## Primary Interfaces
 

@@ -155,6 +155,45 @@ type LocalSessionElement struct {
 
 func (LocalSessionElement) TableName() string { return "local_session_element" }
 
+// Message is durable local business history projected from ACP traffic. It is
+// separate from the reliable transport frame journal.
+type Message struct {
+	ID              int64     `gorm:"primaryKey;autoIncrement"`
+	MessageID       string    `gorm:"type:text;not null;uniqueIndex:idx_messages_message_id"`
+	AgentID         string    `gorm:"type:text;not null;index:idx_messages_agent_created,priority:1"`
+	SessionID       string    `gorm:"type:text;index:idx_messages_session_created,priority:1"`
+	Source          string    `gorm:"type:text;not null"`
+	Direction       string    `gorm:"type:text;not null"`
+	Role            string    `gorm:"type:text"`
+	Status          string    `gorm:"type:text"`
+	MessageType     string    `gorm:"type:text"`
+	ParentMessageID string    `gorm:"type:text"`
+	TurnID          string    `gorm:"type:text"`
+	ResponseID      string    `gorm:"type:text"`
+	LogicalKey      *string   `gorm:"type:text;uniqueIndex:idx_messages_logical_key"`
+	RawJSON         string    `gorm:"type:text"`
+	CreatedAt       time.Time `gorm:"column:created_at;not null;index:idx_messages_agent_created,priority:2;index:idx_messages_session_created,priority:2"`
+	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (Message) TableName() string { return "messages" }
+
+// MessagePart stores text, raw JSON, or future artifact references. Streaming
+// deltas append to a text part instead of creating one row per token.
+type MessagePart struct {
+	ID          int64     `gorm:"primaryKey;autoIncrement"`
+	MessageID   string    `gorm:"type:text;not null;uniqueIndex:idx_message_parts_message_part"`
+	PartIndex   int       `gorm:"not null;uniqueIndex:idx_message_parts_message_part"`
+	PartType    string    `gorm:"type:text;not null"`
+	Text        string    `gorm:"type:text"`
+	PayloadJSON string    `gorm:"type:text"`
+	ArtifactURI string    `gorm:"type:text"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (MessagePart) TableName() string { return "message_parts" }
+
 type Setting struct {
 	Key       string    `gorm:"primaryKey;type:text"`
 	ValueJSON string    `gorm:"type:text;not null"`

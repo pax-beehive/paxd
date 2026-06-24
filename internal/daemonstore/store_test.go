@@ -28,6 +28,8 @@ func TestMigrateCreatesTargetTablesAndIsIdempotent(t *testing.T) {
 		"harness_inventory",
 		"local_session",
 		"local_session_element",
+		"messages",
+		"message_parts",
 		"setting",
 	} {
 		if !store.DB().Migrator().HasTable(table) {
@@ -43,6 +45,9 @@ func TestMigrateCreatesTargetTablesAndIsIdempotent(t *testing.T) {
 		{&AgentConnection{}, "idx_agent_connection_remote_cloud_agent"},
 		{&LocalSession{}, "idx_local_session_agent_native"},
 		{&LocalSessionElement{}, "idx_local_session_element_session_seq"},
+		{&Message{}, "idx_messages_message_id"},
+		{&Message{}, "idx_messages_logical_key"},
+		{&MessagePart{}, "idx_message_parts_message_part"},
 	} {
 		if !store.DB().Migrator().HasIndex(index.model, index.name) {
 			t.Fatalf("missing migrated index %q", index.name)

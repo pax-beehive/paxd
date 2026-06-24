@@ -16,6 +16,8 @@ control_command          idempotency and audit for mutating desired-state comman
 harness_inventory        local harness discovery cache
 local_session            local-only session metadata cache for TUI/CLI
 local_session_element    optional local-only timeline cache
+messages                 local message history
+message_parts            local message history parts
 setting                  small daemon key-value settings
 ```
 
@@ -23,8 +25,6 @@ Existing raw-SQL tables that remain outside GORM:
 
 ```text
 transport_journal        reliable ACP frame queue
-messages                 local message history
-message_parts            local message history parts
 ```
 
 Legacy tables that should not be source of truth in the target model:
@@ -132,6 +132,10 @@ Rules:
 ## agent_connection
 
 Each enabled row maps to one desired ACP tunnel WebSocket.
+`id` is generated and owned by paxd. It is the durable local
+`connection_id` used by supervisor slots, runtime status, and transport
+journaling. `cloud_agent_id` is pax-manager-owned remote metadata and may be
+missing until runtime registration/binding succeeds.
 
 ```text
 id TEXT PRIMARY KEY
@@ -158,6 +162,8 @@ UNIQUE(remote_id, cloud_agent_id)
 
 Rules:
 
+- `id` must remain stable across reconnects, restarts, renames, and cloud agent
+  rebinding.
 - `remote_id` decides which remote/node credentials and auth headers are used.
 - Agent connections must not store Cloudflare Access credentials.
 - `cloud_agent_id` may be filled later by runtime registration through a generation-guarded update and must not increment `generation`.
@@ -296,6 +302,53 @@ Rules:
 - This table is optional for agents that can expose local timeline data.
 - It does not participate in supervisor decisions.
 
+## messages
+
+Local message history projected from ACP traffic.
+
+```text
+id INTEGER PRIMARY KEY AUTOINCREMENT
+message_id TEXT UNIQUE NOT NULL
+agent_id TEXT NOT NULL
+session_id TEXT
+source TEXT NOT NULL
+direction TEXT NOT NULL
+role TEXT
+status TEXT
+message_type TEXT
+parent_message_id TEXT
+turn_id TEXT
+response_id TEXT
+logical_key TEXT UNIQUE
+raw_json TEXT
+created_at TEXT NOT NULL
+updated_at TEXT NOT NULL
+```
+
+Rules:
+
+- Message history is business projection data, not reliable transport state.
+- Projection failures can be repaired from reliable frame storage when needed.
+- This table does not participate in supervisor decisions.
+
+## message_parts
+
+Message parts store text, raw JSON, and future artifact references. Streaming
+deltas append to a text part instead of creating one row per token.
+
+```text
+id INTEGER PRIMARY KEY AUTOINCREMENT
+message_id TEXT NOT NULL
+part_index INTEGER NOT NULL
+part_type TEXT NOT NULL
+text TEXT
+payload_json TEXT
+artifact_uri TEXT
+created_at TEXT NOT NULL
+updated_at TEXT NOT NULL
+UNIQUE(message_id, part_index)
+```
+
 ## setting
 
 Small daemon settings use key-value storage to avoid schema churn.
@@ -317,30 +370,14 @@ supervisor.reconcile_interval
 
 ## transport_journal
 
-Keep the existing reliable ACP frame journal on raw SQL. Add `connection_id` so replay, cleanup, and supervisor association are tied to the local agent connection instead of only the remote cloud agent.
-
-```text
-id INTEGER PRIMARY KEY AUTOINCREMENT
-connection_id TEXT NOT NULL
-agent_id TEXT NOT NULL
-stream TEXT NOT NULL
-seq INTEGER NOT NULL
-local_direction TEXT NOT NULL
-payload_json TEXT NOT NULL
-status TEXT NOT NULL
-error TEXT
-retry_count INTEGER NOT NULL DEFAULT 0
-created_at TEXT NOT NULL
-updated_at TEXT NOT NULL
-sent_at TEXT
-received_at TEXT
-acked_at TEXT
-applied_at TEXT
-UNIQUE(connection_id, stream, seq, local_direction)
-```
+`transport_journal` is owned by paxkit reliablemq `sqlstore`, not by
+daemonstore GORM models. paxd opens the shared SQLite handle and passes it to
+paxkit with table name `transport_journal`.
 
 Rules:
 
-- `connection_id` is the local owner for replay and cleanup.
-- `agent_id` remains because the manager-side protocol still identifies cloud agents.
+- `connection_id` is paxd-owned and is the local owner for replay, duplicate
+  suppression, supervisor association, and cleanup.
+- `agent_id` / `cloud_agent_id` remains remote metadata because the
+  manager-side protocol still identifies cloud agents for routing.
 - This table should remain under the existing `database/sql` store.

@@ -140,6 +140,14 @@ The node-control WebSocket is for daemon and machine-level management:
 
 The ACP tunnel remains data-plane only. It carries ACP JSON-RPC payloads for a specific agent/session and should not be used for daemon administration.
 
+`agent_connection.id` / `connection_id` is a paxd-owned durable local identity.
+It identifies one desired local connection on this node and is the stable key
+for runtime slots, local status, and the ACP transport journal. The
+pax-manager-owned `cloud_agent_id` remains the remote business identity used
+for manager-side routing and agent registration. pax-manager may store and echo
+`connection_id` for ACK/replay and diagnostics, but it should not be the
+authority that creates it.
+
 ### Remote auth injection
 
 Remote authentication material belongs to the remote, not to individual agent connections.
@@ -293,14 +301,15 @@ sequenceDiagram
 - `internal/control`: Shared business control service for typed commands, queries, validation, desired-state mutation, idempotency, query orchestration, and supervisor wakeups.
 - `internal/localapi`: Local Unix socket and optional localhost debug HTTP transport adapter over `control.Service`.
 - `internal/controlws`: Remote node-control WebSocket transport adapter over `control.Service`.
-- `internal/daemonstore`: GORM-backed SQLite store for desired state, runtime status, command audit, local caches, settings, and migrations.
+- `internal/daemonstore`: GORM-backed SQLite store for desired state, runtime status, command audit, local caches, message history, settings, and migrations.
 - `internal/supervisor`: Reconciles desired state into runtime slots and owns start, stop, restart, retry, and interruptible backoff decisions.
 - `internal/runtime`: One-shot runtime sessions for node-control WebSockets and ACP tunnel/process lifecycles.
 - `internal/auth`: Resolves remote auth records and secret refs into outbound HTTP/WebSocket headers.
+- `internal/acphistory`: Projects ACP JSON-RPC payloads into daemonstore message history.
 - `internal/harnessregistry`: Discovers local harnesses/adapters and refreshes cached harness inventory without adopting them.
 - `internal/localsessions`: Manages local-only session observation and optional local timeline cache for TUI/CLI.
 - `internal/testkit/controltest`: Test-only JSON fixtures, loaders, and mock `control.Service` for control-plane transport tests.
-- `internal/store`: Existing raw SQL store for ACP transport journal and message history that remains outside GORM-owned daemonstore tables.
+- `internal/store`: Legacy raw SQL store for old daemon state/orphan tables and the shared SQLite handle used by paxkit transport journal.
 
 ```mermaid
 flowchart TD
@@ -461,6 +470,7 @@ RuntimeSession
 - connect WebSocket
 - start local process when applicable
 - bridge traffic
+- keep the live connection healthy with heartbeat/read-deadline checks
 - return when WebSocket closes, process exits, context is canceled, or setup fails
 
 The important ownership boundary is tunnel handoff:
@@ -468,6 +478,8 @@ The important ownership boundary is tunnel handoff:
 - `RuntimeSlot` owns the long-lived tunnel lifecycle.
 - `RuntimeSession` borrows that lifecycle for one concrete connection attempt.
 - During `Run(ctx, spec)`, the session owns the live WebSocket/process handles.
+- During `Run(ctx, spec)`, the session owns heartbeat, read/write pumps, and any
+  watchdogs needed to detect stuck live handles.
 - When the session exits for any reason, it must close/release those handles and return a classified exit to the slot.
 - The session must not sleep and reconnect by itself after returning from a broken tunnel.
 - The slot receives the exit and decides whether to retry, back off, fail, stop, or start a newer desired spec.
@@ -476,6 +488,33 @@ The important ownership boundary is tunnel handoff:
 
 - `RemoteControlSession`: one node-control WebSocket session.
 - `AgentTunnelSession`: one ACP tunnel WebSocket plus local ACP process session.
+
+Heartbeat policy belongs inside the runtime session because the session owns
+the concrete WebSocket handle. A session should send periodic ping frames,
+refresh a read deadline when it receives pong or data, and return a
+`transient` exit such as `heartbeat_timeout` when the peer stops responding.
+Heartbeat failure is not a special desired-state mutation; it is a session exit
+that the slot handles through the normal backoff/retry path.
+
+Status observation should flow upward as events, not through direct supervisor
+or database imports:
+
+```text
+RuntimeSession event
+  -> RuntimeSlot / Supervisor
+  -> conditional status write guarded by generation + restart_nonce
+```
+
+Runtime events should describe observed phases such as `connecting`,
+`connected`, `starting`, `running`, and `stopping`. The supervisor decides
+whether the event is still fresh enough to persist.
+
+For the first migration version, `AgentTunnelSession` owns the ACP process and
+the WebSocket together. If the WebSocket exits, the session terminates the
+local harness process, returns a classified exit, and lets the slot decide
+whether to create a new session. A later optimization may lift the harness
+process into the slot so it can survive transient WebSocket reconnects, but
+that should not be required for the first runtime/supervisor implementation.
 
 Backoff must be interruptible. Do not use an uninterruptible sleep. A slot in backoff should wait on:
 
@@ -578,7 +617,7 @@ Use GORM for the new control-plane tables:
 - `local_session_element`
 - `setting`
 
-Keep `transport_journal` and message history on the existing `database/sql` store because they rely on explicit SQLite upsert, ordered replay, ACK ranges, and batch cleanup semantics.
+Keep `transport_journal` out of GORM because reliable delivery, replay, ACK ranges, and retention belong to paxkit reliablemq.
 
 Do not mix GORM into the ACP transport journal. Supervisor writes that guard against stale generations must use conditional updates, even when implemented through GORM.
 
@@ -659,6 +698,11 @@ updated_at TEXT NOT NULL
 ### agent_connection
 
 Each enabled row maps to one desired ACP tunnel WebSocket.
+
+`id` is generated and owned by paxd. It must remain stable across remote
+registration, cloud agent rebinding, renames, restarts, and reconnects. It is
+the `connection_id` used by runtime slots and by the ACP transport journal.
+`cloud_agent_id` is optional remote state owned by pax-manager.
 
 ```text
 id TEXT PRIMARY KEY
@@ -789,27 +833,26 @@ updated_at TEXT NOT NULL
 
 ### transport_journal
 
-Keep the existing reliable ACP frame journal on raw SQL. Add `connection_id` so replay, cleanup, and supervisor association are tied to the local agent connection instead of only the remote cloud agent.
+`transport_journal` is owned by paxkit reliablemq `sqlstore`, not by
+daemonstore GORM models or paxd-specific repository helpers. paxd opens the
+shared SQLite handle and passes it to paxkit with table name
+`transport_journal`.
 
-```text
-id INTEGER PRIMARY KEY AUTOINCREMENT
-connection_id TEXT NOT NULL
-agent_id TEXT NOT NULL
-stream TEXT NOT NULL
-seq INTEGER NOT NULL
-local_direction TEXT NOT NULL
-payload_json TEXT NOT NULL
-status TEXT NOT NULL
-error TEXT
-retry_count INTEGER NOT NULL DEFAULT 0
-created_at TEXT NOT NULL
-updated_at TEXT NOT NULL
-sent_at TEXT
-received_at TEXT
-acked_at TEXT
-applied_at TEXT
-UNIQUE(connection_id, stream, seq, local_direction)
-```
+ACP tunnel replay policy:
+
+- Outbound local-harness stdout frames are durably inserted before WebSocket
+  send.
+- Outbound frames remain replayable while `pending` or `sent` and become
+  complete only after manager ACK marks them `acked`.
+- Inbound manager frames are inserted through paxkit reliablemq
+  `SaveInboundIfAbsent`; a duplicate `queue_id + stream + seq + direction` must
+  be ACKed but not dispatched to ACP stdin again.
+- Inbound frames that are `received` but not `applied` remain replayable to ACP
+  stdin after session restart.
+- The tunnel layer can provide at-least-once delivery with duplicate
+  suppression at the transport boundary. It cannot guarantee end-to-end
+  exactly-once if the local harness accepted a stdin frame and paxd crashed
+  before marking it `applied`.
 
 ## Legacy tables
 
@@ -858,9 +901,9 @@ Acceptance:
 
 ### 2. daemonstore schema and repositories
 
-- Add GORM setup and migrations for `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, and `setting`.
+- Add GORM setup and migrations for `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, `messages`, `message_parts`, and `setting`.
 - Implement repository methods required by `control.Service` and supervisors.
-- Keep `transport_journal`, `messages`, and `message_parts` in existing raw SQL store.
+- Keep `transport_journal` outside daemonstore repositories; message history storage belongs to daemonstore and ACP projection belongs to `internal/acphistory`.
 
 Acceptance:
 
@@ -908,6 +951,9 @@ Acceptance:
 - Implement `RemoteControlSession` as one node-control WebSocket session.
 - Implement `AgentTunnelSession` as one ACP tunnel WebSocket plus local ACP process session.
 - Refactor or wrap existing `acpforwarder` behavior so retry/backoff is not owned by the session.
+- Move heartbeat/read-deadline logic into runtime sessions.
+- Move ACP stdin/stdout pump ownership into `AgentTunnelSession`; keep replay
+  and ACK state in the raw SQL transport journal.
 - Classify exits as `transient`, `auth`, `config`, or `terminal`.
 
 Acceptance:
@@ -915,6 +961,9 @@ Acceptance:
 - Runtime tests use mock dialers/processes/auth providers.
 - Sessions close/release handles before returning.
 - Sessions do not sleep and reconnect internally.
+- WebSocket heartbeat timeout returns a transient classified exit.
+- Agent tunnel tests cover journal-before-send, ACK handling, duplicate inbound
+  suppression, and replay of unacked/unapplied frames.
 
 ### 7. supervisor and runtime slots
 
