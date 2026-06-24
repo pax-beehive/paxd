@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,38 @@ func TestOpenSQLite(t *testing.T) {
 	}
 	if !store.DB().Migrator().HasTable("remote") {
 		t.Fatal("OpenSQLite store did not migrate remote table")
+	}
+}
+
+func TestOpenSQLiteConfiguresSQLiteForSingleWriter(t *testing.T) {
+	store, err := OpenSQLite(t.TempDir() + "/daemonstore.db")
+	if err != nil {
+		t.Fatalf("OpenSQLite() error = %v", err)
+	}
+	sqlDB, err := store.DB().DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+
+	var busyTimeout int
+	if err := sqlDB.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+
+	var journalMode string
+	if err := sqlDB.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if strings.ToLower(journalMode) != "wal" {
+		t.Fatalf("journal_mode = %q, want wal", journalMode)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ func OpenSQLite(path string, opts ...Option) (*Store, error) {
 	if err := ensureParentDir(path); err != nil {
 		return nil, err
 	}
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(sqliteDSN(path)), &gorm.Config{
 		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
 			SlowThreshold:             200 * time.Millisecond,
 			LogLevel:                  logger.Warn,
@@ -49,13 +50,31 @@ func OpenSQLite(path string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
 	return New(db, opts...), nil
+}
+
+func sqliteDSN(path string) string {
+	if path == "" || path == ":memory:" {
+		return path
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_journal_mode=WAL&_busy_timeout=5000"
 }
 
 func ensureParentDir(path string) error {
 	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
 		return nil
 	}
+	path = sqlitePathBeforeQuery(path)
 	dir := filepath.Dir(path)
 	if dir == "." || dir == "" {
 		return nil
@@ -64,6 +83,18 @@ func ensureParentDir(path string) error {
 		return fmt.Errorf("create db dir: %w", err)
 	}
 	return nil
+}
+
+var sqliteURIPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+
+func sqlitePathBeforeQuery(path string) string {
+	if sqliteURIPattern.MatchString(path) {
+		return path
+	}
+	if value, _, ok := strings.Cut(path, "?"); ok {
+		return value
+	}
+	return path
 }
 
 func New(db *gorm.DB, opts ...Option) *Store {
