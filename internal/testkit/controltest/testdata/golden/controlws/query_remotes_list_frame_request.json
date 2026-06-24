@@ -1,0 +1,10 @@
+{
+  "kind": "query",
+  "request_id": "req_remotes_list_1",
+  "query": {
+    "type": "remotes.list",
+    "list_remotes": {
+      "include_disabled": true
+    }
+  }
+}

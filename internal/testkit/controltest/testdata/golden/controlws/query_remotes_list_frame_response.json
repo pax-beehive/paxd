@@ -1,0 +1,32 @@
+{
+  "kind": "response",
+  "request_id": "req_remotes_list_1",
+  "query_result": {
+    "type": "remotes.list",
+    "remotes": {
+      "items": [
+        {
+          "remote": {
+            "id": "remote_prod",
+            "name": "Production",
+            "cloud_api_url": "https://api.example.test",
+            "node_id": "node_1",
+            "enabled": true,
+            "is_default": true
+          },
+          "generation": 1,
+          "restart_nonce": 0,
+          "auth": {
+            "kind": "none"
+          },
+          "status": {
+            "remote_id": "remote_prod",
+            "observed_generation": 1,
+            "observed_restart_nonce": 0,
+            "phase": "connected"
+          }
+        }
+      ]
+    }
+  }
+}

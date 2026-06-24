@@ -12,7 +12,9 @@ import (
 
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/harnessregistry"
 	"github.com/pax-beehive/paxd/internal/localapi"
+	"github.com/pax-beehive/paxd/internal/localsessions"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/stretchr/testify/assert"
@@ -51,6 +53,64 @@ func TestLocalAPIControlStoreAndSupervisorIntegration(t *testing.T) {
 	require.Len(t, result.AgentConnections.Items, 1)
 	assert.Equal(t, "conn_codex", result.AgentConnections.Items[0].ID)
 	assert.NotNil(t, result.AgentConnections.Items[0].Status)
+}
+
+func TestLocalObservationWorksThroughLocalAPIWithoutRemotes(t *testing.T) {
+	store := openIntegrationStore(t)
+	harnesses := harnessregistry.New(store, staticDetector{
+		name: "codex",
+		view: control.HarnessView{
+			Harness:     "codex",
+			DisplayName: "Codex",
+			State:       harnessregistry.StateAvailable,
+			Capability:  harnessregistry.CapabilityACP,
+			Command:     []string{"/usr/local/bin/codex", "--acp"},
+		},
+	})
+	localSessions := localsessions.New(store, staticScannerRegistry{
+		available: []string{"codex"},
+		scanners: map[string]localsessions.Scanner{
+			"codex": staticScanner{sessions: []control.LocalSessionView{
+				{NativeID: "sess_1", Title: "Local debugging", Preview: "working on paxd"},
+			}},
+		},
+	}, localsessions.WithClock(func() time.Time {
+		return time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	}))
+	service := control.NewService(control.ServiceOptions{
+		Store:         store,
+		Harnesses:     harnesses,
+		LocalSessions: localSessions,
+	})
+	handler := localapi.NewHandler(service)
+
+	var discover control.QueryResult
+	postJSON(t, handler, "/v1/harnesses/discover", "", control.DiscoverHarnessesQuery{Probe: true}, http.StatusOK, &discover)
+	require.NotNil(t, discover.Harnesses)
+	require.Len(t, discover.Harnesses.Items, 1)
+	assert.Equal(t, "codex", discover.Harnesses.Items[0].Harness)
+
+	var syncResult control.QueryResult
+	postJSON(t, handler, "/v1/local/sessions/sync", "", control.SyncLocalSessionsQuery{Agent: "codex"}, http.StatusOK, &syncResult)
+	require.NotNil(t, syncResult.LocalSessionSync)
+	assert.Equal(t, 1, syncResult.LocalSessionSync.Synced)
+
+	var overview control.QueryResult
+	getJSON(t, handler, "/v1/local/overview", http.StatusOK, &overview)
+	require.NotNil(t, overview.LocalOverview)
+	assert.Equal(t, []control.HarnessView{{
+		Harness:     "codex",
+		DisplayName: "Codex",
+		State:       harnessregistry.StateAvailable,
+		Capability:  harnessregistry.CapabilityACP,
+		Command:     []string{"/usr/local/bin/codex", "--acp"},
+	}}, overview.LocalOverview.Harnesses)
+	require.Len(t, overview.LocalOverview.Sessions, 1)
+	assert.Equal(t, "codex:sess_1", overview.LocalOverview.Sessions[0].ID)
+
+	connections, err := store.ListAgentConnections(context.Background(), control.ListAgentConnectionsQuery{IncludeDisabled: true})
+	require.NoError(t, err)
+	assert.Empty(t, connections)
 }
 
 func TestControlCommandsPersistDesiredStateAndWakeSupervisors(t *testing.T) {
@@ -387,6 +447,41 @@ func (w supervisorWaker) WakeRemotes() {
 
 func (w supervisorWaker) WakeAgentConnections() {
 	w.agents.Wake()
+}
+
+type staticDetector struct {
+	name string
+	view control.HarnessView
+}
+
+func (d staticDetector) Name() string {
+	return d.name
+}
+
+func (d staticDetector) Detect(context.Context, control.DiscoverHarnessesQuery) (control.HarnessView, error) {
+	return d.view, nil
+}
+
+type staticScannerRegistry struct {
+	available []string
+	scanners  map[string]localsessions.Scanner
+}
+
+func (r staticScannerRegistry) ScannerFor(agent string) (localsessions.Scanner, bool) {
+	scanner, ok := r.scanners[agent]
+	return scanner, ok
+}
+
+func (r staticScannerRegistry) AvailableAgents(context.Context) ([]string, error) {
+	return append([]string(nil), r.available...), nil
+}
+
+type staticScanner struct {
+	sessions []control.LocalSessionView
+}
+
+func (s staticScanner) ListSessions(context.Context, string, int) ([]control.LocalSessionView, error) {
+	return append([]control.LocalSessionView(nil), s.sessions...), nil
 }
 
 type recordingRemoteFactory struct {

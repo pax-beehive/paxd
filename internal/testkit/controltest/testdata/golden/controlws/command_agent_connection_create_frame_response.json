@@ -1,0 +1,32 @@
+{
+  "kind": "ack",
+  "command_id": "cmd_agent_connection_create_1",
+  "command_ack": {
+    "command_id": "cmd_agent_connection_create_1",
+    "ok": true,
+    "status": "received",
+    "target_type": "agent_connection",
+    "target_id": "conn_codex",
+    "desired_generation": 1,
+    "result": {
+      "agent_connection": {
+        "id": "conn_codex",
+        "remote_id": "remote_prod",
+        "name": "codex-main",
+        "instance_id": "inst_1",
+        "agent_type": "codex",
+        "harness": "codex",
+        "command": ["codex", "--acp"],
+        "working_dir": "/workspace/project",
+        "tunnel_path": "/api/v1/agent/tunnel",
+        "env": {
+          "PAX_PROFILE": "prod"
+        },
+        "enabled": true,
+        "desired_state": "running",
+        "generation": 1,
+        "restart_nonce": 0
+      }
+    }
+  }
+}
