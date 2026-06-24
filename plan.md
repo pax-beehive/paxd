@@ -886,6 +886,14 @@ orphaned_messages -> remove with old Hermes/mailbox executor path
 
 Implement from stable contracts upward, keeping each step testable before wiring the next layer.
 
+Current checkpoint:
+
+- Steps 1-9 are implemented through the shared `control.Service`, `localapi`, `controlws`, daemonstore repositories, auth/runtime/supervisor scaffolding, harness registry, and local session observer packages.
+- Step 10 is implemented for the migration phase: `internal/daemon` bootstraps daemonstore migrations, imports YAML into `remote` and `agent_connection`, builds the shared control service, exposes the local API handler, and `paxd run` starts the Unix socket plus optional localhost debug HTTP while preserving the compatibility runtime path.
+- Step 11 is implemented for local clients: `paxctl` now manages remotes, agent connections, harness discovery, and local sessions through local API calls, and `paxtui` is a thin local API client over local overview data. Neither client reads SQLite directly.
+- Hard removal of Hermes HTTP/YAML compatibility remains intentionally deferred until the migration runtime fully replaces the compatibility path; the new code no longer requires YAML writes, and startup import keeps YAML as migration input rather than the desired-state authority.
+- Current focused coverage checkpoint: `internal/daemon` 66.8%, `internal/controlws` 92.3%, `internal/control` 91.8%, `internal/harnessregistry` 85.5%, `internal/localsessions` 87.2%, `internal/daemonstore` 77.0%, `internal/localapi` 76.2%, `cmd/paxctl` 68.2%, `cmd/paxtui` 60.0%.
+
 ### 1. Control contracts and testkit
 
 - Define typed `internal/control` command/query/result structs using explicit oneof-like payload fields.

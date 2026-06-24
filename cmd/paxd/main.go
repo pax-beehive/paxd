@@ -37,6 +37,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/collector"
 	"github.com/pax-beehive/paxd/internal/config"
+	paxdaemon "github.com/pax-beehive/paxd/internal/daemon"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/executor"
 	"github.com/pax-beehive/paxd/internal/hermes"
@@ -441,6 +442,8 @@ func cmdRegister(args []string) {
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
+	controlSocket := fs.String("control-socket", paxdaemon.DefaultControlSocket, "Unix socket path for local control API, or empty/none to disable")
+	debugHTTP := fs.String("debug-http", "", "optional loopback debug HTTP address, for example 127.0.0.1:8765")
 	fs.Parse(args)
 
 	cfg, err := config.Load(*configPath)
@@ -464,6 +467,32 @@ func cmdRun(args []string) {
 		log.Fatalf("open daemonstore: %v", err)
 	}
 	defer closeHistory()
+	daemonRuntime, err := paxdaemon.Bootstrap(sm.Context(), paxdaemon.Options{
+		Config:     cfg,
+		Store:      history,
+		ImportYAML: true,
+	})
+	if err != nil {
+		log.Fatalf("bootstrap daemon control plane: %v", err)
+	}
+	if strings.TrimSpace(*controlSocket) != "" && strings.TrimSpace(*controlSocket) != "none" {
+		localServer, err := paxdaemon.StartUnixLocalAPI(sm.Context(), *controlSocket, daemonRuntime.LocalHandler)
+		if err != nil {
+			log.Fatalf("start local control API: %v", err)
+		}
+		defer localServer.Close()
+		log.Printf("[paxd] local control API listening on unix://%s", localServer.Addr())
+	}
+	if strings.TrimSpace(*debugHTTP) != "" {
+		debugServer, err := paxdaemon.StartDebugHTTP(sm.Context(), *debugHTTP, daemonRuntime.LocalHandler)
+		if err != nil {
+			log.Fatalf("start debug HTTP API: %v", err)
+		}
+		if debugServer != nil {
+			defer debugServer.Close()
+			log.Printf("[paxd] debug control API listening on http://%s", debugServer.Addr())
+		}
+	}
 
 	// Check if registered
 	nodeState, err := db.GetNodeState()
