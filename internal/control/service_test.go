@@ -94,6 +94,16 @@ func TestServiceDuplicateCommandIDIsIdempotent(t *testing.T) {
 	if ack.OK || ack.Status != control.CommandStatusRejected || ack.Error == nil || ack.Error.Code != control.ErrCodeConflict {
 		t.Fatalf("changed duplicate ack = %+v", ack)
 	}
+	if wakes.remote != 1 {
+		t.Fatalf("remote wakes after rejected duplicate = %d, want one wake only", wakes.remote)
+	}
+	remotes, err := store.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+	if err != nil {
+		t.Fatalf("ListRemotes() error = %v", err)
+	}
+	if len(remotes) != 1 || remotes[0].Remote.ID != "remote_prod" {
+		t.Fatalf("remotes after rejected duplicate = %+v, want only original remote", remotes)
+	}
 }
 
 func TestServiceDuplicateRejectedCommandReturnsStoredAck(t *testing.T) {

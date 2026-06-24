@@ -113,11 +113,9 @@ func remotesCommand(stdout io.Writer, client func() controlClient) *cli.Command 
 					&cli.StringFlag{Name: "node-id", Usage: "node id"},
 					&cli.StringFlag{Name: "api-key-ref", Usage: "Pax node key secret ref"},
 					&cli.BoolFlag{Name: "enabled", Usage: "enable remote", Value: true},
-					&cli.BoolFlag{Name: "default", Usage: "mark as default remote"},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					enabled := cmd.Bool("enabled")
-					defaultRemote := cmd.Bool("default")
 					create := control.CreateRemoteCommand{
 						Remote: control.Remote{
 							ID:          cmd.String("id"),
@@ -125,7 +123,6 @@ func remotesCommand(stdout io.Writer, client func() controlClient) *cli.Command 
 							CloudAPIURL: cmd.String("api-url"),
 							NodeID:      cmd.String("node-id"),
 							Enabled:     &enabled,
-							IsDefault:   &defaultRemote,
 						},
 						CloudAPIKeyRef: cmd.String("api-key-ref"),
 					}
@@ -145,8 +142,6 @@ func remotesCommand(stdout io.Writer, client func() controlClient) *cli.Command 
 					&cli.BoolFlag{Name: "clear-api-key", Usage: "clear Pax node key secret ref"},
 					&cli.BoolFlag{Name: "enabled", Usage: "enabled value used when --set-enabled is present", Value: true},
 					&cli.BoolFlag{Name: "set-enabled", Usage: "update enabled state"},
-					&cli.BoolFlag{Name: "default", Usage: "default value used when --set-default is present"},
-					&cli.BoolFlag{Name: "set-default", Usage: "update default state"},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					remoteID, err := requireOneArg(cmd, "usage: paxctl remotes update <remote_id> [flags]")
@@ -166,10 +161,6 @@ func remotesCommand(stdout io.Writer, client func() controlClient) *cli.Command 
 					if cmd.Bool("set-enabled") {
 						value := cmd.Bool("enabled")
 						update.Remote.Enabled = &value
-					}
-					if cmd.Bool("set-default") {
-						value := cmd.Bool("default")
-						update.Remote.IsDefault = &value
 					}
 					if value := cmd.String("api-key-ref"); value != "" {
 						update.CloudAPIKeyRef = &value

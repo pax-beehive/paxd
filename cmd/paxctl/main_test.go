@@ -115,7 +115,6 @@ func TestRunRemoteCommandsUseLocalAPI(t *testing.T) {
 		"--api-url", "https://api.example.test",
 		"--node-id", "node_1",
 		"--api-key-ref", "env:PAX_NODE_KEY",
-		"--default",
 	}, &bytes.Buffer{}, &bytes.Buffer{})
 
 	require.NoError(t, err)
@@ -124,8 +123,6 @@ func TestRunRemoteCommandsUseLocalAPI(t *testing.T) {
 	assert.Equal(t, "https://api.example.test", fake.createRemote.Remote.CloudAPIURL)
 	assert.Equal(t, "node_1", fake.createRemote.Remote.NodeID)
 	assert.Equal(t, "env:PAX_NODE_KEY", fake.createRemote.CloudAPIKeyRef)
-	require.NotNil(t, fake.createRemote.Remote.IsDefault)
-	assert.True(t, *fake.createRemote.Remote.IsDefault)
 
 	err = run(context.Background(), []string{
 		"remotes", "update", "remote_prod",

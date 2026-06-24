@@ -634,7 +634,6 @@ cloud_api_url TEXT NOT NULL
 node_id TEXT
 cloud_api_key_ref TEXT
 enabled INTEGER NOT NULL DEFAULT 1
-is_default INTEGER NOT NULL DEFAULT 0
 generation INTEGER NOT NULL DEFAULT 1
 restart_nonce INTEGER NOT NULL DEFAULT 0
 registered_at TEXT

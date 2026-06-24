@@ -129,8 +129,7 @@ func (patch RemotePatch) IsZero() bool {
 		patch.NodeControlPath == nil &&
 		patch.AgentTunnelPath == nil &&
 		patch.NodeID == nil &&
-		patch.Enabled == nil &&
-		patch.IsDefault == nil
+		patch.Enabled == nil
 }
 
 func (cmd DeleteRemoteCommand) Validate() error {

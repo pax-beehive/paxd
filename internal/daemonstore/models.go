@@ -5,13 +5,12 @@ import "time"
 type Remote struct {
 	ID              string     `gorm:"primaryKey;type:text"`
 	Name            string     `gorm:"type:text;not null"`
-	CloudAPIURL     string     `gorm:"type:text;not null;uniqueIndex:idx_remote_cloud_api_url"`
+	CloudAPIURL     string     `gorm:"type:text;not null"`
 	NodeControlPath string     `gorm:"type:text;not null;default:'/api/v1/node/control'"`
 	AgentTunnelPath string     `gorm:"type:text;not null;default:'/api/v1/agent/tunnel'"`
 	NodeID          string     `gorm:"type:text"`
 	CloudAPIKeyRef  string     `gorm:"column:cloud_api_key_ref;type:text"`
 	Enabled         bool       `gorm:"not null"`
-	IsDefault       bool       `gorm:"not null"`
 	Generation      int64      `gorm:"not null;default:1"`
 	RestartNonce    int64      `gorm:"not null;default:0"`
 	RegisteredAt    *time.Time `gorm:"column:registered_at"`

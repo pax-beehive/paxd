@@ -316,7 +316,6 @@ func startIntegrationSupervisors(
 
 func createRemoteCommand(commandID string) control.Command {
 	enabled := true
-	isDefault := true
 	return control.Command{
 		CommandID: commandID,
 		Type:      control.CommandRemoteCreate,
@@ -329,7 +328,6 @@ func createRemoteCommand(commandID string) control.Command {
 				AgentTunnelPath: "/api/v1/agent/tunnel",
 				NodeID:          "node_1",
 				Enabled:         &enabled,
-				IsDefault:       &isDefault,
 			},
 			CloudAPIKeyRef: "env:PAX_NODE_KEY",
 		},

@@ -82,6 +82,12 @@ func (s *Store) DB() *gorm.DB {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.dropRemoteCloudAPIURLUniqueIndex(ctx); err != nil {
+		return err
+	}
+	if err := s.dropRemoteIsDefaultColumn(ctx); err != nil {
+		return err
+	}
 	return s.db.WithContext(ctx).AutoMigrate(
 		&Remote{},
 		&RemoteAuth{},
@@ -96,6 +102,26 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&MessagePart{},
 		&Setting{},
 	)
+}
+
+func (s *Store) dropRemoteCloudAPIURLUniqueIndex(ctx context.Context) error {
+	migrator := s.db.WithContext(ctx).Migrator()
+	if migrator.HasIndex(&Remote{}, "idx_remote_cloud_api_url") {
+		if err := migrator.DropIndex(&Remote{}, "idx_remote_cloud_api_url"); err != nil {
+			return fmt.Errorf("drop remote cloud api url unique index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) dropRemoteIsDefaultColumn(ctx context.Context) error {
+	migrator := s.db.WithContext(ctx).Migrator()
+	if migrator.HasTable(&Remote{}) && migrator.HasColumn(&Remote{}, "is_default") {
+		if err := migrator.DropColumn(&Remote{}, "is_default"); err != nil {
+			return fmt.Errorf("drop remote is_default column: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) WithTx(ctx context.Context, fn func(control.TxStore) error) error {

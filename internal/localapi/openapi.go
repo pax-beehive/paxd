@@ -263,7 +263,6 @@ func requestExample(schema string) map[string]any {
 				"agent_tunnel_path": "/api/v1/agent/tunnel",
 				"node_id":           "node_123",
 				"enabled":           true,
-				"is_default":        true,
 			},
 			"cloud_api_key_ref": "env:PAX_NODE_API_KEY",
 		}
@@ -404,7 +403,6 @@ func openAPISchemas() map[string]any {
 			"agent_tunnel_path": stringSchema,
 			"node_id":           stringSchema,
 			"enabled":           boolSchema,
-			"is_default":        boolSchema,
 		}, "name", "cloud_api_url"),
 		"RemotePatch": objectSchema(map[string]any{
 			"name":              stringSchema,
@@ -413,7 +411,6 @@ func openAPISchemas() map[string]any {
 			"agent_tunnel_path": stringSchema,
 			"node_id":           stringSchema,
 			"enabled":           boolSchema,
-			"is_default":        boolSchema,
 		}),
 		"CreateRemoteCommand": objectSchema(map[string]any{
 			"remote":            schemaRef("Remote"),

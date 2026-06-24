@@ -7,8 +7,7 @@
       "name": "Production",
       "cloud_api_url": "https://api.example.test",
       "node_id": "node_1",
-      "enabled": true,
-      "is_default": true
+      "enabled": true
     },
     "cloud_api_key_ref": "env:PAX_NODE_KEY"
   }

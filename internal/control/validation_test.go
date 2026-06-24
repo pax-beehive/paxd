@@ -339,7 +339,6 @@ func TestCommandPayloadValidateAcceptsValidFields(t *testing.T) {
 	url := "https://api.example.test"
 	nodeID := "node_1"
 	enabled := false
-	isDefault := true
 	key := "env:PAX_API_KEY"
 	workingDir := "/tmp/project"
 	desiredState := DesiredStateRunning
@@ -358,7 +357,6 @@ func TestCommandPayloadValidateAcceptsValidFields(t *testing.T) {
 					CloudAPIURL: &url,
 					NodeID:      &nodeID,
 					Enabled:     &enabled,
-					IsDefault:   &isDefault,
 				},
 			},
 		},

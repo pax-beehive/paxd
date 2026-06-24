@@ -43,7 +43,6 @@ func TestMigrateCreatesTargetTablesAndIsIdempotent(t *testing.T) {
 		model any
 		name  string
 	}{
-		{&Remote{}, "idx_remote_cloud_api_url"},
 		{&AgentConnection{}, "idx_agent_connection_remote_name"},
 		{&AgentConnection{}, "idx_agent_connection_remote_cloud_agent"},
 		{&LocalSession{}, "idx_local_session_agent_native"},
@@ -89,6 +88,46 @@ func TestOpenSQLite(t *testing.T) {
 	}
 }
 
+func TestMigrateDropsRetiredRemoteSchema(t *testing.T) {
+	ctx := context.Background()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "legacy.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE remote (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			cloud_api_url TEXT NOT NULL,
+			node_control_path TEXT NOT NULL DEFAULT '/api/v1/node/control',
+			agent_tunnel_path TEXT NOT NULL DEFAULT '/api/v1/agent/tunnel',
+			node_id TEXT,
+			cloud_api_key_ref TEXT,
+			enabled INTEGER NOT NULL,
+			is_default INTEGER NOT NULL DEFAULT 0,
+			generation INTEGER NOT NULL DEFAULT 1,
+			restart_nonce INTEGER NOT NULL DEFAULT 0,
+			registered_at TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE UNIQUE INDEX idx_remote_cloud_api_url ON remote(cloud_api_url);
+	`).Error; err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	store := New(db)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if store.DB().Migrator().HasColumn(&Remote{}, "is_default") {
+		t.Fatal("Migrate() left retired remote.is_default column")
+	}
+	if store.DB().Migrator().HasIndex(&Remote{}, "idx_remote_cloud_api_url") {
+		t.Fatal("Migrate() left retired remote cloud_api_url unique index")
+	}
+}
+
 func TestOpenSQLiteCreatesMissingParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "nested", "daemonstore.db")
 
@@ -99,7 +138,7 @@ func TestOpenSQLiteCreatesMissingParentDirectory(t *testing.T) {
 	assert.FileExists(t, path)
 }
 
-func TestRemoteRepositoryCreateUpdateRestartAndDuplicate(t *testing.T) {
+func TestRemoteRepositoryCreateUpdateRestartAndDuplicateID(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 
@@ -111,8 +150,8 @@ func TestRemoteRepositoryCreateUpdateRestartAndDuplicate(t *testing.T) {
 		t.Fatalf("remote version = generation %d nonce %d", remote.Generation, remote.RestartNonce)
 	}
 
-	if _, err := store.CreateRemote(ctx, createRemoteCommand("remote_other", "https://api.example.test")); !errors.Is(err, ErrDuplicate) {
-		t.Fatalf("duplicate CreateRemote() error = %v, want ErrDuplicate", err)
+	if _, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api2.example.test")); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate id CreateRemote() error = %v, want ErrDuplicate", err)
 	}
 
 	newURL := "https://api2.example.test"
@@ -157,6 +196,25 @@ func TestRemoteRepositoryCreateUpdateRestartAndDuplicate(t *testing.T) {
 	}
 	if len(remotes) != 1 {
 		t.Fatalf("all remotes = %+v, want deleted remote included", remotes)
+	}
+}
+
+func TestRemoteRepositoryAllowsSameCloudAPIURL(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+
+	if _, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api.example.test")); err != nil {
+		t.Fatalf("CreateRemote(remote_prod) error = %v", err)
+	}
+	if _, err := store.CreateRemote(ctx, createRemoteCommand("remote_other", "https://api.example.test")); err != nil {
+		t.Fatalf("CreateRemote(remote_other same cloud URL) error = %v", err)
+	}
+	remotes, err := store.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+	if err != nil {
+		t.Fatalf("ListRemotes() error = %v", err)
+	}
+	if len(remotes) != 2 {
+		t.Fatalf("remotes = %+v, want both remotes with same cloud URL", remotes)
 	}
 }
 

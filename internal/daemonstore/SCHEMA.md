@@ -50,18 +50,17 @@ agent_tunnel_path TEXT NOT NULL DEFAULT '/api/v1/agent/tunnel'
 node_id TEXT
 cloud_api_key_ref TEXT
 enabled INTEGER NOT NULL DEFAULT 1
-is_default INTEGER NOT NULL DEFAULT 0
 generation INTEGER NOT NULL DEFAULT 1
 restart_nonce INTEGER NOT NULL DEFAULT 0
 registered_at TEXT
 created_at TEXT NOT NULL
 updated_at TEXT NOT NULL
-UNIQUE(cloud_api_url)
 ```
 
 Notes:
 
 - `cloud_api_url` defines the Pax manager endpoint.
+- Multiple remotes may share the same `cloud_api_url` when they represent different node identities or credentials.
 - `node_control_path` defines the manager WebSocket path for remote node-control.
 - `agent_tunnel_path` defines the manager WebSocket path for agent ACP tunnels under this remote.
 - `node_id` is the Pax manager node identity for that remote.

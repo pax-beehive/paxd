@@ -92,7 +92,6 @@ type Remote struct {
 	AgentTunnelPath string `json:"agent_tunnel_path,omitempty"`
 	NodeID          string `json:"node_id,omitempty"`
 	Enabled         *bool  `json:"enabled,omitempty"`
-	IsDefault       *bool  `json:"is_default,omitempty"`
 }
 
 type RemotePatch struct {
@@ -102,7 +101,6 @@ type RemotePatch struct {
 	AgentTunnelPath *string `json:"agent_tunnel_path,omitempty"`
 	NodeID          *string `json:"node_id,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
-	IsDefault       *bool   `json:"is_default,omitempty"`
 }
 
 type CreateRemoteCommand struct {

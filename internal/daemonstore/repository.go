@@ -87,7 +87,6 @@ func (s *Store) CreateRemote(ctx context.Context, cmd control.CreateRemoteComman
 		NodeID:          cmd.Remote.NodeID,
 		CloudAPIKeyRef:  cmd.CloudAPIKeyRef,
 		Enabled:         boolDefault(cmd.Remote.Enabled, true),
-		IsDefault:       boolDefault(cmd.Remote.IsDefault, false),
 		Generation:      1,
 		RestartNonce:    0,
 		CreatedAt:       now,
@@ -121,9 +120,6 @@ func (s *Store) UpdateRemote(ctx context.Context, cmd control.UpdateRemoteComman
 	}
 	if cmd.Remote.Enabled != nil {
 		remote.Enabled = *cmd.Remote.Enabled
-	}
-	if cmd.Remote.IsDefault != nil {
-		remote.IsDefault = *cmd.Remote.IsDefault
 	}
 	if cmd.CloudAPIKeyRef != nil {
 		remote.CloudAPIKeyRef = *cmd.CloudAPIKeyRef
@@ -915,7 +911,6 @@ func (s *Store) agentConnectionViewWithStatus(ctx context.Context, conn AgentCon
 
 func remoteView(remote Remote) control.RemoteView {
 	enabled := remote.Enabled
-	isDefault := remote.IsDefault
 	return control.RemoteView{
 		Remote: control.Remote{
 			ID:              remote.ID,
@@ -925,7 +920,6 @@ func remoteView(remote Remote) control.RemoteView {
 			AgentTunnelPath: stringDefault(remote.AgentTunnelPath, defaultAgentTunnelPath),
 			NodeID:          remote.NodeID,
 			Enabled:         &enabled,
-			IsDefault:       &isDefault,
 		},
 		Generation:   remote.Generation,
 		RestartNonce: remote.RestartNonce,

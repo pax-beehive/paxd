@@ -66,15 +66,13 @@ Given no remote exists for `https://api.example.test`
 When the store creates a remote  
 Then the remote has generation `1`  
 And restart nonce `0`  
-And enabled/default fields match the request  
-And `cloud_api_url` is unique
+And enabled/default fields match the request
 
-### Scenario: rejects duplicate cloud API URL
+### Scenario: allows duplicate cloud API URL
 
 Given a remote already exists for `https://api.example.test`  
 When the store creates another remote with the same URL  
-Then the operation fails with a duplicate constraint error  
-And the existing remote is unchanged
+Then both remotes are persisted under their distinct IDs
 
 ### Scenario: updates runtime-affecting remote fields
 
