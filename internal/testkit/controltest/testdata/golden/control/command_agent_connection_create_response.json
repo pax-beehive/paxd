@@ -15,7 +15,6 @@
       "harness": "codex",
       "command": ["codex", "--acp"],
       "working_dir": "/workspace/project",
-      "tunnel_path": "/api/v1/agent/tunnel",
       "env": {
         "PAX_PROFILE": "prod"
       },

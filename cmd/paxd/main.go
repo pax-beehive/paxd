@@ -1,444 +1,69 @@
-// paxd is the Pax Fleet Daemon — runs on every agent machine,
-// connects to the Fleet Cloud API via WebSocket, reports local Hermes
-// session status, and executes real-time messages from the Cloud mailbox.
+// paxd is the local Pax daemon. It starts even before remotes, credentials, or
+// agent connections exist; those records are managed later through the local
+// control API.
 //
 // Architecture:
 //
-//	Cloud ──WebSocket──→ paxd (receive messages in real-time)
-//	paxd  ──HTTP POST──→ Cloud (status reports, results, registration)
+//	local clients --HTTP/Unix socket--> paxd --daemonstore--> supervisors
 //
 // Usage:
 //
-//	paxd configure --cloud-url https://fleet.example.com   # register node + agents
-//	paxd register --cloud-url https://fleet.example.com    # node-only registration
-//	paxd run                                                  # start the daemon loop
-//	paxd install-service                                      # install as macOS launchd service
-//	paxd --version                                            # print version
+//	paxd run              # start the daemon
+//	paxd service install  # install as launchd/systemd service
+//	paxd --version        # print version
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/pax-beehive/paxd/internal/acpclient"
-	"github.com/pax-beehive/paxd/internal/acpforwarder"
-	"github.com/pax-beehive/paxd/internal/cloud"
-	"github.com/pax-beehive/paxd/internal/collector"
 	"github.com/pax-beehive/paxd/internal/config"
 	paxdaemon "github.com/pax-beehive/paxd/internal/daemon"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
-	"github.com/pax-beehive/paxd/internal/executor"
-	"github.com/pax-beehive/paxd/internal/hermes"
-	"github.com/pax-beehive/paxd/internal/poller"
 	"github.com/pax-beehive/paxd/internal/state"
-	"github.com/pax-beehive/paxd/internal/store"
 	"github.com/urfave/cli/v3"
 )
 
 var version = "0.1.0"
 
 func main() {
-	app := &cli.Command{
+	if err := newApp().Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func newApp() *cli.Command {
+	return &cli.Command{
 		Name:    "paxd",
 		Usage:   "Pax Fleet Daemon",
 		Version: version,
 		Commands: []*cli.Command{
 			{
-				Name:            "connect",
-				Usage:           "interactive device onboarding",
-				SkipFlagParsing: true,
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdConnect(cmd.Args().Slice())
-					return nil
-				},
-			},
-			cmdConfigureCommand(),
-			{
-				Name:            "register",
-				Usage:           "node-only registration",
-				SkipFlagParsing: true,
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdRegister(cmd.Args().Slice())
-					return nil
-				},
-			},
-			{
 				Name:            "run",
-				Usage:           "start the daemon loop",
+				Usage:           "start the daemon",
 				SkipFlagParsing: true,
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cmdRun(cmd.Args().Slice())
 					return nil
 				},
 			},
-			{
-				Name:            "acp-forward",
-				Usage:           "run only the ACP tunnel forwarder",
-				SkipFlagParsing: true,
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdACPForward(cmd.Args().Slice())
-					return nil
-				},
-			},
-			{
-				Name:            "postman",
-				Usage:           "print Postman WebSocket URL and smoke messages",
-				SkipFlagParsing: true,
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdPostman(cmd.Args().Slice())
-					return nil
-				},
-			},
-			{
-				Name:            "harnesses",
-				Usage:           "inspect local ACP harness support",
-				SkipFlagParsing: true,
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdHarnesses(cmd.Args().Slice())
-					return nil
-				},
-			},
-			{
-				Name:  "install-service",
-				Usage: "install as macOS launchd service",
-				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cmdInstallService()
-					return nil
-				},
-			},
+			cmdServiceCommand(),
 		},
 	}
-	if err := app.Run(context.Background(), os.Args); err != nil {
-		log.Fatal(err)
-	}
 }
 
-// cmdConnect performs interactive device-code style onboarding.
-func cmdConnect(args []string) {
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL")
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
-	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
-	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
-	runAfter := fs.Bool("run", false, "Run paxd after successful connection")
-	fs.Parse(args)
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
-	cloudAPIURL := firstNonEmpty(*cloudURL, cfg.Cloud.APIURL)
-	if cloudAPIURL == "" {
-		fmt.Fprintln(os.Stderr, "--cloud-url or cloud.api_url is required")
-		os.Exit(1)
-	}
-	if *cfClientID != "" {
-		cfg.Cloud.CFClientID = *cfClientID
-	}
-	if *cfClientSecret != "" {
-		cfg.Cloud.CFClientSecret = *cfClientSecret
-	}
-
-	client := cloud.NewClient(cloudAPIURL, "").
-		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
-	hostname := cfg.Agent.Hostname
-	if hostname == "" {
-		hostname, _ = os.Hostname()
-	}
-	start, err := client.StartNodeRegistration(&cloud.StartNodeRegistrationRequest{
-		Name:        cfg.Agent.Name,
-		Hostname:    hostname,
-		MachineType: cfg.Agent.MachineType,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		PaxdVersion: version,
-		APIEndpoint: cfg.Hermes.APIEndpoint,
-	})
-	if err != nil {
-		log.Fatalf("start registration: %v", err)
-	}
-
-	fmt.Println("Connect this machine to Pax:")
-	fmt.Printf("\n  Open: %s\n", firstNonEmpty(start.VerificationURIComplete, start.VerificationURI))
-	fmt.Printf("  Code: %s\n\n", start.PairCode)
-	fmt.Println("Waiting for approval...")
-
-	interval := time.Duration(start.Interval) * time.Second
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-	deadline := time.Now().Add(time.Duration(start.ExpiresIn) * time.Second)
-	for {
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			log.Fatal("registration expired")
-		}
-		time.Sleep(interval)
-		poll, err := client.PollNodeRegistration(&cloud.PollNodeRegistrationRequest{
-			RegistrationID: start.RegistrationID,
-			PollToken:      start.PollToken,
-		})
-		if err != nil {
-			log.Fatalf("poll registration: %v", err)
-		}
-		switch poll.Status {
-		case "pending":
-			continue
-		case "approved":
-			if poll.NodeID == "" || poll.APIKey == "" {
-				log.Fatal("registration approved without node credential")
-			}
-			configFile := saveNodeCredential(cfg, cloudAPIURL, poll.NodeID, poll.APIKey, *configPath)
-			saveNodeState(cfg, cloudAPIURL, poll.NodeID, poll.APIKey)
-			fmt.Printf("Connected successfully.\n")
-			fmt.Printf("  node_id: %s\n", poll.NodeID)
-			fmt.Printf("  config:  %s\n", configFile)
-			if *runAfter {
-				cmdRun([]string{"--config", configFile})
-			}
-			return
-		case "slow_down":
-			interval += time.Second
-		case "denied", "expired":
-			log.Fatalf("registration %s", poll.Status)
-		default:
-			log.Fatalf("registration returned unknown status %q", poll.Status)
-		}
-	}
-}
-
-type configureAgentSpec struct {
-	Name       string
-	Harness    string
-	InstanceID string
-}
-
-func cmdConfigureCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "configure",
-		Usage: "register node + agent config",
-		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "cloud-url", Usage: "Fleet Cloud API URL"},
-			&cli.StringFlag{Name: "registration-token", Usage: "Node registration token for first bootstrap"},
-			&cli.StringFlag{Name: "config", Usage: "Config file path (default: ~/.paxd/paxd.yaml)"},
-			&cli.StringFlag{Name: "node-name", Usage: "Node display name"},
-			&cli.StringFlag{Name: "machine-type", Usage: "Machine type label"},
-			&cli.StringFlag{Name: "harness", Value: "codex", Usage: "Default ACP harness when --agent is omitted"},
-			&cli.StringFlag{Name: "cf-client-id", Usage: "Cloudflare Access service token client ID"},
-			&cli.StringFlag{Name: "cf-client-secret", Usage: "Cloudflare Access service token secret"},
-			&cli.BoolFlag{Name: "append", Usage: "Append newly registered agents instead of replacing agents"},
-			&cli.BoolFlag{Name: "y", Aliases: []string{"yes"}, Usage: "Assume yes for destructive configure prompts"},
-			&cli.StringSliceFlag{Name: "agent", Usage: "Agent spec name:harness[:instance_id], repeatable"},
-		},
-		Action: cmdConfigure,
-	}
-}
-
-// cmdConfigure registers this node and its hosted agents, then writes paxd.yaml.
-func cmdConfigure(ctx context.Context, cmd *cli.Command) error {
-	configPath := cmd.String("config")
-	targetPath := configPath
-	if targetPath == "" {
-		targetPath = config.DefaultPath()
-	}
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	cfg.Cloud.APIURL = firstNonEmpty(cmd.String("cloud-url"), cfg.Cloud.APIURL)
-	cfg.Cloud.URL = cfg.Cloud.APIURL
-	if cfg.Cloud.APIURL == "" {
-		return cli.Exit("--cloud-url, cloud.api_url, or PAX_CLOUD_URL is required", 1)
-	}
-
-	if v := cmd.String("node-name"); v != "" {
-		cfg.Agent.Name = v
-	}
-	if v := cmd.String("machine-type"); v != "" {
-		cfg.Agent.MachineType = v
-	}
-	if cfg.Agent.Hostname == "" {
-		hostname, _ := os.Hostname()
-		cfg.Agent.Hostname = hostname
-	}
-	if v := cmd.String("cf-client-id"); v != "" {
-		cfg.Cloud.CFClientID = v
-	}
-	if v := cmd.String("cf-client-secret"); v != "" {
-		cfg.Cloud.CFClientSecret = v
-	}
-
-	specs, err := parseConfigureAgentSpecs(cmd.StringSlice("agent"), cmd.String("harness"))
-	if err != nil {
-		return fmt.Errorf("parse agents: %w", err)
-	}
-
-	nodeAPIKey := cfg.Cloud.APIKey
-	token := firstNonEmpty(cmd.String("registration-token"), cfg.Cloud.RegistrationToken)
-	if nodeAPIKey == "" && token == "" {
-		token = promptLine("Registration token: ")
-	}
-	if nodeAPIKey == "" && token == "" {
-		return cli.Exit("--registration-token, cloud.registration_token, or PAX_REGISTRATION_TOKEN is required", 1)
-	}
-	if nodeAPIKey != "" && cmd.String("registration-token") != "" {
-		return cli.Exit("config already has cloud.api_key; omit --registration-token or remove the existing key", 1)
-	}
-
-	appendAgents := cmd.Bool("append")
-	assumeYes := cmd.Bool("y")
-
-	if !appendAgents && configureWouldReplaceExistingAgents(targetPath, cfg) && !assumeYes {
-		if !confirmReplaceConfigure(targetPath, cfg.RuntimeAgents()) {
-			return cli.Exit("configure cancelled", 1)
-		}
-	}
-
-	existingAgents := explicitAgentsForAppend(cfg)
-	if appendAgents {
-		cfg.Agents = existingAgents
-	} else {
-		cfg.Agents = cfg.Agents[:0]
-	}
-	for i, spec := range specs {
-		regToken := ""
-		req := &cloud.RegisterNodeAgentRequest{
-			Agent: cloud.RegisterNodeAgentPayload{
-				Name:      spec.Name,
-				AgentType: spec.Harness,
-			},
-		}
-		if nodeAPIKey == "" {
-			regToken = token
-			req.Node = &cloud.RegisterNodeRequest{
-				Name:        cfg.Agent.Name,
-				Hostname:    cfg.Agent.Hostname,
-				MachineType: cfg.Agent.MachineType,
-				OS:          runtime.GOOS,
-				Arch:        runtime.GOARCH,
-				PaxdVersion: version,
-				APIEndpoint: configureHermesAPIEndpoint(cfg, specs),
-			}
-		}
-
-		resp, err := cloud.NewClient(cfg.Cloud.APIURL, nodeAPIKey).
-			WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret).
-			RegisterNodeAgent(req, regToken)
-		if err != nil {
-			return fmt.Errorf("register agent %s: %w", spec.Name, err)
-		}
-		if resp.NodeID != "" {
-			cfg.Cloud.NodeID = resp.NodeID
-		}
-		if resp.APIKey != "" {
-			nodeAPIKey = resp.APIKey
-			cfg.Cloud.APIKey = resp.APIKey
-		}
-		if resp.AgentID == "" {
-			return fmt.Errorf("register agent %s: response missing agent_id", spec.Name)
-		}
-		newAgent := runtimeAgentConfigFromSpec(resp.AgentID, spec, cfg)
-		cfg.Agents = append(cfg.Agents, newAgent)
-		if i == 0 && !appendAgents {
-			applyPrimaryConfiguredAgent(cfg, newAgent, spec)
-		} else if cfg.Agent.AgentID == "" {
-			cfg.Agent.AgentID = resp.AgentID
-			cfg.AgentID = resp.AgentID
-			cfg.InstanceID = firstNonEmpty(spec.InstanceID, spec.Name, "default")
-		}
-		fmt.Printf("Registered agent: %s (%s) -> %s\n", spec.Name, spec.Harness, resp.AgentID)
-	}
-	cfg.Cloud.APIKey = nodeAPIKey
-	cfg.Cloud.RegistrationToken = ""
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	data, err := yamlMarshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	if err := os.WriteFile(targetPath, data, 0600); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	fmt.Printf("Configured paxd successfully.\n")
-	fmt.Printf("  node_id: %s\n", cfg.Cloud.NodeID)
-	fmt.Printf("  config:  %s\n", targetPath)
-	fmt.Printf("\nRun: paxd run\n")
-	return nil
-}
-
-// cmdRegister performs first-time registration with the Cloud API.
-func cmdRegister(args []string) {
-	fs := flag.NewFlagSet("register", flag.ExitOnError)
-	cloudURL := fs.String("cloud-url", "", "Fleet Cloud API URL")
-	registrationToken := fs.String("registration-token", "", "Node registration token")
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
-	fs.Parse(args)
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
-	cloudAPIURL := firstNonEmpty(*cloudURL, cfg.Cloud.APIURL)
-	if cloudAPIURL == "" {
-		fmt.Fprintln(os.Stderr, "--cloud-url or cloud.api_url is required")
-		os.Exit(1)
-	}
-
-	token := firstNonEmpty(*registrationToken, cfg.Cloud.RegistrationToken)
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "--registration-token or cloud.registration_token is required")
-		os.Exit(1)
-	}
-
-	client := cloud.NewClient(cloudAPIURL, "").
-		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
-	hostname, _ := os.Hostname()
-
-	req := &cloud.RegisterNodeRequest{
-		Name:        cfg.Agent.Name,
-		Hostname:    hostname,
-		MachineType: cfg.Agent.MachineType,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		PaxdVersion: version,
-		APIEndpoint: cfg.Hermes.APIEndpoint,
-	}
-
-	resp, err := client.RegisterNode(req, token)
-	if err != nil {
-		log.Fatalf("register: %v", err)
-	}
-
-	configFile := saveNodeCredential(cfg, cloudAPIURL, resp.NodeID, resp.APIKey, *configPath)
-
-	fmt.Printf("Registered successfully!\n")
-	fmt.Printf("  node_id: %s\n", resp.NodeID)
-	fmt.Printf("  config:  %s\n", configFile)
-	fmt.Printf("\nRun: paxd run\n")
-}
-
-// cmdRun starts the main daemon loop.
-//
-// Three concurrent loops:
-//  1. WebSocket → receives messages from Cloud in real-time
-//  2. Status ticker → reports session + system status to Cloud (HTTP POST)
-//  3. Orphan ticker → reconciles orphaned messages
+// cmdRun starts the always-on local daemon. Remote and agent runtime state is
+// driven from daemonstore desired state, not from registration gates.
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
@@ -453,28 +78,21 @@ func cmdRun(args []string) {
 
 	log.Printf("[paxd] starting v%s on %s/%s", version, runtime.GOOS, runtime.GOARCH)
 
-	// State machine
 	sm := state.NewMachine()
-
-	// Open local SQLite
-	db, err := store.Open(cfg.Daemon.DBPath)
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
 	history, closeHistory, err := openDaemonStore(cfg.Daemon.DBPath)
 	if err != nil {
 		log.Fatalf("open daemonstore: %v", err)
 	}
 	defer closeHistory()
+
 	daemonRuntime, err := paxdaemon.Bootstrap(sm.Context(), paxdaemon.Options{
-		Config:     cfg,
-		Store:      history,
-		ImportYAML: true,
+		Config: cfg,
+		Store:  history,
 	})
 	if err != nil {
 		log.Fatalf("bootstrap daemon control plane: %v", err)
 	}
+
 	if strings.TrimSpace(*controlSocket) != "" && strings.TrimSpace(*controlSocket) != "none" {
 		localServer, err := paxdaemon.StartUnixLocalAPI(sm.Context(), *controlSocket, daemonRuntime.LocalHandler)
 		if err != nil {
@@ -493,584 +111,22 @@ func cmdRun(args []string) {
 			log.Printf("[paxd] debug control API listening on http://%s", debugServer.Addr())
 		}
 	}
+	daemonRuntime.StartSupervisors(sm.Context())
 
-	// Check if registered
-	nodeState, err := db.GetNodeState()
-	if err != nil {
-		log.Fatalf("get node state: %v", err)
-	}
-
-	// Transition to REGISTERING
-	if err := sm.Transition(state.REGISTERING); err != nil {
-		log.Fatalf("state transition: %v", err)
-	}
-
-	if nodeState == nil {
-		nodeState = nodeStateFromConfig(cfg, db)
-	}
-
-	if err := syncConfiguredAgents(cfg, db); err != nil {
-		log.Fatalf("sync agents: %v", err)
-	}
-
-	// Create clients
-	cloudURL := firstNonEmpty(nodeState.CloudAPIURL, cfg.Cloud.APIURL)
-	cloudClient := cloud.NewClient(cloudURL, nodeState.CloudAPIKey).
-		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
-	runtimes, executors, err := buildAgentRuntimes(cfg, cloudClient, db)
-	if err != nil {
-		log.Fatalf("build agent runtimes: %v", err)
-	}
-	if len(runtimes) == 0 {
-		log.Fatal("no cloud agents configured. Set agent.agent_id, agents[].agent_id, or PAX_AGENT_ID")
-	}
-
-	// Check Hermes reachability
-	for _, runtime := range runtimes {
-		if !runtime.SupportsHermesHTTP {
-			log.Printf(
-				"[paxd] ACP agent %s (%s) does not use Hermes HTTP health checks",
-				runtime.Agent.AgentID,
-				runtime.Agent.AgentType,
-			)
-			continue
-		}
-		if err := runtime.HermesClient.Ping(); err != nil {
-			log.Printf(
-				"[paxd] WARNING: Hermes not reachable for agent %s: %v",
-				runtime.Agent.AgentID,
-				err,
-			)
-			log.Printf("[paxd] continuing; will retry on each status cycle")
-		} else {
-			log.Printf(
-				"[paxd] Hermes reachable for agent %s at %s",
-				runtime.Agent.AgentID,
-				runtime.Agent.APIEndpoint,
-			)
-		}
-	}
-
-	// Create subsystems
-	col := collector.New(runtimes, cloudClient, db, cfg.Agent.Hostname).
-		WithBatchSize(cfg.Daemon.SessionBatchSize)
-	pol := poller.New(cloudClient, nil, executors, db)
-
-	// Transition to RUNNING
 	if err := sm.Transition(state.RUNNING); err != nil {
 		log.Fatalf("state transition: %v", err)
 	}
-	forwarderCount := startACPForwarders(sm.Context(), cfg, nodeState, db, history)
-	log.Printf("[paxd] RUNNING (node=%s, agents=%d, poll=%s, status=%s, orphan=%s)",
-		nodeState.NodeID,
-		len(runtimes),
-		cfg.Daemon.PollInterval,
-		cfg.Daemon.StatusInterval,
-		cfg.Daemon.ReconcileInterval)
-	if forwarderCount > 0 {
-		log.Printf("[paxd] ACP forwarders running: %d", forwarderCount)
-	}
-
-	// Main loop: mailbox polling, status reporting, and orphan reconciliation.
-	pollTicker := time.NewTicker(cfg.Daemon.PollInterval)
-	statusTicker := time.NewTicker(cfg.Daemon.StatusInterval)
-	orphanTicker := time.NewTicker(cfg.Daemon.ReconcileInterval)
-	defer pollTicker.Stop()
-	defer statusTicker.Stop()
-	defer orphanTicker.Stop()
+	log.Printf("[paxd] RUNNING")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
-	for {
-		select {
-		case sig := <-sigCh:
-			log.Printf("[paxd] received signal: %v", sig)
-			sm.Transition(state.STOPPING)
-			sm.Transition(state.STOPPED)
-			log.Printf("[paxd] STOPPED")
-			return
-
-		case <-pollTicker.C:
-			nextOffset, err := pol.PollMailbox(
-				sm.Context(),
-				nodeState.LastOffset,
-				10,
-			)
-			if err != nil {
-				log.Printf("[paxd] poll error: %v", err)
-			}
-			if nextOffset > nodeState.LastOffset {
-				nodeState.LastOffset = nextOffset
-			}
-
-		case <-statusTicker.C:
-			if err := col.CollectAndReport(sm.Context()); err != nil {
-				log.Printf("[paxd] status error: %v", err)
-			}
-
-		case <-orphanTicker.C:
-			if err := pol.ReconcileOrphans(sm.Context()); err != nil {
-				log.Printf("[paxd] orphan reconcile error: %v", err)
-			}
-		}
-	}
-}
-
-// cmdACPForward runs only the stateless ACP tunnel forwarder.
-func cmdACPForward(args []string) {
-	fs := flag.NewFlagSet("acp-forward", flag.ExitOnError)
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
-	cloudURL := fs.String("cloud-url", "", "Cloud API URL")
-	apiKey := fs.String("api-key", "", "Node API key")
-	agentID := fs.String("agent-id", "", "Cloud agent ID")
-	instanceID := fs.String("instance-id", "", "Agent instance ID")
-	cfClientID := fs.String("cf-client-id", "", "Cloudflare Access service token client ID")
-	cfClientSecret := fs.String("cf-client-secret", "", "Cloudflare Access service token secret")
-	harness := fs.String("harness", "", "ACP harness preset: hermes, codex, claude, claude-code, gemini, or custom")
-	command := fs.String("command", "", "ACP command, for example: \"hermes acp\"")
-	workingDir := fs.String("working-dir", "", "ACP command working directory")
-	tunnelPath := fs.String("tunnel-path", "", "Agent tunnel path")
-	reconnectInterval := fs.Duration("reconnect-interval", 0, "Reconnect interval")
-	fs.Parse(args)
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
-
-	nodeState := &store.NodeState{
-		NodeID:       cfg.Cloud.NodeID,
-		CloudAPIKey:  cfg.Cloud.APIKey,
-		CloudAPIURL:  cfg.Cloud.APIURL,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	applyACPForwardOverrides(cfg, nodeState, acpForwardOverrides{
-		cloudURL:          *cloudURL,
-		apiKey:            *apiKey,
-		agentID:           *agentID,
-		instanceID:        *instanceID,
-		cfClientID:        *cfClientID,
-		cfClientSecret:    *cfClientSecret,
-		harness:           *harness,
-		command:           *command,
-		workingDir:        *workingDir,
-		tunnelPath:        *tunnelPath,
-		reconnectInterval: *reconnectInterval,
-	})
-	db, err := store.Open(cfg.Daemon.DBPath)
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-	history, closeHistory, err := openDaemonStore(cfg.Daemon.DBPath)
-	if err != nil {
-		log.Fatalf("open daemonstore: %v", err)
-	}
-	defer closeHistory()
-	if nodeState.CloudAPIKey == "" || nodeState.CloudAPIURL == "" {
-		saved, err := db.GetNodeState()
-		if err != nil {
-			log.Fatalf("get node state: %v", err)
-		}
-		if saved != nil {
-			nodeState = saved
-			applyACPForwardOverrides(cfg, nodeState, acpForwardOverrides{
-				cloudURL:          *cloudURL,
-				apiKey:            *apiKey,
-				agentID:           *agentID,
-				instanceID:        *instanceID,
-				cfClientID:        *cfClientID,
-				cfClientSecret:    *cfClientSecret,
-				harness:           *harness,
-				command:           *command,
-				workingDir:        *workingDir,
-				tunnelPath:        *tunnelPath,
-				reconnectInterval: *reconnectInterval,
-			})
-		}
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	cfg.ACPForwarder.Enabled = true
-	forwardCfg := acpForwarderConfig(cfg, nodeState)
-	forwardCfg.Journal = db
-	forwardCfg.History = history
-	log.Printf("[paxd] ACP forwarder starting (tunnel=%s, command=%q)",
-		forwardCfg.TunnelPath,
-		forwardCfg.Command)
-	if err := acpforwarder.New(forwardCfg).Run(ctx); err != nil && ctx.Err() == nil {
-		log.Fatalf("acp forwarder: %v", err)
-	}
-}
-
-func cmdPostman(args []string) {
-	fs := flag.NewFlagSet("postman", flag.ExitOnError)
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
-	cloudURL := fs.String("cloud-url", "", "Cloud API URL")
-	agentID := fs.String("agent-id", "", "Cloud agent ID")
-	tunnelPath := fs.String("path", "/api/v1/user/self/agents/{agent_id}/tunnel", "User tunnel path")
-	cwd := fs.String("cwd", "/tmp", "ACP session cwd for the smoke message")
-	fs.Parse(args)
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
-
-	url, err := postmanTunnelURL(
-		firstNonEmpty(*cloudURL, cfg.Cloud.APIURL),
-		*tunnelPath,
-		firstNonEmpty(*agentID, cfg.Agent.AgentID),
-	)
-	if err != nil {
-		log.Fatalf("postman url: %v", err)
-	}
-
-	fmt.Printf("Postman WebSocket URL:\n%s\n\n", url)
-	fmt.Println("Headers/cookies:")
-	fmt.Println("Use the same Cloudflare user auth material that makes GET /api/v1/user/self/me work.")
-	fmt.Println()
-	fmt.Println("1. initialize")
-	fmt.Println(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"postman","version":"0.1.0"}}}`)
-	fmt.Println()
-	fmt.Println("2. authenticate (only if initialize returns authMethods)")
-	fmt.Println(`{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"deepseek"}}`)
-	fmt.Println()
-	fmt.Println("3. session/new")
-	fmt.Printf("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/new\",\"params\":{\"cwd\":%q,\"mcpServers\":[]}}\n", *cwd)
-	fmt.Println()
-	fmt.Println("4. session/prompt")
-	fmt.Println(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session_id_here","prompt":[{"type":"text","text":"Say hello in one short sentence."}]}}`)
-}
-
-func cmdHarnesses(args []string) {
-	fs := flag.NewFlagSet("harnesses", flag.ExitOnError)
-	fs.Parse(args)
-
-	fmt.Println("ACP harness support:")
-	for _, status := range detectHarnesses() {
-		command := "-"
-		if len(status.Command) > 0 {
-			command = strings.Join(status.Command, " ")
-		}
-		state := "unsupported"
-		if status.Supported {
-			state = "supported"
-		} else if status.Installed {
-			state = "installed"
-		}
-		fmt.Printf("  %-12s %-11s command=%s", status.Name, state, command)
-		if status.Path != "" {
-			fmt.Printf(" path=%s", status.Path)
-		}
-		if status.Note != "" {
-			fmt.Printf(" note=%s", status.Note)
-		}
-		fmt.Println()
-	}
-}
-
-type harnessStatus struct {
-	Name      string
-	Command   []string
-	Path      string
-	Installed bool
-	Supported bool
-	Note      string
-}
-
-func detectHarnesses() []harnessStatus {
-	statuses := []harnessStatus{
-		detectHarness("hermes", acpCommandForHarness("hermes"), []string{"acp"}),
-		detectHarness("gemini", acpCommandForHarness("gemini"), []string{"--acp", "--experimental-acp"}),
-		detectExternalAdapterHarness("claude-code", "claude-agent-acp", acpCommandForHarness("claude-code")),
-		detectExternalAdapterHarness("codex", "codex-acp", acpCommandForHarness("codex")),
-	}
-	for i := range statuses {
-		statuses[i].Note = harnessNote(statuses[i])
-	}
-	return statuses
-}
-
-func detectExternalAdapterHarness(name, adapterBinary string, command []string) harnessStatus {
-	status := harnessStatus{Name: name, Command: acpCommandForHarness(name)}
-	if len(command) > 0 {
-		status.Command = command
-	}
-	if path, err := exec.LookPath(adapterBinary); err == nil {
-		status.Path = path
-		status.Installed = true
-		status.Supported = true
-		return status
-	}
-	if _, err := exec.LookPath("npx"); err == nil && len(status.Command) > 0 && status.Command[0] == "npx" {
-		status.Installed = true
-		status.Supported = true
-	}
-	return status
-}
-
-func detectHarness(name string, command []string, helpMarkers []string) harnessStatus {
-	status := harnessStatus{Name: name, Command: command}
-	binary := name
-	if name == "claude-code" {
-		binary = "claude"
-	}
-	if len(command) > 0 {
-		binary = command[0]
-	}
-	path, err := exec.LookPath(binary)
-	if err != nil {
-		return status
-	}
-	status.Path = path
-	status.Installed = true
-
-	if len(command) == 0 {
-		return status
-	}
-
-	output, err := exec.Command(binary, "--help").CombinedOutput()
-	if err != nil && len(output) == 0 {
-		return status
-	}
-	help := string(output)
-	for _, marker := range helpMarkers {
-		if strings.Contains(help, marker) {
-			status.Supported = true
-			return status
-		}
-	}
-	return status
-}
-
-func harnessNote(status harnessStatus) string {
-	if !status.Installed {
-		return "binary not found"
-	}
-	if status.Supported {
-		switch status.Name {
-		case "gemini":
-			if os.Getenv("GEMINI_API_KEY") == "" {
-				return "ACP flag present; GEMINI_API_KEY may be required for stdio mode"
-			}
-		case "claude-code", "codex":
-			if status.Path != "" {
-				return "external ACP adapter binary detected"
-			}
-			return "using npx fallback; install adapter binary for offline/runtime stability"
-		}
-		return "native ACP entrypoint detected"
-	}
-	switch status.Name {
-	case "claude-code":
-		return "install claude-agent-acp or make npx available"
-	case "codex":
-		return "install codex-acp or make npx available"
-	default:
-		return "ACP entrypoint not detected"
-	}
-}
-
-type acpForwardOverrides struct {
-	cloudURL          string
-	apiKey            string
-	agentID           string
-	instanceID        string
-	cfClientID        string
-	cfClientSecret    string
-	harness           string
-	command           string
-	workingDir        string
-	tunnelPath        string
-	reconnectInterval time.Duration
-}
-
-func applyACPForwardOverrides(
-	cfg *config.Config,
-	nodeState *store.NodeState,
-	overrides acpForwardOverrides,
-) {
-	if overrides.cloudURL != "" {
-		cfg.Cloud.APIURL = overrides.cloudURL
-		nodeState.CloudAPIURL = overrides.cloudURL
-	}
-	if overrides.apiKey != "" {
-		cfg.Cloud.APIKey = overrides.apiKey
-		nodeState.CloudAPIKey = overrides.apiKey
-	}
-	if overrides.agentID != "" {
-		cfg.Agent.AgentID = overrides.agentID
-		cfg.AgentID = overrides.agentID
-	}
-	if overrides.instanceID != "" {
-		cfg.InstanceID = overrides.instanceID
-	}
-	if overrides.cfClientID != "" {
-		cfg.Cloud.CFClientID = overrides.cfClientID
-	}
-	if overrides.cfClientSecret != "" {
-		cfg.Cloud.CFClientSecret = overrides.cfClientSecret
-	}
-	if overrides.harness != "" {
-		cfg.ACPForwarder.Harness = overrides.harness
-	}
-	if overrides.command != "" {
-		cfg.ACPForwarder.Command = strings.Fields(overrides.command)
-	}
-	if overrides.workingDir != "" {
-		cfg.ACPForwarder.WorkingDir = overrides.workingDir
-	}
-	if overrides.tunnelPath != "" {
-		cfg.ACPForwarder.TunnelPath = overrides.tunnelPath
-	}
-	if overrides.reconnectInterval > 0 {
-		cfg.ACPForwarder.ReconnectInterval = overrides.reconnectInterval
-	}
-}
-
-func postmanTunnelURL(rawBase, tunnelPath, agentID string) (string, error) {
-	if rawBase == "" {
-		return "", fmt.Errorf("cloud url is required")
-	}
-	if agentID == "" {
-		return "", fmt.Errorf("agent id is required")
-	}
-
-	base, err := url.Parse(strings.TrimRight(rawBase, "/"))
-	if err != nil {
-		return "", fmt.Errorf("parse cloud url: %w", err)
-	}
-	switch base.Scheme {
-	case "https":
-		base.Scheme = "wss"
-	case "http":
-		base.Scheme = "ws"
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("unsupported cloud url scheme %q", base.Scheme)
-	}
-	if tunnelPath == "" {
-		tunnelPath = "/api/v1/user/self/agents/{agent_id}/tunnel"
-	}
-	if !strings.HasPrefix(tunnelPath, "/") {
-		tunnelPath = "/" + tunnelPath
-	}
-	path := strings.TrimRight(base.Path, "/") + strings.ReplaceAll(tunnelPath, "{agent_id}", agentID)
-	rawPath := strings.TrimRight(base.EscapedPath(), "/") +
-		strings.ReplaceAll(tunnelPath, "{agent_id}", url.PathEscape(agentID))
-	base.Path = path
-	base.RawPath = rawPath
-	return base.String(), nil
-}
-
-// wsURLFromHTTP derives the WebSocket URL from the HTTP Cloud URL.
-// https://fleet.example.com → wss://fleet.example.com/api/agent/ws
-func wsURLFromHTTP(httpURL string) string {
-	u := strings.TrimRight(httpURL, "/")
-	u = strings.Replace(u, "https://", "wss://", 1)
-	u = strings.Replace(u, "http://", "ws://", 1)
-	return u + "/api/agent/ws"
-}
-
-func registerNodeFromConfig(cfg *config.Config, db *store.Store) *store.NodeState {
-	if cfg.Cloud.APIURL == "" {
-		log.Fatal("cloud.api_url or PAX_CLOUD_URL is required")
-	}
-	if cfg.Cloud.RegistrationToken == "" {
-		log.Fatal("not registered. Run paxd configure or set cloud.registration_token")
-	}
-	client := cloud.NewClient(cfg.Cloud.APIURL, "").
-		WithCloudflareAccess(cfg.Cloud.CFClientID, cfg.Cloud.CFClientSecret)
-	req := &cloud.RegisterNodeRequest{
-		Name:        cfg.Agent.Name,
-		Hostname:    cfg.Agent.Hostname,
-		MachineType: cfg.Agent.MachineType,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		PaxdVersion: version,
-		APIEndpoint: cfg.Hermes.APIEndpoint,
-	}
-	resp, err := client.RegisterNode(req, cfg.Cloud.RegistrationToken)
-	if err != nil {
-		log.Fatalf("register node: %v", err)
-	}
-	nodeState := &store.NodeState{
-		NodeID:       resp.NodeID,
-		CloudAPIKey:  resp.APIKey,
-		CloudAPIURL:  cfg.Cloud.APIURL,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := db.SaveNodeState(nodeState); err != nil {
-		log.Fatalf("save node state: %v", err)
-	}
-	log.Printf("[paxd] registered as node %s", resp.NodeID)
-	return nodeState
-}
-
-func nodeStateFromConfig(cfg *config.Config, db *store.Store) *store.NodeState {
-	if cfg.Cloud.APIKey != "" && cfg.Cloud.NodeID != "" {
-		nodeState := &store.NodeState{
-			NodeID:       cfg.Cloud.NodeID,
-			CloudAPIKey:  cfg.Cloud.APIKey,
-			CloudAPIURL:  cfg.Cloud.APIURL,
-			RegisteredAt: time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := db.SaveNodeState(nodeState); err != nil {
-			log.Fatalf("save node state: %v", err)
-		}
-		return nodeState
-	}
-	return registerNodeFromConfig(cfg, db)
-}
-
-func saveNodeCredential(
-	cfg *config.Config,
-	cloudURL string,
-	nodeID string,
-	apiKey string,
-	configPath string,
-) string {
-	cfg.Cloud.APIURL = cloudURL
-	cfg.Cloud.URL = cloudURL
-	cfg.Cloud.NodeID = nodeID
-	cfg.Cloud.APIKey = apiKey
-	cfg.Cloud.RegistrationToken = ""
-
-	configFile := configPath
-	if configFile == "" {
-		configFile = config.DefaultPath()
-	}
-	if err := os.MkdirAll(filepath.Dir(configFile), 0700); err != nil {
-		log.Fatalf("create config dir: %v", err)
-	}
-	data, err := yamlMarshal(cfg)
-	if err != nil {
-		log.Fatalf("marshal config: %v", err)
-	}
-	if err := os.WriteFile(configFile, data, 0600); err != nil {
-		log.Fatalf("write config: %v", err)
-	}
-	return configFile
-}
-
-func saveNodeState(cfg *config.Config, cloudURL string, nodeID string, apiKey string) {
-	db, err := store.Open(cfg.Daemon.DBPath)
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-	if err := db.SaveNodeState(&store.NodeState{
-		NodeID:       nodeID,
-		CloudAPIKey:  apiKey,
-		CloudAPIURL:  cloudURL,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		log.Fatalf("save node state: %v", err)
-	}
+	sig := <-sigCh
+	log.Printf("[paxd] received signal: %v", sig)
+	_ = sm.Transition(state.STOPPING)
+	_ = sm.Transition(state.STOPPED)
+	log.Printf("[paxd] STOPPED")
 }
 
 func openDaemonStore(path string) (*daemonstore.Store, func(), error) {
@@ -1095,577 +151,424 @@ func closeDaemonStore(store *daemonstore.Store) {
 	}
 }
 
-func syncConfiguredAgents(cfg *config.Config, db *store.Store) error {
-	agents := configuredCloudAgents(cfg)
-	configuredAgentIDs := make([]string, 0, len(agents))
-	for i := range agents {
-		configuredAgentIDs = append(configuredAgentIDs, agents[i].AgentID)
-		if err := db.SaveCloudAgent(&agents[i]); err != nil {
-			return err
-		}
-	}
-	return db.DisableCloudAgentsExcept(configuredAgentIDs)
+const (
+	paxdServiceName   = "paxd"
+	paxdLaunchdLabel  = "com.toddzheng.paxd"
+	paxdServiceLogDir = ".paxd/logs"
+)
+
+type serviceInstallOptions struct {
+	Force         bool
+	System        bool
+	RunAsUser     string
+	Config        string
+	ControlSocket string
+	DebugHTTP     string
 }
 
-func configuredCloudAgents(cfg *config.Config) []store.CloudAgent {
-	runtimeAgents := cfg.RuntimeAgents()
-	agents := make([]store.CloudAgent, 0, len(runtimeAgents))
-	seenAgentIDs := make(map[string]bool, len(runtimeAgents))
-	for _, runtimeAgent := range runtimeAgents {
-		if runtimeAgent.AgentID == "" || seenAgentIDs[runtimeAgent.AgentID] {
-			continue
-		}
-		seenAgentIDs[runtimeAgent.AgentID] = true
-		enabled := true
-		if runtimeAgent.Enabled != nil {
-			enabled = *runtimeAgent.Enabled
-		}
-		agent := store.CloudAgent{
-			AgentID:    runtimeAgent.AgentID,
-			InstanceID: firstNonEmpty(runtimeAgent.InstanceID, runtimeAgent.AgentID),
-			Name:       firstNonEmpty(runtimeAgent.Name, "hermes"),
-			AgentType:  firstNonEmpty(runtimeAgent.AgentType, "hermes"),
-			Enabled:    enabled,
-		}
-		if supportsHermesHTTP(agent.AgentType) {
-			agent.APIEndpoint = firstNonEmpty(runtimeAgent.APIEndpoint, cfg.Hermes.APIEndpoint)
-			agent.APIKeyEnv = firstNonEmpty(runtimeAgent.APIKeyEnv, cfg.Hermes.APIKeyEnv)
-			agent.Profile = runtimeAgent.Profile
-		}
-		agents = append(agents, agent)
-	}
-	return agents
+type serviceTarget struct {
+	GOOS     string
+	ExecPath string
+	Home     string
 }
 
-func buildAgentRuntimes(
-	cfg *config.Config,
-	cloudClient *cloud.Client,
-	db *store.Store,
-) ([]collector.AgentRuntime, map[string]*executor.Executor, error) {
-	agents := configuredCloudAgents(cfg)
-	runtimes := make([]collector.AgentRuntime, 0, len(agents))
-	executors := make(map[string]*executor.Executor, len(agents))
-	for _, agent := range agents {
-		if !agent.Enabled {
-			continue
-		}
-		apiKey, err := hermesAPIKey(agent.APIKeyEnv)
-		if err != nil {
-			log.Printf("[paxd] Hermes API key for agent %s unavailable: %v", agent.AgentID, err)
-		}
-		hermesClient := hermes.NewClient(agent.APIEndpoint, apiKey)
-		runtimes = append(runtimes, collector.AgentRuntime{
-			Agent:              agent,
-			HermesClient:       hermesClient,
-			SupportsHermesHTTP: supportsHermesHTTP(agent.AgentType),
-			ACPSessionLister:   acpSessionListerForAgent(cfg, agent),
-		})
-		executors[agent.AgentID] = executor.New(hermesClient, cloudClient, db, agent.AgentID)
-	}
-	return runtimes, executors, nil
-}
-
-func acpSessionListerForAgent(cfg *config.Config, agent store.CloudAgent) *acpclient.SessionLister {
-	runtimeAgent, ok := runtimeAgentByID(cfg, agent.AgentID)
-	if !ok {
-		return nil
-	}
-	forwardCfg, ok := agentACPForwarderConfig(cfg, &store.NodeState{
-		CloudAPIURL: cfg.Cloud.APIURL,
-		CloudAPIKey: cfg.Cloud.APIKey,
-	}, runtimeAgent)
-	if !ok || len(forwardCfg.Command) == 0 {
-		return nil
-	}
-	return &acpclient.SessionLister{
-		Command:    append([]string(nil), forwardCfg.Command...),
-		WorkingDir: forwardCfg.WorkingDir,
-		Timeout:    10 * time.Second,
-	}
-}
-
-func runtimeAgentByID(cfg *config.Config, agentID string) (config.RuntimeAgentConfig, bool) {
-	for _, agent := range cfg.RuntimeAgents() {
-		if agent.AgentID == agentID {
-			return agent, true
-		}
-	}
-	return config.RuntimeAgentConfig{}, false
-}
-
-func startACPForwarders(
-	ctx context.Context,
-	cfg *config.Config,
-	nodeState *store.NodeState,
-	db *store.Store,
-	history *daemonstore.Store,
-) int {
-	count := 0
-	for _, agent := range cfg.RuntimeAgents() {
-		forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
-		if !ok {
-			continue
-		}
-		forwardCfg.Journal = db
-		forwardCfg.History = history
-		count++
-		go func(forwardCfg acpforwarder.Config) {
-			log.Printf(
-				"[paxd] ACP forwarder enabled for agent %s instance %s (tunnel=%s, command=%q)",
-				forwardCfg.AgentID,
-				forwardCfg.InstanceID,
-				forwardCfg.TunnelPath,
-				forwardCfg.Command,
-			)
-			if err := acpforwarder.New(forwardCfg).Run(ctx); err != nil && ctx.Err() == nil {
-				log.Printf(
-					"[paxd] acp forwarder stopped for agent %s instance %s: %v",
-					forwardCfg.AgentID,
-					forwardCfg.InstanceID,
-					err,
-				)
-			}
-		}(forwardCfg)
-	}
-	return count
-}
-
-func acpForwarderConfig(cfg *config.Config, nodeState *store.NodeState) acpforwarder.Config {
-	agent := firstEnabledRuntimeAgent(cfg)
-	forwardCfg, ok := agentACPForwarderConfig(cfg, nodeState, agent)
-	if ok {
-		return forwardCfg
-	}
-	return acpforwarder.Config{}
-}
-
-func agentACPForwarderConfig(
-	cfg *config.Config,
-	nodeState *store.NodeState,
-	agent config.RuntimeAgentConfig,
-) (acpforwarder.Config, bool) {
-	if !runtimeAgentEnabled(agent) || agent.AgentID == "" {
-		return acpforwarder.Config{}, false
-	}
-	enabled := cfg.ACPForwarder.Enabled
-	if agent.ACPForwarder.Enabled != nil {
-		enabled = *agent.ACPForwarder.Enabled
-	}
-	if !enabled {
-		return acpforwarder.Config{}, false
-	}
-
-	harness := firstNonEmpty(agent.ACPForwarder.Harness, cfg.ACPForwarder.Harness, agent.AgentType)
-	command := cfg.ACPForwarder.Command
-	if len(agent.ACPForwarder.Command) > 0 {
-		command = agent.ACPForwarder.Command
-	}
-	if len(command) == 0 {
-		command = acpCommandForHarness(harness)
-	}
-	return acpforwarder.Config{
-		CloudURL:          firstNonEmpty(nodeState.CloudAPIURL, cfg.Cloud.APIURL),
-		APIKey:            firstNonEmpty(nodeState.CloudAPIKey, cfg.Cloud.APIKey),
-		CFClientID:        cfg.Cloud.CFClientID,
-		CFClientSecret:    cfg.Cloud.CFClientSecret,
-		ConnectionID:      legacyACPConnectionID(agent),
-		AgentID:           agent.AgentID,
-		InstanceID:        agent.InstanceID,
-		Command:           command,
-		WorkingDir:        firstNonEmpty(agent.ACPForwarder.WorkingDir, cfg.ACPForwarder.WorkingDir),
-		TunnelPath:        firstNonEmpty(agent.ACPForwarder.TunnelPath, cfg.ACPForwarder.TunnelPath),
-		ReconnectInterval: firstNonZeroDuration(agent.ACPForwarder.ReconnectInterval, cfg.ACPForwarder.ReconnectInterval),
-	}, true
-}
-
-func legacyACPConnectionID(agent config.RuntimeAgentConfig) string {
-	return firstNonEmpty(agent.InstanceID, agent.AgentID)
-}
-
-func acpCommandForHarness(harness string) []string {
-	switch normalizeHarness(harness) {
-	case "", "custom":
-		return nil
-	case "hermes":
-		return []string{"hermes", "acp"}
-	case "codex":
-		return externalACPAdapterCommand("codex-acp", "@zed-industries/codex-acp")
-	case "claude", "claude-code":
-		return externalACPAdapterCommand("claude-agent-acp", "@agentclientprotocol/claude-agent-acp")
-	case "gemini":
-		return []string{"gemini", "--acp"}
-	case "acp":
-		return nil
-	default:
-		return nil
-	}
-}
-
-func externalACPAdapterCommand(binary, npmPackage string) []string {
-	if _, err := exec.LookPath(binary); err == nil {
-		return []string{binary}
-	}
-	return []string{"npx", "-y", npmPackage}
-}
-
-func normalizeHarness(harness string) string {
-	harness = strings.ToLower(strings.TrimSpace(harness))
-	harness = strings.ReplaceAll(harness, "_", "-")
-	return harness
-}
-
-func supportsHermesHTTP(agentType string) bool {
-	return normalizeHarness(agentType) == "hermes"
-}
-
-func configureHermesAPIEndpoint(cfg *config.Config, specs []configureAgentSpec) string {
-	for _, spec := range specs {
-		if supportsHermesHTTP(spec.Harness) {
-			return cfg.Hermes.APIEndpoint
-		}
-	}
-	return ""
-}
-
-func runtimeAgentConfigFromSpec(agentID string, spec configureAgentSpec, cfg *config.Config) config.RuntimeAgentConfig {
-	enabled := true
-	newAgent := config.RuntimeAgentConfig{
-		AgentID:    agentID,
-		InstanceID: firstNonEmpty(spec.InstanceID, spec.Name, agentID),
-		Name:       spec.Name,
-		AgentType:  spec.Harness,
-		Enabled:    &enabled,
-		ACPForwarder: config.AgentACPForwarderConfig{
-			Enabled: &enabled,
-			Harness: spec.Harness,
-			Command: acpCommandForHarness(spec.Harness),
+func cmdServiceCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "service",
+		Usage: "manage paxd as a background service",
+		Commands: []*cli.Command{
+			{
+				Name:  "install",
+				Usage: "install launchd/systemd service",
+				Flags: serviceInstallFlags(),
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					opts := serviceInstallOptions{
+						Force:         cmd.Bool("force"),
+						System:        cmd.Bool("system"),
+						RunAsUser:     cmd.String("run-as-user"),
+						Config:        cmd.String("config"),
+						ControlSocket: cmd.String("control-socket"),
+						DebugHTTP:     cmd.String("debug-http"),
+					}
+					return serviceInstall(opts)
+				},
+			},
+			serviceLifecycleCommand("start"),
+			serviceLifecycleCommand("stop"),
+			serviceLifecycleCommand("restart"),
+			serviceLifecycleCommand("status"),
+			serviceLifecycleCommand("uninstall"),
 		},
 	}
-	if supportsHermesHTTP(spec.Harness) {
-		newAgent.APIEndpoint = cfg.Hermes.APIEndpoint
-		newAgent.APIKeyEnv = cfg.Hermes.APIKeyEnv
-		newAgent.Profile = cfg.Hermes.Profile
-	}
-	return newAgent
 }
 
-func applyPrimaryConfiguredAgent(cfg *config.Config, agent config.RuntimeAgentConfig, spec configureAgentSpec) {
-	cfg.Agent.AgentID = agent.AgentID
-	cfg.AgentID = agent.AgentID
-	cfg.InstanceID = firstNonEmpty(agent.InstanceID, spec.InstanceID, spec.Name, "default")
-	cfg.ACPForwarder.Enabled = true
-	cfg.ACPForwarder.Harness = spec.Harness
-	cfg.ACPForwarder.Command = acpCommandForHarness(spec.Harness)
+func serviceInstallFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.BoolFlag{Name: "force", Usage: "overwrite existing service definition"},
+		&cli.BoolFlag{Name: "system", Usage: "install as a Linux system service"},
+		&cli.StringFlag{Name: "run-as-user", Usage: "user account for Linux system service"},
+		&cli.StringFlag{Name: "config", Usage: "config path passed to paxd run"},
+		&cli.StringFlag{Name: "control-socket", Usage: "Unix socket path passed to paxd run"},
+		&cli.StringFlag{Name: "debug-http", Usage: "loopback debug HTTP address passed to paxd run"},
+	}
 }
 
-func configUsesHermesHTTP(cfg *config.Config) bool {
-	if len(cfg.Agents) == 0 {
-		return true
+func serviceLifecycleCommand(action string) *cli.Command {
+	return &cli.Command{
+		Name:  action,
+		Usage: action + " installed service",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "system", Usage: "target Linux system service"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return serviceControl(action, cmd.Bool("system"))
+		},
 	}
-	for _, agent := range cfg.Agents {
-		if supportsHermesHTTP(agent.AgentType) {
-			return true
-		}
-	}
-	return false
 }
 
-func normalizeConfigureHarness(harness string) string {
-	harness = normalizeHarness(harness)
-	if harness == "claude" {
-		return "claude-code"
-	}
-	return harness
-}
-
-func parseConfigureAgentSpecs(values []string, defaultHarness string) ([]configureAgentSpec, error) {
-	if len(values) == 0 {
-		harness := normalizeConfigureHarness(defaultHarness)
-		if harness == "" {
-			harness = "codex"
-		}
-		return []configureAgentSpec{{
-			Name:       harness,
-			Harness:    harness,
-			InstanceID: "default",
-		}}, nil
-	}
-
-	specs := make([]configureAgentSpec, 0, len(values))
-	for _, value := range values {
-		parts := strings.Split(value, ":")
-		if len(parts) < 2 || len(parts) > 3 {
-			return nil, fmt.Errorf("--agent %q must be name:harness[:instance_id]", value)
-		}
-		name := strings.TrimSpace(parts[0])
-		harness := normalizeConfigureHarness(parts[1])
-		instanceID := ""
-		if len(parts) == 3 {
-			instanceID = strings.TrimSpace(parts[2])
-		}
-		if name == "" {
-			return nil, fmt.Errorf("--agent %q has empty name", value)
-		}
-		if harness == "" {
-			return nil, fmt.Errorf("--agent %q has empty harness", value)
-		}
-		specs = append(specs, configureAgentSpec{
-			Name:       name,
-			Harness:    harness,
-			InstanceID: firstNonEmpty(instanceID, name),
-		})
-	}
-	return specs, nil
-}
-
-func promptLine(prompt string) string {
-	fmt.Fprint(os.Stderr, prompt)
-	reader := bufio.NewReader(os.Stdin)
-	text, _ := reader.ReadString('\n')
-	return strings.TrimSpace(text)
-}
-
-func configureWouldReplaceExistingAgents(path string, cfg *config.Config) bool {
-	if !configFileExists(path) {
-		return false
-	}
-	return len(cfg.Agents) > 0 || cfg.Agent.AgentID != "" || cfg.AgentID != ""
-}
-
-func configFileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}
-
-func explicitAgentsForAppend(cfg *config.Config) []config.RuntimeAgentConfig {
-	if len(cfg.Agents) > 0 {
-		return append([]config.RuntimeAgentConfig(nil), cfg.Agents...)
-	}
-	agents := cfg.RuntimeAgents()
-	if len(agents) == 0 || agents[0].AgentID == "" {
-		return nil
-	}
-	return agents
-}
-
-func confirmReplaceConfigure(path string, agents []config.RuntimeAgentConfig) bool {
-	fmt.Fprintf(os.Stderr, "paxd configure will replace existing agents in %s.\n", path)
-	for _, agent := range agents {
-		if agent.AgentID == "" {
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "  - %s (%s, instance=%s)\n",
-			agent.AgentID,
-			firstNonEmpty(agent.AgentType, "unknown"),
-			firstNonEmpty(agent.InstanceID, "default"),
-		)
-	}
-	answer := strings.ToLower(promptLine("Continue? [y/N]: "))
-	return answer == "y" || answer == "yes"
-}
-
-func firstEnabledRuntimeAgent(cfg *config.Config) config.RuntimeAgentConfig {
-	for _, agent := range cfg.RuntimeAgents() {
-		if runtimeAgentEnabled(agent) {
-			return agent
-		}
-	}
-	return config.RuntimeAgentConfig{}
-}
-
-func runtimeAgentEnabled(agent config.RuntimeAgentConfig) bool {
-	return agent.Enabled == nil || *agent.Enabled
-}
-
-func firstNonZeroDuration(values ...time.Duration) time.Duration {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
-}
-
-func hermesAPIKey(path string) (string, error) {
-	if value := os.Getenv("HERMES_API_KEY"); value != "" {
-		return value, nil
-	}
-	if path == "" {
-		return "", nil
-	}
-	return config.ReadEnvKey(path)
-}
-
-// cmdInstallService generates a macOS launchd plist.
-func cmdInstallService() {
-	if runtime.GOOS != "darwin" {
-		fmt.Fprintln(os.Stderr, "install-service only supported on macOS")
-		os.Exit(1)
-	}
-
+func serviceTargetFromRuntime() (serviceTarget, error) {
 	execPath, err := os.Executable()
 	if err != nil {
-		log.Fatalf("get executable path: %v", err)
+		return serviceTarget{}, fmt.Errorf("get executable path: %w", err)
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return serviceTarget{}, fmt.Errorf("get home dir: %w", err)
+	}
+	return serviceTarget{GOOS: runtime.GOOS, ExecPath: execPath, Home: home}, nil
+}
 
-	home, _ := os.UserHomeDir()
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+func serviceInstall(opts serviceInstallOptions) error {
+	target, err := serviceTargetFromRuntime()
+	if err != nil {
+		return err
+	}
+	switch target.GOOS {
+	case "darwin":
+		if opts.System {
+			return fmt.Errorf("--system is only supported on Linux")
+		}
+		return installLaunchdService(target, opts)
+	case "linux":
+		return installSystemdService(target, opts)
+	default:
+		return fmt.Errorf("background service install is not supported on %s", target.GOOS)
+	}
+}
+
+func serviceControl(action string, system bool) error {
+	target, err := serviceTargetFromRuntime()
+	if err != nil {
+		return err
+	}
+	switch target.GOOS {
+	case "darwin":
+		if system {
+			return fmt.Errorf("--system is only supported on Linux")
+		}
+		return launchdControl(target, action)
+	case "linux":
+		return systemdControl(action, system)
+	default:
+		return fmt.Errorf("background service control is not supported on %s", target.GOOS)
+	}
+}
+
+func installLaunchdService(target serviceTarget, opts serviceInstallOptions) error {
+	plistPath := launchdPlistPath(target.Home)
+	if !opts.Force && fileExists(plistPath) {
+		fmt.Printf("Service already installed at: %s\n", plistPath)
+		fmt.Println("Use --force to reinstall")
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		return fmt.Errorf("create launch agents dir: %w", err)
+	}
+	if err := os.MkdirAll(serviceLogDir(target.Home), 0755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(generateLaunchdPlist(target, opts)), 0644); err != nil {
+		return fmt.Errorf("write launchd plist: %w", err)
+	}
+	fmt.Printf("LaunchAgent installed at: %s\n", plistPath)
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("  paxd service start")
+	fmt.Println("  paxd service status")
+	fmt.Printf("  tail -f %s\n", filepath.Join(serviceLogDir(target.Home), "paxd.log"))
+	return nil
+}
+
+func installSystemdService(target serviceTarget, opts serviceInstallOptions) error {
+	if opts.System && os.Geteuid() != 0 {
+		return fmt.Errorf("system service install requires root; re-run with sudo")
+	}
+	unitPath := systemdUnitPath(target.Home, opts.System)
+	if !opts.Force && fileExists(unitPath) {
+		fmt.Printf("Service already installed at: %s\n", unitPath)
+		fmt.Println("Use --force to reinstall")
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
+		return fmt.Errorf("create systemd unit dir: %w", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(generateSystemdUnit(target, opts)), 0644); err != nil {
+		return fmt.Errorf("write systemd unit: %w", err)
+	}
+	if err := runCommandArgs(systemctlArgs("daemon-reload", opts.System)); err != nil {
+		return err
+	}
+	if err := runCommandArgs(systemctlArgs("enable", opts.System, paxdServiceName)); err != nil {
+		return err
+	}
+	fmt.Printf("Systemd %s service installed at: %s\n", serviceScope(opts.System), unitPath)
+	fmt.Println()
+	fmt.Println("Next steps:")
+	prefix := ""
+	scope := ""
+	if opts.System {
+		prefix = "sudo "
+		scope = " --system"
+	}
+	fmt.Printf("  %spaxd service start%s\n", prefix, scope)
+	fmt.Printf("  %spaxd service status%s\n", prefix, scope)
+	fmt.Printf("  %sjournalctl%s -u %s -f\n", prefix, journalctlScope(opts.System), paxdServiceName)
+	return nil
+}
+
+func launchdControl(target serviceTarget, action string) error {
+	plistPath := launchdPlistPath(target.Home)
+	label := paxdLaunchdLabel
+	switch action {
+	case "start":
+		return runCommand("launchctl", "bootstrap", launchdDomain(), plistPath)
+	case "stop":
+		return runCommand("launchctl", "bootout", launchdDomain()+"/"+label)
+	case "restart":
+		if err := runCommand("launchctl", "bootout", launchdDomain()+"/"+label); err != nil {
+			return err
+		}
+		return runCommand("launchctl", "bootstrap", launchdDomain(), plistPath)
+	case "status":
+		return runCommand("launchctl", "print", launchdDomain()+"/"+label)
+	case "uninstall":
+		_ = runCommand("launchctl", "bootout", launchdDomain()+"/"+label)
+		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove launchd plist: %w", err)
+		}
+		fmt.Printf("LaunchAgent removed: %s\n", plistPath)
+		return nil
+	default:
+		return fmt.Errorf("unknown service action %q", action)
+	}
+}
+
+func systemdControl(action string, system bool) error {
+	switch action {
+	case "start", "stop", "restart", "status":
+		return runCommandArgs(systemctlArgs(action, system, paxdServiceName))
+	case "uninstall":
+		_ = runCommandArgs(systemctlArgs("stop", system, paxdServiceName))
+		_ = runCommandArgs(systemctlArgs("disable", system, paxdServiceName))
+		target, err := serviceTargetFromRuntime()
+		if err != nil {
+			return err
+		}
+		unitPath := systemdUnitPath(target.Home, system)
+		if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove systemd unit: %w", err)
+		}
+		if err := runCommandArgs(systemctlArgs("daemon-reload", system)); err != nil {
+			return err
+		}
+		fmt.Printf("Systemd %s service removed: %s\n", serviceScope(system), unitPath)
+		return nil
+	default:
+		return fmt.Errorf("unknown service action %q", action)
+	}
+}
+
+var runCommand = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+func runCommandArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing command")
+	}
+	return runCommand(args[0], args[1:]...)
+}
+
+func generateLaunchdPlist(target serviceTarget, opts serviceInstallOptions) string {
+	args := serviceRunArgs(target.ExecPath, opts)
+	var programArgs strings.Builder
+	for _, arg := range args {
+		programArgs.WriteString("        <string>")
+		programArgs.WriteString(xmlEscape(arg))
+		programArgs.WriteString("</string>\n")
+	}
+	logDir := serviceLogDir(target.Home)
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.toddzheng.paxd</string>
+    <string>%s</string>
     <key>ProgramArguments</key>
     <array>
-        <string>%s</string>
-        <string>run</string>
-    </array>
+%s    </array>
+    <key>WorkingDirectory</key>
+    <string>%s</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>%s/.pax/paxd.log</string>
+    <string>%s</string>
     <key>StandardErrorPath</key>
-    <string>%s/.pax/paxd.log</string>
+    <string>%s</string>
 </dict>
 </plist>
-`, execPath, home, home)
-
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.toddzheng.paxd.plist")
-	os.MkdirAll(filepath.Dir(plistPath), 0755)
-
-	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
-		log.Fatalf("write plist: %v", err)
-	}
-
-	fmt.Printf("LaunchAgent installed at: %s\n", plistPath)
-	fmt.Println("\nTo start:")
-	fmt.Printf("  launchctl load %s\n", plistPath)
-	fmt.Println("\nTo stop:")
-	fmt.Printf("  launchctl unload %s\n", plistPath)
+`, paxdLaunchdLabel, programArgs.String(), xmlEscape(target.Home), xmlEscape(filepath.Join(logDir, "paxd.log")), xmlEscape(filepath.Join(logDir, "paxd.error.log")))
 }
 
-// yamlMarshal is a quick inline YAML marshaler.
-func yamlMarshal(cfg *config.Config) ([]byte, error) {
-	var sb strings.Builder
-	sb.WriteString("# paxd configuration\n")
-	if len(cfg.Agents) == 0 {
-		sb.WriteString(fmt.Sprintf("agent_id: %s\n", yamlQuote(cfg.AgentID)))
-		sb.WriteString(fmt.Sprintf("instance_id: %s\n", yamlQuote(cfg.InstanceID)))
+func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) string {
+	args := serviceRunArgs(target.ExecPath, opts)
+	lines := []string{
+		"[Unit]",
+		"Description=Pax Fleet Daemon",
+		"After=network-online.target",
+		"Wants=network-online.target",
+		"StartLimitIntervalSec=0",
+		"",
+		"[Service]",
+		"Type=simple",
 	}
-	sb.WriteString("agent:\n")
-	if len(cfg.Agents) == 0 {
-		sb.WriteString(fmt.Sprintf("  agent_id: %s\n", yamlQuote(cfg.Agent.AgentID)))
-	}
-	sb.WriteString(fmt.Sprintf("  name: %s\n  machine_type: %s\n  hostname: %s\n",
-		yamlQuote(cfg.Agent.Name),
-		yamlQuote(cfg.Agent.MachineType),
-		yamlQuote(cfg.Agent.Hostname)))
-	sb.WriteString(fmt.Sprintf("cloud:\n  api_url: %s\n  node_id: %s\n  api_key: %s\n",
-		yamlQuote(cfg.Cloud.APIURL),
-		yamlQuote(cfg.Cloud.NodeID),
-		yamlQuote(cfg.Cloud.APIKey)))
-	if cfg.Cloud.CFClientID != "" || cfg.Cloud.CFClientSecret != "" {
-		sb.WriteString(fmt.Sprintf("  cf_client_id: %s\n  cf_client_secret: %s\n",
-			yamlQuote(cfg.Cloud.CFClientID),
-			yamlQuote(cfg.Cloud.CFClientSecret)))
-	}
-	if configUsesHermesHTTP(cfg) {
-		sb.WriteString(fmt.Sprintf("hermes:\n  api_endpoint: %s\n  api_key_from_env: %s\n  profile: %s\n",
-			yamlQuote(cfg.Hermes.APIEndpoint),
-			yamlQuote(cfg.Hermes.APIKeyEnv),
-			yamlQuote(cfg.Hermes.Profile)))
-	}
-	if len(cfg.Agents) > 0 {
-		sb.WriteString("agents:\n")
-		for _, agent := range cfg.Agents {
-			enabled := true
-			if agent.Enabled != nil {
-				enabled = *agent.Enabled
-			}
-			sb.WriteString(fmt.Sprintf("  - agent_id: %s\n    instance_id: %s\n    name: %s\n    agent_type: %s\n",
-				yamlQuote(agent.AgentID),
-				yamlQuote(agent.InstanceID),
-				yamlQuote(agent.Name),
-				yamlQuote(agent.AgentType)))
-			if supportsHermesHTTP(agent.AgentType) {
-				sb.WriteString(fmt.Sprintf("    api_endpoint: %s\n    api_key_from_env: %s\n    profile: %s\n",
-					yamlQuote(agent.APIEndpoint),
-					yamlQuote(agent.APIKeyEnv),
-					yamlQuote(agent.Profile)))
-			}
-			sb.WriteString(fmt.Sprintf("    enabled: %t\n", enabled))
-			if agentACPForwarderConfigSet(agent.ACPForwarder) {
-				sb.WriteString("    acp_forwarder:\n")
-				if agent.ACPForwarder.Enabled != nil {
-					sb.WriteString(fmt.Sprintf("      enabled: %t\n", *agent.ACPForwarder.Enabled))
-				}
-				if agent.ACPForwarder.Harness != "" {
-					sb.WriteString(fmt.Sprintf("      harness: %s\n", yamlQuote(agent.ACPForwarder.Harness)))
-				}
-				if len(agent.ACPForwarder.Command) > 0 {
-					sb.WriteString(fmt.Sprintf("      command: %s\n", yamlStringList(agent.ACPForwarder.Command)))
-				}
-				if agent.ACPForwarder.WorkingDir != "" {
-					sb.WriteString(fmt.Sprintf("      working_dir: %s\n", yamlQuote(agent.ACPForwarder.WorkingDir)))
-				}
-				if agent.ACPForwarder.TunnelPath != "" {
-					sb.WriteString(fmt.Sprintf("      tunnel_path: %s\n", yamlQuote(agent.ACPForwarder.TunnelPath)))
-				}
-				if agent.ACPForwarder.ReconnectInterval > 0 {
-					sb.WriteString(fmt.Sprintf("      reconnect_interval: %s\n", agent.ACPForwarder.ReconnectInterval))
-				}
-			}
+	if opts.System {
+		user := strings.TrimSpace(opts.RunAsUser)
+		if user == "" {
+			user = defaultRunAsUser()
+		}
+		if user != "" {
+			lines = append(lines, "User="+user)
 		}
 	}
-	sb.WriteString(fmt.Sprintf("daemon:\n  poll_interval: %s\n  status_interval: %s\n  reconcile_interval: %s\n  log_level: %s\n  db_path: %s\n",
-		cfg.Daemon.PollInterval,
-		cfg.Daemon.StatusInterval,
-		cfg.Daemon.ReconcileInterval,
-		yamlQuote(cfg.Daemon.LogLevel),
-		yamlQuote(cfg.Daemon.DBPath)))
-	sb.WriteString(fmt.Sprintf("acp_forwarder:\n  enabled: %t\n  harness: %s\n  command: %s\n  working_dir: %s\n  tunnel_path: %s\n  reconnect_interval: %s\n",
-		cfg.ACPForwarder.Enabled,
-		yamlQuote(cfg.ACPForwarder.Harness),
-		yamlStringList(cfg.ACPForwarder.Command),
-		yamlQuote(cfg.ACPForwarder.WorkingDir),
-		yamlQuote(cfg.ACPForwarder.TunnelPath),
-		cfg.ACPForwarder.ReconnectInterval))
-	return []byte(sb.String()), nil
-}
-
-func agentACPForwarderConfigSet(cfg config.AgentACPForwarderConfig) bool {
-	return cfg.Enabled != nil ||
-		cfg.Harness != "" ||
-		len(cfg.Command) > 0 ||
-		cfg.WorkingDir != "" ||
-		cfg.TunnelPath != "" ||
-		cfg.ReconnectInterval > 0
-}
-
-func yamlQuote(value string) string {
-	return fmt.Sprintf("%q", value)
-}
-
-func yamlStringList(values []string) string {
-	if len(values) == 0 {
-		return "[]"
+	lines = append(lines,
+		"ExecStart="+joinSystemdArgs(args),
+		"WorkingDirectory="+quoteSystemdArg(target.Home),
+		"Restart=always",
+		"RestartSec=5",
+		"KillMode=mixed",
+		"KillSignal=SIGTERM",
+		"TimeoutStopSec=90",
+		"StandardOutput=journal",
+		"StandardError=journal",
+		"",
+		"[Install]",
+	)
+	if opts.System {
+		lines = append(lines, "WantedBy=multi-user.target")
+	} else {
+		lines = append(lines, "WantedBy=default.target")
 	}
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, fmt.Sprintf("%q", value))
-	}
-	return "[" + strings.Join(quoted, ", ") + "]"
+	return strings.Join(lines, "\n") + "\n"
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
+func serviceRunArgs(execPath string, opts serviceInstallOptions) []string {
+	args := []string{execPath, "run"}
+	if opts.Config != "" {
+		args = append(args, "--config", opts.Config)
+	}
+	if opts.ControlSocket != "" {
+		args = append(args, "--control-socket", opts.ControlSocket)
+	}
+	if opts.DebugHTTP != "" {
+		args = append(args, "--debug-http", opts.DebugHTTP)
+	}
+	return args
+}
+
+func systemctlArgs(action string, system bool, rest ...string) []string {
+	args := []string{"systemctl"}
+	if !system {
+		args = append(args, "--user")
+	}
+	args = append(args, action)
+	return append(args, rest...)
+}
+
+func launchdPlistPath(home string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", paxdLaunchdLabel+".plist")
+}
+
+func systemdUnitPath(home string, system bool) string {
+	if system {
+		return filepath.Join(string(filepath.Separator), "etc", "systemd", "system", paxdServiceName+".service")
+	}
+	return filepath.Join(home, ".config", "systemd", "user", paxdServiceName+".service")
+}
+
+func serviceLogDir(home string) string {
+	return filepath.Join(home, filepath.FromSlash(paxdServiceLogDir))
+}
+
+func serviceScope(system bool) string {
+	if system {
+		return "system"
+	}
+	return "user"
+}
+
+func journalctlScope(system bool) string {
+	if system {
+		return ""
+	}
+	return " --user"
+}
+
+func launchdDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func joinSystemdArgs(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, quoteSystemdArg(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func quoteSystemdArg(arg string) string {
+	return strconv.Quote(arg)
+}
+
+func xmlEscape(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return replacer.Replace(value)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func defaultRunAsUser() string {
+	for _, key := range []string{"SUDO_USER", "USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" && value != "root" {
 			return value
 		}
 	}

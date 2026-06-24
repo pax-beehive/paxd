@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 )
 
 var (
@@ -161,11 +162,21 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 		return failedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
 	}
 
-	if wakeRemotes && s.supervisors != nil {
-		s.supervisors.WakeRemotes()
+	if wakeRemotes {
+		if s.supervisors != nil {
+			log.Printf("[paxd] control command=%s type=%s waking remote supervisor", cmd.CommandID, cmd.Type)
+			s.supervisors.WakeRemotes()
+		} else {
+			log.Printf("[paxd] control command=%s type=%s needs remote reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
+		}
 	}
-	if wakeAgents && s.supervisors != nil {
-		s.supervisors.WakeAgentConnections()
+	if wakeAgents {
+		if s.supervisors != nil {
+			log.Printf("[paxd] control command=%s type=%s waking agent connection supervisor", cmd.CommandID, cmd.Type)
+			s.supervisors.WakeAgentConnections()
+		} else {
+			log.Printf("[paxd] control command=%s type=%s needs agent connection reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
+		}
 	}
 	return ack, nil
 }

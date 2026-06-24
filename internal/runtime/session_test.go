@@ -118,6 +118,19 @@ func TestHeartbeatReadMessageMarksActivity(t *testing.T) {
 	assert.JSONEq(t, `{"ok":true}`, string(payload))
 }
 
+func TestHeartbeatPongMarksActivity(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	hb := newHeartbeatConn(conn, HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: 30 * time.Millisecond})
+	hb.Start()
+	defer hb.Close()
+
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, conn.pong("heartbeat"))
+	time.Sleep(20 * time.Millisecond)
+
+	assert.False(t, hb.TimedOut())
+}
+
 func TestAgentTunnelSessionMissingCloudAgentIDIsConfigExit(t *testing.T) {
 	dialer := &fakeDialer{conn: newFakeWebSocketConn()}
 	session := NewAgentTunnelSession(AgentConnectionSpec{
@@ -563,6 +576,7 @@ type fakeWebSocketConn struct {
 	writeErr           error
 	readErrWhenDrained error
 	writeLog           []fakeWSWrite
+	pongHandler        func(string) error
 }
 
 func newFakeWebSocketConn() *fakeWebSocketConn {
@@ -607,6 +621,22 @@ func (c *fakeWebSocketConn) Close() error {
 		close(c.closeCh)
 	}
 	return nil
+}
+
+func (c *fakeWebSocketConn) SetPongHandler(handler func(string) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pongHandler = handler
+}
+
+func (c *fakeWebSocketConn) pong(appData string) error {
+	c.mu.Lock()
+	handler := c.pongHandler
+	c.mu.Unlock()
+	if handler == nil {
+		return nil
+	}
+	return handler(appData)
 }
 
 func (c *fakeWebSocketConn) writes() []fakeWSWrite {

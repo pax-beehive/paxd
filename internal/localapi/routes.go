@@ -13,7 +13,7 @@ func NewHandler(service control.Service) http.Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.service == nil {
+	if h.service == nil && !isDocumentationRequest(r) {
 		writeControlError(w, http.StatusInternalServerError, control.ControlError{Code: control.ErrCodeInternal, Message: "control service is not configured"})
 		return
 	}
@@ -21,6 +21,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) routes() {
+	h.mux.HandleFunc("GET /docs", h.routeDocsGet)
+	h.mux.HandleFunc("GET /openapi.json", h.routeOpenAPIGet)
+
 	h.mux.HandleFunc("GET /v1/status", h.routeStatusGet)
 	h.mux.HandleFunc("GET /v1/remotes", h.routeRemotesList)
 	h.mux.HandleFunc("POST /v1/remotes", h.routeRemoteCreate)

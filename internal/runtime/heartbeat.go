@@ -30,6 +30,10 @@ func (c *lockedWebSocketConn) Close() error {
 	return c.conn.Close()
 }
 
+type pongHandlerConn interface {
+	SetPongHandler(func(string) error)
+}
+
 type heartbeatConn struct {
 	*lockedWebSocketConn
 
@@ -43,12 +47,19 @@ type heartbeatConn struct {
 
 func newHeartbeatConn(conn WebSocketConn, cfg HeartbeatConfig) *heartbeatConn {
 	cfg = cfg.WithDefaults()
-	return &heartbeatConn{
+	heartbeat := &heartbeatConn{
 		lockedWebSocketConn: &lockedWebSocketConn{conn: conn},
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		lastActivity:        time.Now(),
 	}
+	if pongConn, ok := conn.(pongHandlerConn); ok {
+		pongConn.SetPongHandler(func(string) error {
+			heartbeat.markActivity()
+			return nil
+		})
+	}
+	return heartbeat
 }
 
 func (c *heartbeatConn) ReadMessage() (int, []byte, error) {

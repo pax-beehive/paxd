@@ -3,10 +3,13 @@ package daemonstore
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -84,6 +87,16 @@ func TestOpenSQLite(t *testing.T) {
 	if !store.DB().Migrator().HasTable("remote") {
 		t.Fatal("OpenSQLite store did not migrate remote table")
 	}
+}
+
+func TestOpenSQLiteCreatesMissingParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "nested", "daemonstore.db")
+
+	store, err := OpenSQLite(path)
+
+	require.NoError(t, err)
+	require.NoError(t, store.Migrate(context.Background()))
+	assert.FileExists(t, path)
 }
 
 func TestRemoteRepositoryCreateUpdateRestartAndDuplicate(t *testing.T) {
@@ -342,7 +355,6 @@ func TestAgentConnectionRepository(t *testing.T) {
 	newAgentType := "codex"
 	newHarness := "codex"
 	newCommand := []string{"codex", "--json"}
-	newTunnelPath := "/api/v2/agent/tunnel"
 	newEnv := map[string]string{"PAX_PROFILE": "dev"}
 	enabled := false
 	desiredState := control.DesiredStateStopped
@@ -354,7 +366,6 @@ func TestAgentConnectionRepository(t *testing.T) {
 		AgentType:    &newAgentType,
 		Harness:      &newHarness,
 		Command:      &newCommand,
-		TunnelPath:   &newTunnelPath,
 		Env:          &newEnv,
 		Enabled:      &enabled,
 		DesiredState: &desiredState,
@@ -392,7 +403,10 @@ func TestAgentConnectionRepository(t *testing.T) {
 func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	_, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api.example.test"))
+	remoteCommand := createRemoteCommand("remote_prod", "https://api.example.test")
+	remoteCommand.Remote.NodeControlPath = "/api/v2/node/control"
+	remoteCommand.Remote.AgentTunnelPath = "/api/v2/agent/tunnel"
+	_, err := store.CreateRemote(ctx, remoteCommand)
 	if err != nil {
 		t.Fatalf("CreateRemote(remote_prod) error = %v", err)
 	}
@@ -426,14 +440,14 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDesiredRemotes() error = %v", err)
 	}
-	if len(remoteSpecs) != 1 || remoteSpecs[0].RemoteID != "remote_prod" {
+	if len(remoteSpecs) != 1 || remoteSpecs[0].RemoteID != "remote_prod" || remoteSpecs[0].NodeControlPath != "/api/v2/node/control" {
 		t.Fatalf("remote specs = %+v", remoteSpecs)
 	}
 	connSpecs, err := store.ListDesiredAgentConnections(ctx)
 	if err != nil {
 		t.Fatalf("ListDesiredAgentConnections() error = %v", err)
 	}
-	if len(connSpecs) != 1 || connSpecs[0].ConnectionID != "conn_codex" || connSpecs[0].Env["PAX_PROFILE"] != "prod" {
+	if len(connSpecs) != 1 || connSpecs[0].ConnectionID != "conn_codex" || connSpecs[0].Env["PAX_PROFILE"] != "prod" || connSpecs[0].TunnelPath != "/api/v2/agent/tunnel" {
 		t.Fatalf("connection specs = %+v", connSpecs)
 	}
 

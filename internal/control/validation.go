@@ -126,6 +126,8 @@ func (cmd UpdateRemoteCommand) Validate() error {
 func (patch RemotePatch) IsZero() bool {
 	return patch.Name == nil &&
 		patch.CloudAPIURL == nil &&
+		patch.NodeControlPath == nil &&
+		patch.AgentTunnelPath == nil &&
 		patch.NodeID == nil &&
 		patch.Enabled == nil &&
 		patch.IsDefault == nil
@@ -209,7 +211,7 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 	if strings.TrimSpace(cmd.ConnectionID) == "" {
 		return invalid("update_agent_connection.connection_id", "connection id is required")
 	}
-	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.TunnelPath == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil {
+	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil {
 		return invalid("update_agent_connection", "at least one update field is required")
 	}
 	if cmd.Command != nil {

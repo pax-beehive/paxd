@@ -85,20 +85,24 @@ type Command struct {
 }
 
 type Remote struct {
-	ID          string `json:"id,omitempty"`
-	Name        string `json:"name"`
-	CloudAPIURL string `json:"cloud_api_url"`
-	NodeID      string `json:"node_id,omitempty"`
-	Enabled     *bool  `json:"enabled,omitempty"`
-	IsDefault   *bool  `json:"is_default,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Name            string `json:"name"`
+	CloudAPIURL     string `json:"cloud_api_url"`
+	NodeControlPath string `json:"node_control_path,omitempty"`
+	AgentTunnelPath string `json:"agent_tunnel_path,omitempty"`
+	NodeID          string `json:"node_id,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
+	IsDefault       *bool  `json:"is_default,omitempty"`
 }
 
 type RemotePatch struct {
-	Name        *string `json:"name,omitempty"`
-	CloudAPIURL *string `json:"cloud_api_url,omitempty"`
-	NodeID      *string `json:"node_id,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
-	IsDefault   *bool   `json:"is_default,omitempty"`
+	Name            *string `json:"name,omitempty"`
+	CloudAPIURL     *string `json:"cloud_api_url,omitempty"`
+	NodeControlPath *string `json:"node_control_path,omitempty"`
+	AgentTunnelPath *string `json:"agent_tunnel_path,omitempty"`
+	NodeID          *string `json:"node_id,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
+	IsDefault       *bool   `json:"is_default,omitempty"`
 }
 
 type CreateRemoteCommand struct {
@@ -170,7 +174,6 @@ type CreateAgentConnectionCommand struct {
 	Harness      string            `json:"harness"`
 	Command      []string          `json:"command"`
 	WorkingDir   string            `json:"working_dir,omitempty"`
-	TunnelPath   string            `json:"tunnel_path,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
 	Enabled      *bool             `json:"enabled,omitempty"`
 	DesiredState DesiredState      `json:"desired_state,omitempty"`
@@ -185,7 +188,6 @@ type UpdateAgentConnectionCommand struct {
 	Harness      *string            `json:"harness,omitempty"`
 	Command      *[]string          `json:"command,omitempty"`
 	WorkingDir   *string            `json:"working_dir,omitempty"`
-	TunnelPath   *string            `json:"tunnel_path,omitempty"`
 	Env          *map[string]string `json:"env,omitempty"`
 	Enabled      *bool              `json:"enabled,omitempty"`
 	DesiredState *DesiredState      `json:"desired_state,omitempty"`
@@ -386,7 +388,6 @@ type AgentConnectionView struct {
 	Harness      string            `json:"harness"`
 	Command      []string          `json:"command"`
 	WorkingDir   string            `json:"working_dir,omitempty"`
-	TunnelPath   string            `json:"tunnel_path,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
 	Enabled      bool              `json:"enabled"`
 	DesiredState DesiredState      `json:"desired_state"`

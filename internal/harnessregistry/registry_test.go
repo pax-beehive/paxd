@@ -78,7 +78,10 @@ func TestDetectorErrorBecomesDegradedStatusAndDiscoveryContinues(t *testing.T) {
 
 func TestCommandDetectorReportsAvailableAndMissingCommands(t *testing.T) {
 	lookup := fakeLookup{
-		paths: map[string]string{"codex": "/usr/local/bin/codex"},
+		paths: map[string]string{
+			"codex": "/usr/local/bin/codex",
+			"npx":   "/usr/local/bin/npx",
+		},
 	}
 	detector := CommandDetector{
 		Harness:     "codex",
@@ -97,7 +100,7 @@ func TestCommandDetectorReportsAvailableAndMissingCommands(t *testing.T) {
 		DisplayName: "Codex",
 		State:       StateAvailable,
 		Capability:  CapabilityACP,
-		Command:     []string{"/usr/local/bin/codex", "--acp"},
+		Command:     []string{"codex", "--acp"},
 		Source:      "native",
 		InstallHint: "install codex",
 	}, got)
@@ -108,6 +111,29 @@ func TestCommandDetectorReportsAvailableAndMissingCommands(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateMissing, got.State)
 	assert.Equal(t, []string{"gemini"}, got.Command)
+
+	fallback := CommandDetector{
+		Harness:         "claude-code",
+		DisplayName:     "Claude Code",
+		Command:         []string{"claude-agent-acp"},
+		FallbackCommand: []string{"npx", "-y", "@agentclientprotocol/claude-agent-acp"},
+		Lookup:          lookup,
+	}
+	got, err = fallback.Detect(context.Background(), control.DiscoverHarnessesQuery{})
+
+	require.NoError(t, err)
+	assert.Equal(t, StateAvailable, got.State)
+	assert.Equal(t, []string{"npx", "-y", "@agentclientprotocol/claude-agent-acp"}, got.Command)
+}
+
+func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
+	detectors := DefaultDetectors()
+	names := make([]string, 0, len(detectors))
+	for _, detector := range detectors {
+		names = append(names, detector.Name())
+	}
+
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini"}, names)
 }
 
 type fakeStore struct {

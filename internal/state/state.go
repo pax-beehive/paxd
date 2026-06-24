@@ -1,6 +1,6 @@
 // Package state implements the daemon state machine.
 //
-// States: STARTING → REGISTERING → RUNNING → STOPPING → STOPPED
+// States: STARTING → RUNNING → STOPPING → STOPPED
 package state
 
 import (
@@ -13,7 +13,6 @@ type State int
 
 const (
 	STARTING State = iota
-	REGISTERING
 	RUNNING
 	STOPPING
 	STOPPED
@@ -24,8 +23,6 @@ func (s State) String() string {
 	switch s {
 	case STARTING:
 		return "STARTING"
-	case REGISTERING:
-		return "REGISTERING"
 	case RUNNING:
 		return "RUNNING"
 	case STOPPING:
@@ -39,9 +36,9 @@ func (s State) String() string {
 
 // Machine manages daemon lifecycle state with thread-safe transitions.
 type Machine struct {
-	mu    sync.RWMutex
-	state State
-	ctx   context.Context
+	mu     sync.RWMutex
+	state  State
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
@@ -88,8 +85,6 @@ func (m *Machine) Transition(to State) error {
 func (m *Machine) allowed(to State) bool {
 	switch m.state {
 	case STARTING:
-		return to == REGISTERING || to == STOPPING
-	case REGISTERING:
 		return to == RUNNING || to == STOPPING
 	case RUNNING:
 		return to == STOPPING

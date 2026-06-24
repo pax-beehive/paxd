@@ -79,13 +79,14 @@ type CommandLookup interface {
 }
 
 type CommandDetector struct {
-	Harness     string
-	DisplayName string
-	Capability  string
-	Command     []string
-	Source      string
-	InstallHint string
-	Lookup      CommandLookup
+	Harness         string
+	DisplayName     string
+	Capability      string
+	Command         []string
+	FallbackCommand []string
+	Source          string
+	InstallHint     string
+	Lookup          CommandLookup
 }
 
 func (d CommandDetector) Name() string {
@@ -114,15 +115,65 @@ func (d CommandDetector) Detect(ctx context.Context, req control.DiscoverHarness
 	if lookup == nil {
 		lookup = osLookup{}
 	}
-	path, err := lookup.LookPath(d.Command[0])
+	_, err := lookup.LookPath(d.Command[0])
 	if err != nil {
+		if len(d.FallbackCommand) > 0 && strings.TrimSpace(d.FallbackCommand[0]) != "" {
+			if _, fallbackErr := lookup.LookPath(d.FallbackCommand[0]); fallbackErr == nil {
+				view.State = StateAvailable
+				view.Command = append([]string(nil), d.FallbackCommand...)
+				return view, nil
+			}
+		}
 		view.State = StateMissing
 		view.Command = append([]string(nil), d.Command...)
 		return view, nil
 	}
 	view.State = StateAvailable
-	view.Command = append([]string{path}, d.Command[1:]...)
+	view.Command = append([]string(nil), d.Command...)
 	return view, nil
+}
+
+func DefaultDetectors() []Detector {
+	return []Detector{
+		CommandDetector{
+			Harness:     "hermes",
+			DisplayName: "Hermes",
+			Command:     []string{"hermes", "acp"},
+			Source:      "native",
+			InstallHint: "install hermes with ACP support",
+		},
+		CommandDetector{
+			Harness:     "codex",
+			DisplayName: "Codex",
+			Command:     []string{"codex-acp"},
+			FallbackCommand: []string{
+				"npx",
+				"-y",
+				"@zed-industries/codex-acp",
+			},
+			Source:      "official",
+			InstallHint: "install codex-acp or make npx available",
+		},
+		CommandDetector{
+			Harness:     "claude-code",
+			DisplayName: "Claude Code",
+			Command:     []string{"claude-agent-acp"},
+			FallbackCommand: []string{
+				"npx",
+				"-y",
+				"@agentclientprotocol/claude-agent-acp",
+			},
+			Source:      "official",
+			InstallHint: "install claude-agent-acp or make npx available",
+		},
+		CommandDetector{
+			Harness:     "gemini",
+			DisplayName: "Gemini",
+			Command:     []string{"gemini", "--acp"},
+			Source:      "native",
+			InstallHint: "install gemini with ACP support",
+		},
+	}
 }
 
 type osLookup struct{}

@@ -45,6 +45,8 @@ orphaned_messages remove with old Hermes/mailbox executor path
 id TEXT PRIMARY KEY
 name TEXT NOT NULL
 cloud_api_url TEXT NOT NULL
+node_control_path TEXT NOT NULL DEFAULT '/api/v1/node/control'
+agent_tunnel_path TEXT NOT NULL DEFAULT '/api/v1/agent/tunnel'
 node_id TEXT
 cloud_api_key_ref TEXT
 enabled INTEGER NOT NULL DEFAULT 1
@@ -60,6 +62,8 @@ UNIQUE(cloud_api_url)
 Notes:
 
 - `cloud_api_url` defines the Pax manager endpoint.
+- `node_control_path` defines the manager WebSocket path for remote node-control.
+- `agent_tunnel_path` defines the manager WebSocket path for agent ACP tunnels under this remote.
 - `node_id` is the Pax manager node identity for that remote.
 - `cloud_api_key_ref` is a secret ref for the Pax node key used to authenticate outbound manager calls.
 - Cloudflare Access and future gateway credentials do not live in this table.
@@ -147,7 +151,6 @@ agent_type TEXT NOT NULL
 harness TEXT NOT NULL
 command_json TEXT NOT NULL
 working_dir TEXT NOT NULL DEFAULT ''
-tunnel_path TEXT NOT NULL DEFAULT '/api/v1/agent/tunnel'
 env_json TEXT NOT NULL DEFAULT '{}'
 enabled INTEGER NOT NULL DEFAULT 1
 desired_state TEXT NOT NULL         -- running | stopped | deleted

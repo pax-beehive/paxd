@@ -3,11 +3,17 @@ package daemonstore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/control"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
@@ -29,11 +35,35 @@ func WithClock(now func() time.Time) Option {
 }
 
 func OpenSQLite(path string, opts ...Option) (*Store, error) {
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err := ensureParentDir(path); err != nil {
+		return nil, err
+	}
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  true,
+		}),
+	})
 	if err != nil {
 		return nil, err
 	}
 	return New(db, opts...), nil
+}
+
+func ensureParentDir(path string) error {
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create db dir: %w", err)
+	}
+	return nil
 }
 
 func New(db *gorm.DB, opts ...Option) *Store {

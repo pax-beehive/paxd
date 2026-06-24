@@ -139,12 +139,13 @@ func TestControlCommandsPersistDesiredStateAndWakeSupervisors(t *testing.T) {
 	remoteSession := requireRemoteSession(t, remoteFactory, 0)
 	requireStarted(t, remoteSession)
 	assert.Equal(t, []runtimes.RemoteSpec{{
-		RemoteID:     "remote_prod",
-		Name:         "Production",
-		CloudAPIURL:  "https://api.example.test",
-		NodeID:       "node_1",
-		Generation:   1,
-		RestartNonce: 0,
+		RemoteID:        "remote_prod",
+		Name:            "Production",
+		CloudAPIURL:     "https://api.example.test",
+		NodeControlPath: "/api/v1/node/control",
+		NodeID:          "node_1",
+		Generation:      1,
+		RestartNonce:    0,
 	}}, remoteFactory.specs())
 	requireRemotePhase(t, service, "remote_prod", "connecting", 1)
 
@@ -321,12 +322,14 @@ func createRemoteCommand(commandID string) control.Command {
 		Type:      control.CommandRemoteCreate,
 		CreateRemote: &control.CreateRemoteCommand{
 			Remote: control.Remote{
-				ID:          "remote_prod",
-				Name:        "Production",
-				CloudAPIURL: "https://api.example.test",
-				NodeID:      "node_1",
-				Enabled:     &enabled,
-				IsDefault:   &isDefault,
+				ID:              "remote_prod",
+				Name:            "Production",
+				CloudAPIURL:     "https://api.example.test",
+				NodeControlPath: "/api/v1/node/control",
+				AgentTunnelPath: "/api/v1/agent/tunnel",
+				NodeID:          "node_1",
+				Enabled:         &enabled,
+				IsDefault:       &isDefault,
 			},
 			CloudAPIKeyRef: "env:PAX_NODE_KEY",
 		},
@@ -347,7 +350,6 @@ func createAgentConnectionCommand(commandID string) control.Command {
 			Harness:      "codex",
 			Command:      []string{"codex", "--acp"},
 			WorkingDir:   "/workspace/project",
-			TunnelPath:   "/api/v1/agent/tunnel",
 			Env:          map[string]string{"PAX_PROFILE": "prod"},
 			Enabled:      &enabled,
 			DesiredState: control.DesiredStateRunning,

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -123,6 +124,7 @@ func NewRemoteSupervisor(opts RemoteSupervisorOptions) *RemoteSupervisor {
 		writeStatus:   remoteStatusWriter(opts.Store),
 	}
 	return &RemoteSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredRemotes, ops, baseOptions{
+		Name:              "remote",
 		Clock:             opts.Clock,
 		ReconcileInterval: opts.ReconcileInterval,
 		Backoff:           opts.Backoff,
@@ -150,6 +152,7 @@ func NewAgentConnectionSupervisor(opts AgentConnectionSupervisorOptions) *AgentC
 		writeStatus:   agentConnectionStatusWriter(opts.Store),
 	}
 	return &AgentConnectionSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredAgentConnections, ops, baseOptions{
+		Name:              "agent_connection",
 		Clock:             opts.Clock,
 		ReconcileInterval: opts.ReconcileInterval,
 		Backoff:           opts.Backoff,
@@ -164,6 +167,7 @@ func (s *AgentConnectionSupervisor) Reconcile(ctx context.Context) error {
 }
 
 type baseOptions struct {
+	Name              string
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
@@ -171,6 +175,7 @@ type baseOptions struct {
 
 type baseSupervisor[S any] struct {
 	mu          sync.Mutex
+	name        string
 	listDesired func(context.Context) ([]S, error)
 	ops         slotOps[S]
 	clock       Clock
@@ -189,7 +194,12 @@ func newBaseSupervisor[S any](listDesired func(context.Context) ([]S, error), op
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+	name := opts.Name
+	if name == "" {
+		name = "runtime"
+	}
 	return &baseSupervisor[S]{
+		name:        name,
 		listDesired: listDesired,
 		ops:         ops,
 		clock:       clock,
@@ -201,7 +211,9 @@ func newBaseSupervisor[S any](listDesired func(context.Context) ([]S, error), op
 }
 
 func (s *baseSupervisor[S]) Start(ctx context.Context) error {
+	log.Printf("[paxd] %s supervisor starting interval=%s", s.name, s.interval)
 	if err := s.Reconcile(ctx); err != nil {
+		log.Printf("[paxd] %s supervisor initial reconcile failed: %v", s.name, err)
 		return err
 	}
 	ticker := time.NewTicker(s.interval)
@@ -209,14 +221,19 @@ func (s *baseSupervisor[S]) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("[paxd] %s supervisor stopping: %v", s.name, ctx.Err())
 			s.stopAll(ctx)
 			return ctx.Err()
 		case <-s.wake:
+			log.Printf("[paxd] %s supervisor wake received", s.name)
 			if err := s.Reconcile(ctx); err != nil {
+				log.Printf("[paxd] %s supervisor reconcile after wake failed: %v", s.name, err)
 				return err
 			}
 		case <-ticker.C:
+			log.Printf("[paxd] %s supervisor periodic reconcile", s.name)
 			if err := s.Reconcile(ctx); err != nil {
+				log.Printf("[paxd] %s supervisor periodic reconcile failed: %v", s.name, err)
 				return err
 			}
 		}
@@ -226,32 +243,53 @@ func (s *baseSupervisor[S]) Start(ctx context.Context) error {
 func (s *baseSupervisor[S]) Wake() {
 	select {
 	case s.wake <- struct{}{}:
+		log.Printf("[paxd] %s supervisor wake queued", s.name)
 	default:
+		log.Printf("[paxd] %s supervisor wake already pending", s.name)
 	}
 }
 
 func (s *baseSupervisor[S]) Reconcile(ctx context.Context) error {
 	desired, err := s.listDesired(ctx)
 	if err != nil {
+		log.Printf("[paxd] %s supervisor list desired failed: %v", s.name, err)
 		return err
 	}
 	seen := make(map[string]struct{}, len(desired))
+	valid := 0
+	created := 0
 	for _, spec := range desired {
 		id := s.ops.id(spec)
 		if id == "" {
+			log.Printf("[paxd] %s supervisor skipped desired item with empty id", s.name)
 			continue
 		}
+		valid++
 		seen[id] = struct{}{}
-		slot := s.slot(id)
+		slot, isNew := s.slot(id)
+		if isNew {
+			created++
+		}
 		slot.ApplyDesired(spec)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	stopped := 0
 	for id, slot := range s.slots {
 		if _, ok := seen[id]; !ok {
+			stopped++
 			slot.Stop("not_desired")
 		}
 	}
+	log.Printf(
+		"[paxd] %s supervisor reconcile done desired=%d valid=%d slots=%d created=%d stopped=%d",
+		s.name,
+		len(desired),
+		valid,
+		len(s.slots),
+		created,
+		stopped,
+	)
 	return nil
 }
 
@@ -265,15 +303,16 @@ func (s *baseSupervisor[S]) Snapshot() Snapshot {
 	return out
 }
 
-func (s *baseSupervisor[S]) slot(id string) *runtimeSlot[S] {
+func (s *baseSupervisor[S]) slot(id string) (*runtimeSlot[S], bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if slot, ok := s.slots[id]; ok {
-		return slot
+		return slot, false
 	}
-	slot := newRuntimeSlot(id, s.ops, s.clock, s.backoff)
+	log.Printf("[paxd] %s supervisor creating slot id=%s", s.name, id)
+	slot := newRuntimeSlot(s.name, id, s.ops, s.clock, s.backoff)
 	s.slots[id] = slot
-	return slot
+	return slot, true
 }
 
 func (s *baseSupervisor[S]) stopAll(ctx context.Context) {
@@ -303,6 +342,7 @@ type statusWrite struct {
 
 type runtimeSlot[S any] struct {
 	mu             sync.Mutex
+	supervisorName string
 	id             string
 	ops            slotOps[S]
 	clock          Clock
@@ -319,13 +359,14 @@ type runtimeSlot[S any] struct {
 	pending        bool
 }
 
-func newRuntimeSlot[S any](id string, ops slotOps[S], clock Clock, backoff BackoffPolicy) *runtimeSlot[S] {
+func newRuntimeSlot[S any](supervisorName string, id string, ops slotOps[S], clock Clock, backoff BackoffPolicy) *runtimeSlot[S] {
 	return &runtimeSlot[S]{
-		id:      id,
-		ops:     ops,
-		clock:   clock,
-		backoff: backoff.withDefaults(),
-		phase:   PhaseStopped,
+		supervisorName: supervisorName,
+		id:             id,
+		ops:            ops,
+		clock:          clock,
+		backoff:        backoff.withDefaults(),
+		phase:          PhaseStopped,
 	}
 }
 
@@ -336,6 +377,12 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 	changed := !s.hasDesired ||
 		s.ops.generation(s.desired) != s.ops.generation(spec) ||
 		s.ops.restartNonce(s.desired) != s.ops.restartNonce(spec)
+	oldGeneration := int64(0)
+	oldRestartNonce := int64(0)
+	if s.hasDesired {
+		oldGeneration = s.ops.generation(s.desired)
+		oldRestartNonce = s.ops.restartNonce(s.desired)
+	}
 	s.desired = spec
 	s.hasDesired = true
 	if !changed {
@@ -344,12 +391,22 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 		}
 	}
 	if s.timer != nil {
+		log.Printf("[paxd] %s slot id=%s canceling backoff timer for updated desired", s.supervisorName, s.id)
 		s.stopTimerLocked()
 	}
 	if s.currentCancel != nil {
+		log.Printf(
+			"[paxd] %s slot id=%s interrupting running session old_generation=%d new_generation=%d old_restart_nonce=%d new_restart_nonce=%d",
+			s.supervisorName,
+			s.id,
+			oldGeneration,
+			s.ops.generation(spec),
+			oldRestartNonce,
+			s.ops.restartNonce(spec),
+		)
 		s.pending = true
 		s.phase = string(runtimes.PhaseStopping)
-		_ = s.writeStatusLocked(spec, statusWrite{Phase: s.phase, At: s.clock.Now()})
+		s.writeStatusLoggedLocked(spec, statusWrite{Phase: s.phase, At: s.clock.Now()})
 		s.currentCancel()
 		return
 	}
@@ -359,6 +416,7 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 func (s *runtimeSlot[S]) Stop(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	log.Printf("[paxd] %s slot id=%s stop requested reason=%s", s.supervisorName, s.id, reason)
 	s.hasDesired = false
 	s.pending = false
 	if s.timer != nil {
@@ -371,7 +429,7 @@ func (s *runtimeSlot[S]) Stop(reason string) {
 	}
 	if s.phase != PhaseStopped {
 		s.phase = PhaseStopped
-		_ = s.writeStatusLocked(s.desired, statusWrite{
+		s.writeStatusLoggedLocked(s.desired, statusWrite{
 			Phase: PhaseStopped,
 			Exit:  runtimes.TerminalExit("stopped", reason),
 			At:    s.clock.Now(),
@@ -410,7 +468,16 @@ func (s *runtimeSlot[S]) startLocked() {
 	s.pending = false
 	s.backoffUntil = nil
 	s.phase = s.ops.startingPhase
-	_ = s.writeStatusLocked(spec, statusWrite{
+	log.Printf(
+		"[paxd] %s slot id=%s starting session generation=%d restart_nonce=%d reconnect_attempt=%d phase=%s",
+		s.supervisorName,
+		s.id,
+		s.ops.generation(spec),
+		s.ops.restartNonce(spec),
+		s.reconnects,
+		s.phase,
+	)
+	s.writeStatusLoggedLocked(spec, statusWrite{
 		Phase:            s.phase,
 		ReconnectAttempt: s.reconnects,
 		At:               s.clock.Now(),
@@ -424,18 +491,29 @@ func (s *runtimeSlot[S]) startLocked() {
 func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	log.Printf(
+		"[paxd] %s slot id=%s session exited attempt=%d class=%s code=%s message=%q",
+		s.supervisorName,
+		s.id,
+		attemptID,
+		exit.Class,
+		exit.Code,
+		exit.Message,
+	)
 	if attemptID != s.currentAttempt {
-		_ = s.writeStatusLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
+		log.Printf("[paxd] %s slot id=%s ignoring stale session exit attempt=%d current_attempt=%d", s.supervisorName, s.id, attemptID, s.currentAttempt)
+		s.writeStatusLoggedLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
 		return
 	}
 	s.currentCancel = nil
 	if !s.hasDesired {
 		s.phase = PhaseStopped
-		_ = s.writeStatusLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
+		s.writeStatusLoggedLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
 		return
 	}
 	if s.ops.generation(spec) != s.ops.generation(s.desired) ||
 		s.ops.restartNonce(spec) != s.ops.restartNonce(s.desired) {
+		log.Printf("[paxd] %s slot id=%s restarting for newer desired", s.supervisorName, s.id)
 		s.reconnects = 0
 		s.startLocked()
 		return
@@ -448,7 +526,8 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		next := s.clock.Now().Add(delay)
 		s.backoffUntil = &next
 		s.phase = PhaseBackoff
-		_ = s.writeStatusLocked(spec, statusWrite{
+		log.Printf("[paxd] %s slot id=%s entering backoff attempt=%d delay=%s next_retry=%s", s.supervisorName, s.id, s.reconnects, delay, next.Format(time.RFC3339))
+		s.writeStatusLoggedLocked(spec, statusWrite{
 			Phase:            PhaseBackoff,
 			Exit:             ensureExit(exit, runtimes.TransientExit("session_ended", "runtime session ended")),
 			ReconnectAttempt: s.reconnects,
@@ -458,7 +537,8 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		s.startTimerLocked(delay)
 	case runtimes.ExitAuth, runtimes.ExitConfig:
 		s.phase = PhaseFailed
-		_ = s.writeStatusLocked(spec, statusWrite{
+		log.Printf("[paxd] %s slot id=%s failed terminally class=%s code=%s message=%q", s.supervisorName, s.id, exit.Class, exit.Code, exit.Message)
+		s.writeStatusLoggedLocked(spec, statusWrite{
 			Phase:            PhaseFailed,
 			Exit:             exit,
 			ReconnectAttempt: s.reconnects,
@@ -466,7 +546,8 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		})
 	case runtimes.ExitTerminal:
 		s.phase = PhaseStopped
-		_ = s.writeStatusLocked(spec, statusWrite{
+		log.Printf("[paxd] %s slot id=%s stopped class=%s code=%s message=%q", s.supervisorName, s.id, exit.Class, exit.Code, exit.Message)
+		s.writeStatusLoggedLocked(spec, statusWrite{
 			Phase:            PhaseStopped,
 			Exit:             exit,
 			ReconnectAttempt: s.reconnects,
@@ -474,7 +555,8 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		})
 	default:
 		s.phase = PhaseFailed
-		_ = s.writeStatusLocked(spec, statusWrite{
+		log.Printf("[paxd] %s slot id=%s returned invalid exit class=%s", s.supervisorName, s.id, exit.Class)
+		s.writeStatusLoggedLocked(spec, statusWrite{
 			Phase: PhaseFailed,
 			Exit:  runtimes.ConfigExit("invalid_exit_class", "runtime session returned invalid exit class"),
 			At:    s.clock.Now(),
@@ -490,6 +572,7 @@ func (s *runtimeSlot[S]) startTimerLocked(delay time.Duration) {
 	token := s.timerToken
 	go func() {
 		<-timer.C()
+		log.Printf("[paxd] %s slot id=%s backoff timer fired token=%d", s.supervisorName, s.id, token)
 		s.handleTimer(token)
 	}()
 }
@@ -502,6 +585,7 @@ func (s *runtimeSlot[S]) handleTimer(token int64) {
 	}
 	s.timer = nil
 	s.backoffUntil = nil
+	log.Printf("[paxd] %s slot id=%s restarting after backoff", s.supervisorName, s.id)
 	s.startLocked()
 }
 
@@ -516,6 +600,12 @@ func (s *runtimeSlot[S]) stopTimerLocked() {
 
 func (s *runtimeSlot[S]) writeStatusLocked(spec S, write statusWrite) error {
 	return s.ops.writeStatus(context.Background(), spec, write)
+}
+
+func (s *runtimeSlot[S]) writeStatusLoggedLocked(spec S, write statusWrite) {
+	if err := s.writeStatusLocked(spec, write); err != nil {
+		log.Printf("[paxd] %s slot id=%s write status failed phase=%s: %v", s.supervisorName, s.id, write.Phase, err)
+	}
 }
 
 func remoteStatusWriter(store RemoteStore) func(context.Context, runtimes.RemoteSpec, statusWrite) error {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,14 +74,17 @@ func NewAgentTunnelSession(spec AgentConnectionSpec, deps AgentTunnelSessionDeps
 
 func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	if exit := s.validate(); exit.Class != "" {
+		log.Printf("[paxd] agent tunnel id=%s validation failed class=%s code=%s message=%q", s.spec.ConnectionID, exit.Class, exit.Code, exit.Message)
 		return exit
 	}
 	header, err := s.deps.Headers.Headers(ctx, s.spec.RemoteID)
 	if err != nil {
+		log.Printf("[paxd] agent tunnel id=%s auth headers failed remote_id=%s: %v", s.spec.ConnectionID, s.spec.RemoteID, err)
 		return AuthExit("auth_headers_failed", err.Error())
 	}
 	wsURL, err := websocketURLFromHTTP(s.spec.CloudAPIURL, firstNonEmpty(s.spec.TunnelPath, DefaultAgentTunnelPath))
 	if err != nil {
+		log.Printf("[paxd] agent tunnel id=%s invalid cloud url %q: %v", s.spec.ConnectionID, s.spec.CloudAPIURL, err)
 		return ConfigExit("invalid_cloud_url", err.Error())
 	}
 	q := wsURL.Query()
@@ -92,12 +96,15 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	wsURL.RawQuery = q.Encode()
 
 	s.emit(PhaseConnecting, nil)
+	log.Printf("[paxd] agent tunnel id=%s dialing %s", s.spec.ConnectionID, wsURL.Redacted())
 	conn, resp, err := s.deps.Dialer.Dial(ctx, wsURL.String(), header)
 	closeResponse(resp)
 	if err != nil {
+		log.Printf("[paxd] agent tunnel id=%s dial failed status=%d err=%v", s.spec.ConnectionID, responseStatus(resp), err)
 		return classifyDialExit(err, resp)
 	}
 	if conn == nil {
+		log.Printf("[paxd] agent tunnel id=%s dialer returned nil connection", s.spec.ConnectionID)
 		return TransientExit("dial_no_connection", "websocket dialer returned nil connection")
 	}
 
@@ -110,6 +117,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 
 	s.emit(PhaseConnected, nil)
 	s.emit(PhaseStarting, nil)
+	log.Printf("[paxd] agent tunnel id=%s starting local ACP command=%q working_dir=%q", s.spec.ConnectionID, strings.Join(s.spec.Command, " "), s.spec.WorkingDir)
 	proc, err := s.deps.LocalACPProcessRunner.Start(ctx, LocalACPProcessSpec{
 		Command:    s.spec.Command,
 		WorkingDir: s.spec.WorkingDir,
@@ -117,6 +125,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	})
 	if err != nil {
 		_ = hbConn.Close()
+		log.Printf("[paxd] agent tunnel id=%s local ACP start failed: %v", s.spec.ConnectionID, err)
 		return classifyProcessStartExit(err)
 	}
 	defer s.terminateProcess(proc)
@@ -124,13 +133,16 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 
 	engine := s.newReliableEngine(hbConn, proc.Stdin())
 	if err := s.replayInbound(ctx, engine); err != nil {
+		log.Printf("[paxd] agent tunnel id=%s replay inbound failed: %v", s.spec.ConnectionID, err)
 		return TransientExit("replay_inbound_failed", err.Error())
 	}
 	if err := s.replayOutbound(ctx, engine); err != nil {
+		log.Printf("[paxd] agent tunnel id=%s replay outbound failed: %v", s.spec.ConnectionID, err)
 		return TransientExit("replay_outbound_failed", err.Error())
 	}
 
 	s.emit(PhaseRunning, nil)
+	log.Printf("[paxd] agent tunnel id=%s running", s.spec.ConnectionID)
 	errCh := make(chan error, 3)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -153,6 +165,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	_ = proc.Stdin().Close()
 
 	if hbConn.TimedOut() {
+		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
 		return TransientExit("heartbeat_timeout", "websocket heartbeat timed out")
 	}
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {

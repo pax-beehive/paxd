@@ -77,12 +77,13 @@ type AgentTunnelSessionFactory interface {
 }
 
 type RemoteSpec struct {
-	RemoteID     string
-	Name         string
-	CloudAPIURL  string
-	NodeID       string
-	Generation   int64
-	RestartNonce int64
+	RemoteID        string
+	Name            string
+	CloudAPIURL     string
+	NodeControlPath string
+	NodeID          string
+	Generation      int64
+	RestartNonce    int64
 }
 
 type AgentConnectionSpec struct {

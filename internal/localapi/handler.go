@@ -157,7 +157,10 @@ func (h *Handler) routeCommandGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) routeNotFound(w http.ResponseWriter, r *http.Request) {
-	_ = r
+	if r.Method == http.MethodGet && r.URL.Path == "/" {
+		h.routeDocsGet(w, r)
+		return
+	}
 	writeControlError(w, http.StatusNotFound, control.ControlError{Code: control.ErrCodeNotFound, Message: "route not found"})
 }
 

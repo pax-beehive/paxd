@@ -8,6 +8,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,6 +78,9 @@ type OrphanedMessage struct {
 
 // Open opens (or creates) the SQLite database at the given path.
 func Open(path string) (*Store, error) {
+	if err := ensureParentDir(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
@@ -91,6 +96,20 @@ func Open(path string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func ensureParentDir(path string) error {
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create db dir: %w", err)
+	}
+	return nil
 }
 
 // Close closes the database.

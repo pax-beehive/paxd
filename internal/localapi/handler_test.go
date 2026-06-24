@@ -11,7 +11,83 @@ import (
 
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/testkit/controltest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestDocsPageAndOpenAPIJSONAreServedWithoutControlService(t *testing.T) {
+	handler := NewHandler(nil)
+
+	docs := httptest.NewRecorder()
+	handler.ServeHTTP(docs, httptest.NewRequest(http.MethodGet, "/docs", nil))
+
+	require.Equal(t, http.StatusOK, docs.Code)
+	assert.Contains(t, docs.Header().Get("Content-Type"), "text/html")
+	assert.Contains(t, docs.Body.String(), "paxd debug API")
+	assert.Contains(t, docs.Body.String(), "/openapi.json")
+	assert.Contains(t, docs.Body.String(), "Request JSON")
+
+	specResponse := httptest.NewRecorder()
+	handler.ServeHTTP(specResponse, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+
+	require.Equal(t, http.StatusOK, specResponse.Code)
+	assert.Contains(t, specResponse.Header().Get("Content-Type"), "application/json")
+
+	var spec map[string]any
+	require.NoError(t, json.Unmarshal(specResponse.Body.Bytes(), &spec))
+	assert.Equal(t, "3.0.3", spec["openapi"])
+	assert.Contains(t, spec["paths"], "/v1/status")
+
+	paths := spec["paths"].(map[string]any)
+	remotes := paths["/v1/remotes"].(map[string]any)
+	postRemote := remotes["post"].(map[string]any)
+	requestBody := postRemote["requestBody"].(map[string]any)
+	content := requestBody["content"].(map[string]any)
+	jsonMedia := content["application/json"].(map[string]any)
+	example := jsonMedia["example"].(map[string]any)
+	assert.Contains(t, example, "remote")
+}
+
+func TestRootServesDocsPage(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Endpoints")
+}
+
+func TestDocumentedEndpointsAreRoutable(t *testing.T) {
+	handler := NewHandler(docsRouteService{})
+
+	for _, endpoint := range localAPIEndpoints() {
+		t.Run(endpoint.Method+" "+endpoint.Path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(endpoint.Method, docsRouteRequestPath(endpoint), strings.NewReader(docsRouteBody(endpoint)))
+			req.Header.Set(commandIDHeader, "cmd_docs_route")
+			if endpoint.RequestBody != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			handler.ServeHTTP(rec, req)
+
+			assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
+			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+func TestOpenAPIPathsMatchEndpointRegistry(t *testing.T) {
+	spec := openAPISpec()
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+
+	for _, endpoint := range localAPIEndpoints() {
+		operations, ok := paths[endpoint.Path].(map[string]any)
+		require.True(t, ok, endpoint.Path)
+		assert.Contains(t, operations, methodKey(endpoint.Method))
+	}
+}
 
 func TestGetRemotesMapsToControlQuery(t *testing.T) {
 	service := controltest.NewMockService(t)
@@ -432,6 +508,68 @@ func (s *captureService) HandleQuery(ctx context.Context, src control.Source, qu
 	_ = ctx
 	_ = src
 	return control.QueryResult{Type: query.Type}, nil
+}
+
+type docsRouteService struct{}
+
+func (s docsRouteService) HandleCommand(ctx context.Context, src control.Source, cmd control.Command) (control.CommandAck, error) {
+	_ = ctx
+	_ = src
+	return control.CommandAck{CommandID: cmd.CommandID, OK: true, Status: control.CommandStatusReceived}, nil
+}
+
+func (s docsRouteService) HandleQuery(ctx context.Context, src control.Source, query control.Query) (control.QueryResult, error) {
+	_ = ctx
+	_ = src
+	return control.QueryResult{Type: query.Type}, nil
+}
+
+func docsRouteRequestPath(endpoint apiEndpoint) string {
+	path := strings.ReplaceAll(endpoint.Path, "{id}", "docs_id")
+	switch endpoint.Path {
+	case "/v1/remotes":
+		if endpoint.Method == http.MethodGet {
+			return path + "?include_disabled=true"
+		}
+	case "/v1/remotes/{id}":
+		if endpoint.Method == http.MethodDelete {
+			return path + "?cascade_agent_connections=true"
+		}
+	case "/v1/agent-connections":
+		if endpoint.Method == http.MethodGet {
+			return path + "?remote_id=default&include_disabled=true"
+		}
+	case "/v1/agent-connections/{id}":
+		if endpoint.Method == http.MethodDelete {
+			return path + "?deregister=true"
+		}
+	case "/v1/harnesses":
+		return path + "?include_missing=true"
+	case "/v1/local/sessions":
+		return path + "?agent=codex&limit=1"
+	}
+	return path
+}
+
+func docsRouteBody(endpoint apiEndpoint) string {
+	switch endpoint.RequestBody {
+	case "CreateRemoteCommand":
+		return `{"remote":{"id":"default","name":"Default","cloud_api_url":"https://api.example.test"}}`
+	case "UpdateRemoteCommand":
+		return `{"remote":{"enabled":true}}`
+	case "ConfigureRemoteAuthCommand":
+		return `{"kind":"none"}`
+	case "CreateAgentConnectionCommand":
+		return `{"remote_id":"default","name":"codex","instance_id":"default","agent_type":"codex","harness":"codex","command":["codex"]}`
+	case "UpdateAgentConnectionCommand":
+		return `{"enabled":true}`
+	case "DiscoverHarnessesQuery":
+		return `{"probe":true}`
+	case "SyncLocalSessionsQuery":
+		return `{"agent":"codex","limit":1}`
+	default:
+		return ""
+	}
 }
 
 func mustJSON(t *testing.T, value any) []byte {

@@ -67,6 +67,11 @@ type AgentConnectionBindingUpdate struct {
 	CloudAgentID       string
 }
 
+const (
+	defaultNodeControlPath = "/api/v1/node/control"
+	defaultAgentTunnelPath = "/api/v1/agent/tunnel"
+)
+
 func (s *Store) CreateRemote(ctx context.Context, cmd control.CreateRemoteCommand) (control.RemoteView, error) {
 	now := s.currentTime()
 	id := strings.TrimSpace(cmd.Remote.ID)
@@ -74,17 +79,19 @@ func (s *Store) CreateRemote(ctx context.Context, cmd control.CreateRemoteComman
 		id = "remote_" + strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cmd.Remote.Name), " ", "_"))
 	}
 	remote := Remote{
-		ID:             id,
-		Name:           cmd.Remote.Name,
-		CloudAPIURL:    cmd.Remote.CloudAPIURL,
-		NodeID:         cmd.Remote.NodeID,
-		CloudAPIKeyRef: cmd.CloudAPIKeyRef,
-		Enabled:        boolDefault(cmd.Remote.Enabled, true),
-		IsDefault:      boolDefault(cmd.Remote.IsDefault, false),
-		Generation:     1,
-		RestartNonce:   0,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:              id,
+		Name:            cmd.Remote.Name,
+		CloudAPIURL:     cmd.Remote.CloudAPIURL,
+		NodeControlPath: stringDefault(cmd.Remote.NodeControlPath, defaultNodeControlPath),
+		AgentTunnelPath: stringDefault(cmd.Remote.AgentTunnelPath, defaultAgentTunnelPath),
+		NodeID:          cmd.Remote.NodeID,
+		CloudAPIKeyRef:  cmd.CloudAPIKeyRef,
+		Enabled:         boolDefault(cmd.Remote.Enabled, true),
+		IsDefault:       boolDefault(cmd.Remote.IsDefault, false),
+		Generation:      1,
+		RestartNonce:    0,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if err := s.db.WithContext(ctx).Select("*").Create(&remote).Error; err != nil {
 		return control.RemoteView{}, mapCreateErr(err)
@@ -102,6 +109,12 @@ func (s *Store) UpdateRemote(ctx context.Context, cmd control.UpdateRemoteComman
 	}
 	if cmd.Remote.CloudAPIURL != nil {
 		remote.CloudAPIURL = *cmd.Remote.CloudAPIURL
+	}
+	if cmd.Remote.NodeControlPath != nil {
+		remote.NodeControlPath = stringDefault(*cmd.Remote.NodeControlPath, defaultNodeControlPath)
+	}
+	if cmd.Remote.AgentTunnelPath != nil {
+		remote.AgentTunnelPath = stringDefault(*cmd.Remote.AgentTunnelPath, defaultAgentTunnelPath)
 	}
 	if cmd.Remote.NodeID != nil {
 		remote.NodeID = *cmd.Remote.NodeID
@@ -306,7 +319,6 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 		Harness:      cmd.Harness,
 		CommandJSON:  commandJSON,
 		WorkingDir:   cmd.WorkingDir,
-		TunnelPath:   stringDefault(cmd.TunnelPath, "/api/v1/agent/tunnel"),
 		EnvJSON:      envJSON,
 		Enabled:      boolDefault(cmd.Enabled, true),
 		DesiredState: string(desired),
@@ -353,9 +365,6 @@ func (s *Store) UpdateAgentConnection(ctx context.Context, cmd control.UpdateAge
 	}
 	if cmd.WorkingDir != nil {
 		conn.WorkingDir = *cmd.WorkingDir
-	}
-	if cmd.TunnelPath != nil {
-		conn.TunnelPath = *cmd.TunnelPath
 	}
 	if cmd.Env != nil {
 		raw, err := marshalJSON(*cmd.Env, "{}")
@@ -541,12 +550,13 @@ func (s *Store) ListDesiredRemotes(ctx context.Context) ([]RemoteDesiredSpec, er
 	specs := make([]RemoteDesiredSpec, 0, len(remotes))
 	for _, remote := range remotes {
 		specs = append(specs, RemoteDesiredSpec{
-			RemoteID:     remote.ID,
-			Name:         remote.Name,
-			CloudAPIURL:  remote.CloudAPIURL,
-			NodeID:       remote.NodeID,
-			Generation:   remote.Generation,
-			RestartNonce: remote.RestartNonce,
+			RemoteID:        remote.ID,
+			Name:            remote.Name,
+			CloudAPIURL:     remote.CloudAPIURL,
+			NodeControlPath: stringDefault(remote.NodeControlPath, defaultNodeControlPath),
+			NodeID:          remote.NodeID,
+			Generation:      remote.Generation,
+			RestartNonce:    remote.RestartNonce,
 		})
 	}
 	return specs, nil
@@ -615,7 +625,7 @@ func (s *Store) ListDesiredAgentConnections(ctx context.Context) ([]AgentConnect
 			Harness:      conn.Harness,
 			Command:      command,
 			WorkingDir:   conn.WorkingDir,
-			TunnelPath:   conn.TunnelPath,
+			TunnelPath:   stringDefault(remote.AgentTunnelPath, defaultAgentTunnelPath),
 			Env:          env,
 			Generation:   conn.Generation,
 			RestartNonce: conn.RestartNonce,
@@ -908,12 +918,14 @@ func remoteView(remote Remote) control.RemoteView {
 	isDefault := remote.IsDefault
 	return control.RemoteView{
 		Remote: control.Remote{
-			ID:          remote.ID,
-			Name:        remote.Name,
-			CloudAPIURL: remote.CloudAPIURL,
-			NodeID:      remote.NodeID,
-			Enabled:     &enabled,
-			IsDefault:   &isDefault,
+			ID:              remote.ID,
+			Name:            remote.Name,
+			CloudAPIURL:     remote.CloudAPIURL,
+			NodeControlPath: stringDefault(remote.NodeControlPath, defaultNodeControlPath),
+			AgentTunnelPath: stringDefault(remote.AgentTunnelPath, defaultAgentTunnelPath),
+			NodeID:          remote.NodeID,
+			Enabled:         &enabled,
+			IsDefault:       &isDefault,
 		},
 		Generation:   remote.Generation,
 		RestartNonce: remote.RestartNonce,
@@ -947,7 +959,6 @@ func agentConnectionView(conn AgentConnection, _ string) control.AgentConnection
 		Harness:      conn.Harness,
 		Command:      command,
 		WorkingDir:   conn.WorkingDir,
-		TunnelPath:   conn.TunnelPath,
 		Env:          env,
 		Enabled:      conn.Enabled,
 		DesiredState: control.DesiredState(conn.DesiredState),
