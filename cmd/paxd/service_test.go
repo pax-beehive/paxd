@@ -115,8 +115,8 @@ func TestGenerateSystemdUserUnitRunsPaxdInForeground(t *testing.T) {
 	})
 
 	assert.Contains(t, unit, "Description=Pax Fleet Daemon")
-	assert.Contains(t, unit, `ExecStart="/home/dev/bin/paxd" "run" "--control-socket" "none"`)
-	assert.Contains(t, unit, `WorkingDirectory="/home/dev"`)
+	assert.Contains(t, unit, `ExecStart=/home/dev/bin/paxd run --control-socket none`)
+	assert.Contains(t, unit, `WorkingDirectory=/home/dev`)
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=5")
 	assert.Contains(t, unit, "KillMode=mixed")
@@ -137,7 +137,7 @@ func TestGenerateSystemdSystemUnitRunsAsConfiguredUser(t *testing.T) {
 	})
 
 	assert.Contains(t, unit, "User=pax")
-	assert.Contains(t, unit, `ExecStart="/usr/local/bin/paxd" "run"`)
+	assert.Contains(t, unit, `ExecStart=/usr/local/bin/paxd run`)
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 }
 
@@ -237,6 +237,7 @@ func TestLaunchdBootstrapRetriesTransientFailure(t *testing.T) {
 func TestJoinSystemdArgsQuotesSpaces(t *testing.T) {
 	got := joinSystemdArgs([]string{"/tmp/Pax Tools/paxd", "run", "--debug-http", "127.0.0.1:8765"})
 
-	require.True(t, strings.Contains(got, `"/tmp/Pax Tools/paxd"`))
-	assert.Contains(t, got, `"127.0.0.1:8765"`)
+	require.True(t, strings.Contains(got, `/tmp/Pax\x20Tools/paxd`))
+	assert.Contains(t, got, `127.0.0.1:8765`)
+	assert.NotContains(t, got, `"`)
 }

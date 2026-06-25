@@ -24,7 +24,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -825,7 +824,7 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 	}
 	lines = append(lines,
 		"ExecStart="+joinSystemdArgs(args),
-		"WorkingDirectory="+quoteSystemdArg(target.Home),
+		"WorkingDirectory="+escapeSystemdArg(target.Home),
 		"Restart=always",
 		"RestartSec=5",
 		"KillMode=mixed",
@@ -921,13 +920,39 @@ func launchdDomain() string {
 func joinSystemdArgs(args []string) string {
 	quoted := make([]string, 0, len(args))
 	for _, arg := range args {
-		quoted = append(quoted, quoteSystemdArg(arg))
+		quoted = append(quoted, escapeSystemdArg(arg))
 	}
 	return strings.Join(quoted, " ")
 }
 
-func quoteSystemdArg(arg string) string {
-	return strconv.Quote(arg)
+func escapeSystemdArg(arg string) string {
+	if arg == "" {
+		return `""`
+	}
+	var b strings.Builder
+	for _, r := range arg {
+		switch r {
+		case ' ':
+			b.WriteString(`\x20`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\x22`)
+		case '\'':
+			b.WriteString(`\x27`)
+		case ';':
+			b.WriteString(`\;`)
+		case '%':
+			b.WriteString(`%%`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func xmlEscape(value string) string {
