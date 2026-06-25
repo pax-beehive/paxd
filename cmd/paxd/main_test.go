@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -73,6 +74,43 @@ func TestPaxdLoginCommitsRemoteAndLocalSecretRef(t *testing.T) {
 	assert.Equal(t, "file:"+secretPath, material.CloudAPIKeyRef)
 	assert.NotContains(t, material.CloudAPIKeyRef, "node-secret")
 	assert.FileExists(t, secretPath)
+}
+
+func TestPaxdLoginPersistsCloudflareAccessAuthFromEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PAX_CLOUD_CF_CLIENT_ID", "cf-client")
+	t.Setenv("PAX_CLOUD_CF_CLIENT_SECRET", "cf-secret")
+	restore := stubRemoteLogin(t, func(ctx context.Context, spec remotelogin.LoginSpec, opts remotelogin.Options) (remotelogin.LoginResult, error) {
+		return remotelogin.LoginResult{
+			RemoteID:    spec.RemoteID,
+			CloudAPIURL: spec.CloudAPIURL,
+			NodeID:      "node_123",
+			NodeAPIKey:  "node-secret",
+		}, nil
+	})
+	defer restore()
+
+	err := newApp().Run(context.Background(), []string{
+		"paxd",
+		"login",
+		"--remote", "prod",
+		"--cloud-url", "https://api.example.test",
+	})
+	require.NoError(t, err)
+
+	store := openTestDaemonStore(t, filepath.Join(home, ".paxd", "paxd.db"))
+	material, err := store.GetRemoteAuthMaterial(context.Background(), "prod")
+	require.NoError(t, err)
+	require.NotNil(t, material.CloudflareAccess)
+	secretPath := filepath.Join(home, ".paxd", "secrets", "remotes", "prod", "cf_access_client_secret")
+	assert.Equal(t, control.RemoteAuthCloudflareAccess, material.AuthKind)
+	assert.Equal(t, "cf-client", material.CloudflareAccess.ClientID)
+	assert.Equal(t, "file:"+secretPath, material.CloudflareAccess.ClientSecretRef)
+	assert.NotContains(t, material.CloudflareAccess.ClientSecretRef, "cf-secret")
+	data, err := os.ReadFile(secretPath)
+	require.NoError(t, err)
+	assert.Equal(t, "cf-secret\n", string(data))
 }
 
 func TestPaxdLoginDoesNotExposeConfigFlag(t *testing.T) {
@@ -171,6 +209,8 @@ func TestCommandWriterFirstNonEmptyAndVerifyCancel(t *testing.T) {
 func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("PAX_CLOUD_CF_CLIENT_ID", "cf-client")
+	t.Setenv("PAX_CLOUD_CF_CLIENT_SECRET", "cf-secret")
 	var calls []string
 	restoreLogin := stubRemoteLogin(t, func(ctx context.Context, spec remotelogin.LoginSpec, opts remotelogin.Options) (remotelogin.LoginResult, error) {
 		calls = append(calls, "login:"+spec.RemoteID)
@@ -220,6 +260,18 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	assert.NotContains(t, stdout.String(), "Next steps:")
 	assert.NotContains(t, stdout.String(), "paxd service start")
 	assert.DirExists(t, filepath.Join(home, ".paxd"))
+
+	store := openTestDaemonStore(t, filepath.Join(home, ".paxd", "paxd.db"))
+	material, err := store.GetRemoteAuthMaterial(context.Background(), "default")
+	require.NoError(t, err)
+	require.NotNil(t, material.CloudflareAccess)
+	secretPath := filepath.Join(home, ".paxd", "secrets", "remotes", "default", "cf_access_client_secret")
+	assert.Equal(t, control.RemoteAuthCloudflareAccess, material.AuthKind)
+	assert.Equal(t, "cf-client", material.CloudflareAccess.ClientID)
+	assert.Equal(t, "file:"+secretPath, material.CloudflareAccess.ClientSecretRef)
+	data, err := os.ReadFile(secretPath)
+	require.NoError(t, err)
+	assert.Equal(t, "cf-secret\n", string(data))
 }
 
 func TestPaxdSetupExposesOnlyCloudURLFlagWithDefault(t *testing.T) {

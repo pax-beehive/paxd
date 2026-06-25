@@ -13,6 +13,7 @@ import (
 var (
 	ErrInvalidRemoteID = errors.New("invalid remote id")
 	ErrMissingNodeKey  = errors.New("node key is required")
+	ErrMissingSecret   = errors.New("secret is required")
 )
 
 var safeRemoteID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
@@ -51,6 +52,10 @@ func (s Store) StoreNodeKey(ctx context.Context, remoteID string, nodeKey string
 	return "file:" + path, nil
 }
 
+func (s Store) StoreCloudflareAccessClientSecret(ctx context.Context, remoteID string, secret string) (string, error) {
+	return s.storeRemoteSecret(ctx, remoteID, "cf_access_client_secret", secret)
+}
+
 func (s Store) NodeKeyRef(remoteID string) (string, error) {
 	remoteID = strings.TrimSpace(remoteID)
 	if !safeRemoteID.MatchString(remoteID) {
@@ -84,6 +89,36 @@ func (s Store) DeleteRemote(ctx context.Context, remoteID string) error {
 
 func nodeKeyPath(home string, remoteID string) string {
 	return filepath.Join(home, ".paxd", "secrets", "remotes", remoteID, "node_key")
+}
+
+func (s Store) storeRemoteSecret(ctx context.Context, remoteID string, name string, secret string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	remoteID = strings.TrimSpace(remoteID)
+	if !safeRemoteID.MatchString(remoteID) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidRemoteID, remoteID)
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return "", ErrMissingSecret
+	}
+
+	home, err := s.homeDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(home, ".paxd", "secrets", "remotes", remoteID, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("create remote secret dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("write remote secret: %w", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return "", fmt.Errorf("chmod remote secret: %w", err)
+	}
+	return "file:" + path, nil
 }
 
 func (s Store) homeDir() (string, error) {

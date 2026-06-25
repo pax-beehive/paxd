@@ -34,6 +34,25 @@ func TestStoreWritesNodeKeyAsOwnerOnlyFileRef(t *testing.T) {
 	assert.Equal(t, ref, nodeKeyRef)
 }
 
+func TestStoreWritesCloudflareAccessClientSecretAsOwnerOnlyFileRef(t *testing.T) {
+	dir := t.TempDir()
+	store := Store{HomeDir: dir}
+
+	ref, err := store.StoreCloudflareAccessClientSecret(context.Background(), "prod", "cf-secret")
+	require.NoError(t, err)
+
+	path := filepath.Join(dir, ".paxd", "secrets", "remotes", "prod", "cf_access_client_secret")
+	assert.Equal(t, "file:"+path, ref)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "cf-secret\n", string(data))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
 func TestStoreRejectsUnsafeRemoteIDs(t *testing.T) {
 	store := Store{HomeDir: t.TempDir()}
 

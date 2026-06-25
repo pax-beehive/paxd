@@ -88,8 +88,15 @@ func cmdLoginCommand() *cli.Command {
 			&cli.StringFlag{Name: "api-endpoint", Usage: "optional local API endpoint advertised for this node"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			cfg := defaultRuntimeConfig()
-			cloudURL := strings.TrimRight(firstNonEmpty(cmd.String("cloud-url"), cfg.Cloud.APIURL, config.DefaultCloudAPIURL), "/")
+			cfg, err := loadRuntimeConfig()
+			if err != nil {
+				return err
+			}
+			cloudURL := cloudURLFromCommand(cmd, cfg)
+			client, err := loginCloudClient(cloudURL, cfg)
+			if err != nil {
+				return err
+			}
 			remoteID := strings.TrimSpace(cmd.String("remote"))
 			result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
 				RemoteID:    remoteID,
@@ -104,7 +111,7 @@ func cmdLoginCommand() *cli.Command {
 					APIEndpoint: cmd.String("api-endpoint"),
 				},
 			}, remotelogin.Options{
-				Client: cloud.NewClient(cloudURL, ""),
+				Client: client,
 				Stdout: commandWriter(cmd),
 			})
 			if err != nil {
@@ -136,8 +143,15 @@ func cmdSetup(ctx context.Context, cmd *cli.Command) error {
 	if err := ensurePaxdHome(); err != nil {
 		return err
 	}
-	cfg := defaultRuntimeConfig()
-	cloudURL := strings.TrimRight(firstNonEmpty(cmd.String("cloud-url"), config.DefaultCloudAPIURL), "/")
+	cfg, err := loadRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	cloudURL := cloudURLFromCommand(cmd, cfg)
+	client, err := loginCloudClient(cloudURL, cfg)
+	if err != nil {
+		return err
+	}
 	remoteID := "default"
 	result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
 		RemoteID:    remoteID,
@@ -151,7 +165,7 @@ func cmdSetup(ctx context.Context, cmd *cli.Command) error {
 			PaxdVersion: version,
 		},
 	}, remotelogin.Options{
-		Client: cloud.NewClient(cloudURL, ""),
+		Client: client,
 		Stdout: commandWriter(cmd),
 	})
 	if err != nil {
@@ -195,13 +209,55 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func defaultRuntimeConfig() *config.Config {
-	cfg := config.DefaultConfig()
+func loadRuntimeConfig() (*config.Config, error) {
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(cfg.Agent.Hostname) == "" {
 		host, _ := os.Hostname()
 		cfg.Agent.Hostname = host
 	}
-	return &cfg
+	return cfg, nil
+}
+
+func cloudURLFromCommand(cmd *cli.Command, cfg *config.Config) string {
+	flagURL := strings.TrimSpace(cmd.String("cloud-url"))
+	cfgURL := ""
+	if cfg != nil {
+		cfgURL = strings.TrimSpace(cfg.Cloud.APIURL)
+	}
+	if flagURL == "" || flagURL == config.DefaultCloudAPIURL {
+		return strings.TrimRight(firstNonEmpty(cfgURL, flagURL, config.DefaultCloudAPIURL), "/")
+	}
+	return strings.TrimRight(flagURL, "/")
+}
+
+func loginCloudClient(cloudURL string, cfg *config.Config) (*cloud.Client, error) {
+	client := cloud.NewClient(cloudURL, "")
+	clientID, clientSecret, enabled, err := cloudflareAccessCredentials(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if enabled {
+		client.WithCloudflareAccess(clientID, clientSecret)
+	}
+	return client, nil
+}
+
+func cloudflareAccessCredentials(cfg *config.Config) (string, string, bool, error) {
+	if cfg == nil {
+		return "", "", false, nil
+	}
+	clientID := strings.TrimSpace(cfg.Cloud.CFClientID)
+	clientSecret := strings.TrimSpace(cfg.Cloud.CFClientSecret)
+	if clientID == "" && clientSecret == "" {
+		return "", "", false, nil
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", false, fmt.Errorf("cloudflare access setup requires both PAX_CLOUD_CF_CLIENT_ID and PAX_CLOUD_CF_CLIENT_SECRET")
+	}
+	return clientID, clientSecret, true, nil
 }
 
 func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelogin.LoginResult) error {
@@ -209,7 +265,8 @@ func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelog
 	if remoteID == "" {
 		return fmt.Errorf("remote id is required")
 	}
-	secretRef, err := (remotesecrets.Store{}).StoreNodeKey(ctx, remoteID, result.NodeAPIKey)
+	secrets := remotesecrets.Store{}
+	secretRef, err := secrets.StoreNodeKey(ctx, remoteID, result.NodeAPIKey)
 	if err != nil {
 		return err
 	}
@@ -241,7 +298,10 @@ func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelog
 			},
 			CloudAPIKeyRef: &secretRef,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return configureRemoteAuthFromConfig(ctx, store, secrets, remoteID, cfg)
 	}
 	_, err = store.CreateRemote(ctx, control.CreateRemoteCommand{
 		Remote: control.Remote{
@@ -253,7 +313,32 @@ func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelog
 		},
 		CloudAPIKeyRef: secretRef,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return configureRemoteAuthFromConfig(ctx, store, secrets, remoteID, cfg)
+}
+
+func configureRemoteAuthFromConfig(ctx context.Context, store *daemonstore.Store, secrets remotesecrets.Store, remoteID string, cfg *config.Config) error {
+	clientID, clientSecret, enabled, err := cloudflareAccessCredentials(cfg)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+	clientSecretRef, err := secrets.StoreCloudflareAccessClientSecret(ctx, remoteID, clientSecret)
+	if err != nil {
+		return err
+	}
+	return store.ConfigureRemoteAuth(ctx, control.ConfigureRemoteAuthCommand{
+		RemoteID: remoteID,
+		Kind:     control.RemoteAuthCloudflareAccess,
+		CloudflareAccess: &control.CloudflareAccessAuth{
+			ClientID:        clientID,
+			ClientSecretRef: clientSecretRef,
+		},
+	})
 }
 
 func ensurePaxdHome() error {
@@ -298,7 +383,10 @@ func cmdRun(args []string) {
 	debugHTTP := fs.String("debug-http", "", "optional loopback debug HTTP address, for example 127.0.0.1:8765")
 	fs.Parse(args)
 
-	cfg := defaultRuntimeConfig()
+	cfg, err := loadRuntimeConfig()
+	if err != nil {
+		log.Fatalf("load runtime config: %v", err)
+	}
 
 	log.Printf("[paxd] starting v%s on %s/%s", version, runtime.GOOS, runtime.GOARCH)
 
