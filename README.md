@@ -65,6 +65,16 @@ paxd setup
 paxd setup --cloud-url https://api.example.com
 ```
 
+当前内测阶段，如果目标 Pax API 入口仍在 Cloudflare Access 后面，需要显式提供 Cloudflare Access service token，确保 `setup/login` 以及后续 daemon 连接都能通过访问层：
+
+```bash
+PAX_CLOUD_CF_CLIENT_ID="cf-service-token-client-id" \
+PAX_CLOUD_CF_CLIENT_SECRET="cf-service-token-client-secret" \
+paxd setup --cloud-url https://api.example.com
+```
+
+这两个值来自 Cloudflare Access service token，不是用户登录 token。`paxd setup` 会在 pairing 成功后把 secret 写成本机 owner-only file secret，并把 remote auth 写入本机 daemon DB；后续后台 service 重启后仍会继续使用它。
+
 也可以只做登录，不安装或启动后台 service：
 
 ```bash
