@@ -1,0 +1,23 @@
+{
+  "kind": "command",
+  "command_id": "cmd_agent_connection_create_1",
+  "command": {
+    "command_id": "cmd_agent_connection_create_1",
+    "type": "agent_connection.create",
+    "create_agent_connection": {
+      "id": "conn_codex",
+      "remote_id": "remote_prod",
+      "name": "codex-main",
+      "instance_id": "inst_1",
+      "agent_type": "codex",
+      "harness": "codex",
+      "command": ["codex", "--acp"],
+      "working_dir": "/workspace/project",
+      "env": {
+        "PAX_PROFILE": "prod"
+      },
+      "enabled": true,
+      "desired_state": "running"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "command_id": "cmd_agent_connection_restart_missing_1",
+  "ok": false,
+  "status": "rejected",
+  "target_type": "agent_connection",
+  "target_id": "conn_missing",
+  "error": {
+    "code": "not_found",
+    "message": "agent connection not found",
+    "target": "connection_id"
+  }
+}

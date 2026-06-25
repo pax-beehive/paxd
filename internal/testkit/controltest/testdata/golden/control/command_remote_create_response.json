@@ -1,0 +1,21 @@
+{
+  "command_id": "cmd_remote_create_1",
+  "ok": true,
+  "status": "received",
+  "target_type": "remote",
+  "target_id": "remote_prod",
+  "desired_generation": 1,
+  "result": {
+    "remote": {
+      "remote": {
+        "id": "remote_prod",
+        "name": "Production",
+        "cloud_api_url": "https://api.example.test",
+        "node_id": "node_1",
+        "enabled": true
+      },
+      "generation": 1,
+      "restart_nonce": 0
+    }
+  }
+}
