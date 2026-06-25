@@ -5,7 +5,7 @@ go 1.22
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/pax-beehive/paxkit v0.0.0
+	github.com/pax-beehive/paxkit v0.0.0-20260625041709-1fa585114f65
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v3 v3.10.0
@@ -29,5 +29,3 @@ require (
 	golang.org/x/sys v0.20.0 // indirect
 	golang.org/x/text v0.20.0 // indirect
 )
-
-replace github.com/pax-beehive/paxkit => ../paxkit
