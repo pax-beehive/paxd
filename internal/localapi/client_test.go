@@ -61,6 +61,27 @@ func TestClientRestartsAgentConnectionWithCommandID(t *testing.T) {
 	assert.Equal(t, "cmd_1", transport.request.Header.Get(commandIDHeader))
 }
 
+func TestClientUpdatesAgentConnectionWithEscapedPathAndCommandID(t *testing.T) {
+	transport := &fakeRoundTripper{body: `{"command_id":"cmd_agent_stop","ok":true,"status":"received"}`}
+	client := &Client{baseURL: "http://paxd", http: &http.Client{Transport: transport}}
+	state := control.DesiredStateStopped
+
+	ack, err := client.UpdateAgentConnection(context.Background(), "cmd_agent_stop", "conn/1", control.UpdateAgentConnectionCommand{
+		DesiredState: &state,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "cmd_agent_stop", ack.CommandID)
+	assert.Equal(t, http.MethodPatch, transport.request.Method)
+	assert.Equal(t, "/v1/agent-connections/conn%2F1", transport.request.URL.EscapedPath())
+	assert.Equal(t, "cmd_agent_stop", transport.request.Header.Get(commandIDHeader))
+	var body control.UpdateAgentConnectionCommand
+	require.NoError(t, json.NewDecoder(transport.request.Body).Decode(&body))
+	assert.Equal(t, "conn/1", body.ConnectionID)
+	require.NotNil(t, body.DesiredState)
+	assert.Equal(t, control.DesiredStateStopped, *body.DesiredState)
+}
+
 func TestClientUpdatesRemoteWithEscapedPathAndCommandID(t *testing.T) {
 	transport := &fakeRoundTripper{body: `{"command_id":"cmd_2","ok":true,"status":"received"}`}
 	client := &Client{baseURL: "http://paxd", http: &http.Client{Transport: transport}}

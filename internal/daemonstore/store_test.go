@@ -251,6 +251,57 @@ func TestRemoteRepositoryAllowsSameCloudAPIURL(t *testing.T) {
 	}
 }
 
+func TestDeleteRemoteWithCascadeRemovesRemoteAndAgentConnections(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	_, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api.example.test"))
+	require.NoError(t, err)
+	err = store.ConfigureRemoteAuth(ctx, control.ConfigureRemoteAuthCommand{RemoteID: "remote_prod", Kind: control.RemoteAuthNone})
+	require.NoError(t, err)
+	err = store.UpsertRemoteStatus(ctx, RemoteStatusUpdate{
+		RemoteID:             "remote_prod",
+		ObservedGeneration:   1,
+		ObservedRestartNonce: 0,
+		Phase:                "running",
+	})
+	require.NoError(t, err)
+	_, err = store.CreateAgentConnection(ctx, control.CreateAgentConnectionCommand{
+		ID:         "conn_codex",
+		RemoteID:   "remote_prod",
+		Name:       "codex-main",
+		InstanceID: "inst_1",
+		AgentType:  "codex",
+		Harness:    "codex",
+		Command:    []string{"codex", "--acp"},
+	})
+	require.NoError(t, err)
+	err = store.UpsertAgentConnectionStatus(ctx, AgentConnectionStatusUpdate{
+		ConnectionID:         "conn_codex",
+		ObservedGeneration:   1,
+		ObservedRestartNonce: 0,
+		Phase:                "running",
+	})
+	require.NoError(t, err)
+
+	deleted, err := store.DeleteRemote(ctx, control.DeleteRemoteCommand{
+		RemoteID:                "remote_prod",
+		CascadeAgentConnections: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, deleted.Remote.Enabled)
+	assert.False(t, *deleted.Remote.Enabled)
+	remotes, err := store.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+	require.NoError(t, err)
+	assert.Empty(t, remotes)
+	conns, err := store.ListAgentConnections(ctx, control.ListAgentConnectionsQuery{IncludeDisabled: true})
+	require.NoError(t, err)
+	assert.Empty(t, conns)
+	assertTableCount(t, store, &RemoteAuth{}, 0)
+	assertTableCount(t, store, &RemoteStatus{}, 0)
+	assertTableCount(t, store, &AgentConnectionStatus{}, 0)
+}
+
 func TestRemoteAuthMaterialAndStatusViews(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -525,6 +576,18 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("CreateAgentConnection() error = %v", err)
+	}
+	_, err = store.CreateAgentConnection(ctx, control.CreateAgentConnectionCommand{
+		ID:         "conn_disabled",
+		RemoteID:   "remote_disabled",
+		Name:       "disabled-main",
+		InstanceID: "inst_disabled",
+		AgentType:  "codex",
+		Harness:    "codex",
+		Command:    []string{"codex", "--acp"},
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentConnection(disabled remote) error = %v", err)
 	}
 
 	remoteSpecs, err := store.ListDesiredRemotes(ctx)
@@ -843,4 +906,11 @@ func createRemoteCommand(id string, url string) control.CreateRemoteCommand {
 		},
 		CloudAPIKeyRef: "env:PAX_NODE_KEY",
 	}
+}
+
+func assertTableCount(t *testing.T, store *Store, model any, want int64) {
+	t.Helper()
+	var got int64
+	require.NoError(t, store.db.Model(model).Count(&got).Error)
+	assert.Equal(t, want, got)
 }

@@ -133,6 +133,46 @@ func (s *Store) UpdateRemote(ctx context.Context, cmd control.UpdateRemoteComman
 }
 
 func (s *Store) DeleteRemote(ctx context.Context, cmd control.DeleteRemoteCommand) (control.RemoteView, error) {
+	if cmd.CascadeAgentConnections {
+		remote, err := s.getRemote(ctx, cmd.RemoteID)
+		if err != nil {
+			return control.RemoteView{}, err
+		}
+		view, err := s.remoteViewWithDetails(ctx, remote)
+		if err != nil {
+			return control.RemoteView{}, err
+		}
+		var conns []AgentConnection
+		if err := s.db.WithContext(ctx).
+			Where("remote_id = ?", cmd.RemoteID).
+			Find(&conns).Error; err != nil {
+			return control.RemoteView{}, err
+		}
+		if len(conns) > 0 {
+			ids := make([]string, 0, len(conns))
+			for _, conn := range conns {
+				ids = append(ids, conn.ID)
+			}
+			if err := s.db.WithContext(ctx).Where("connection_id IN ?", ids).Delete(&AgentConnectionStatus{}).Error; err != nil {
+				return control.RemoteView{}, err
+			}
+			if err := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&AgentConnection{}).Error; err != nil {
+				return control.RemoteView{}, err
+			}
+		}
+		if err := s.db.WithContext(ctx).Where("remote_id = ?", cmd.RemoteID).Delete(&RemoteStatus{}).Error; err != nil {
+			return control.RemoteView{}, err
+		}
+		if err := s.db.WithContext(ctx).Where("remote_id = ?", cmd.RemoteID).Delete(&RemoteAuth{}).Error; err != nil {
+			return control.RemoteView{}, err
+		}
+		if err := s.db.WithContext(ctx).Where("id = ?", cmd.RemoteID).Delete(&Remote{}).Error; err != nil {
+			return control.RemoteView{}, err
+		}
+		enabled := false
+		view.Remote.Enabled = &enabled
+		return view, nil
+	}
 	enabled := false
 	return s.UpdateRemote(ctx, control.UpdateRemoteCommand{
 		RemoteID: cmd.RemoteID,
@@ -601,7 +641,13 @@ func (s *Store) ListDesiredAgentConnections(ctx context.Context) ([]AgentConnect
 	for _, conn := range conns {
 		remote, err := s.getRemote(ctx, conn.RemoteID)
 		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
 			return nil, err
+		}
+		if !remote.Enabled {
+			continue
 		}
 		command, err := decodeStringSlice(conn.CommandJSON)
 		if err != nil {

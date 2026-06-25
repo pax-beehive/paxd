@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/auth"
@@ -63,6 +64,7 @@ func (s *RemoteControlSession) Run(ctx context.Context) Exit {
 		log.Printf("[paxd] remote session id=%s auth headers failed: %v", s.cfg.Spec.RemoteID, err)
 		return AuthExit("auth_headers_failed", err.Error())
 	}
+	log.Printf("[paxd] remote session id=%s auth header summary: %s", s.cfg.Spec.RemoteID, requestHeaderSummary(header))
 	wsURL, err := websocketURLFromHTTP(s.cfg.Spec.CloudAPIURL, s.cfg.NodeControlPath)
 	if err != nil {
 		log.Printf("[paxd] remote session id=%s invalid cloud url %q: %v", s.cfg.Spec.RemoteID, s.cfg.Spec.CloudAPIURL, err)
@@ -77,9 +79,9 @@ func (s *RemoteControlSession) Run(ctx context.Context) Exit {
 	s.emit(PhaseConnecting)
 	log.Printf("[paxd] remote session id=%s dialing %s", s.cfg.Spec.RemoteID, wsURL.Redacted())
 	conn, resp, err := s.cfg.Dialer.Dial(ctx, wsURL.String(), header)
-	closeResponse(resp)
+	respDiag := consumeResponseDiagnostics(resp)
 	if err != nil {
-		log.Printf("[paxd] remote session id=%s dial failed status=%d err=%v", s.cfg.Spec.RemoteID, responseStatus(resp), err)
+		log.Printf("[paxd] remote session id=%s dial failed %s err=%v", s.cfg.Spec.RemoteID, respDiag.String(), err)
 		return classifyDialExit(err, resp)
 	}
 	if conn == nil {
@@ -117,6 +119,16 @@ func responseStatus(resp *http.Response) int {
 	return resp.StatusCode
 }
 
+type responseDiagnostics struct {
+	Status      int
+	StatusText  string
+	BodySnippet string
+	Server      string
+	CFRay       string
+	CFCache     string
+	Location    string
+}
+
 func (s *RemoteControlSession) emit(phase Phase) {
 	s.cfg.SessionEventSink.OnSessionEvent(SessionEvent{
 		Kind:         SessionRemoteControl,
@@ -128,11 +140,67 @@ func (s *RemoteControlSession) emit(phase Phase) {
 	})
 }
 
-func closeResponse(resp *http.Response) {
-	if resp != nil && resp.Body != nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+func consumeResponseDiagnostics(resp *http.Response) responseDiagnostics {
+	if resp == nil {
+		return responseDiagnostics{}
 	}
+	diag := responseDiagnostics{
+		Status:     resp.StatusCode,
+		StatusText: resp.Status,
+		Server:     resp.Header.Get("Server"),
+		CFRay:      resp.Header.Get("CF-Ray"),
+		CFCache:    resp.Header.Get("CF-Cache-Status"),
+		Location:   resp.Header.Get("Location"),
+	}
+	if resp.Body != nil {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		diag.BodySnippet = compactLogSnippet(string(body), 512)
+	}
+	return diag
+}
+
+func (d responseDiagnostics) String() string {
+	if d.Status == 0 {
+		return "status=0"
+	}
+	parts := []string{fmt.Sprintf("status=%d", d.Status)}
+	if d.StatusText != "" {
+		parts = append(parts, fmt.Sprintf("status_text=%q", d.StatusText))
+	}
+	if d.Server != "" {
+		parts = append(parts, fmt.Sprintf("server=%q", d.Server))
+	}
+	if d.CFRay != "" {
+		parts = append(parts, fmt.Sprintf("cf_ray=%q", d.CFRay))
+	}
+	if d.CFCache != "" {
+		parts = append(parts, fmt.Sprintf("cf_cache=%q", d.CFCache))
+	}
+	if d.Location != "" {
+		parts = append(parts, fmt.Sprintf("location=%q", d.Location))
+	}
+	if d.BodySnippet != "" {
+		parts = append(parts, fmt.Sprintf("body=%q", d.BodySnippet))
+	}
+	return strings.Join(parts, " ")
+}
+
+func requestHeaderSummary(header http.Header) string {
+	return fmt.Sprintf(
+		"x_pax_key=%t cf_access_client_id=%t cf_access_client_secret=%t",
+		strings.TrimSpace(header.Get(auth.HeaderPaxKey)) != "",
+		strings.TrimSpace(header.Get(auth.HeaderCloudflareAccessID)) != "",
+		strings.TrimSpace(header.Get(auth.HeaderCloudflareAccessSecret)) != "",
+	)
+}
+
+func compactLogSnippet(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func classifyDialExit(err error, resp *http.Response) Exit {

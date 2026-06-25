@@ -13,7 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultCloudAPIURL = "https://api.paxtech.net"
+const DefaultCloudAPIURL = "https://app.paxtech.net"
 
 // Config represents the full daemon configuration.
 type Config struct {

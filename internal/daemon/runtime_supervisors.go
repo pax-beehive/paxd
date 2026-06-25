@@ -92,7 +92,32 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 	if r.hostMetrics != nil {
 		r.hostMetrics.Start(ctx)
 	}
+	startHarnessRefresh(ctx, r.harnesses)
 	r.supervisors.Start(ctx)
+}
+
+func startHarnessRefresh(ctx context.Context, harnesses control.HarnessRegistry) {
+	if harnesses == nil {
+		return
+	}
+	go func() {
+		refresh := func() {
+			if _, err := harnesses.Discover(ctx, control.DiscoverHarnessesQuery{}); err != nil && ctx.Err() == nil {
+				log.Printf("[paxd] harness discovery refresh failed: %v", err)
+			}
+		}
+		refresh()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refresh()
+			}
+		}
+	}()
 }
 
 func (s *runtimeSupervisors) Start(ctx context.Context) {

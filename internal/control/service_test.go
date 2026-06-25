@@ -274,8 +274,8 @@ func TestServiceRemoteMutationCommands(t *testing.T) {
 	if wakes.remote != 4 {
 		t.Fatalf("remote wakes = %d, want 4", wakes.remote)
 	}
-	if wakes.agent != 1 {
-		t.Fatalf("agent wakes = %d, want 1 for auth clear", wakes.agent)
+	if wakes.agent != 2 {
+		t.Fatalf("agent wakes = %d, want 2 for remote delete and auth clear", wakes.agent)
 	}
 }
 
@@ -411,6 +411,38 @@ func TestServiceQueries(t *testing.T) {
 	}
 	if sync.LocalSessionSync == nil || sync.LocalSessionSync.Synced != 1 || !sessions.synced {
 		t.Fatalf("sync result = %+v synced=%v", sync, sessions.synced)
+	}
+}
+
+func TestListHarnessesFiltersMissingUnlessRequested(t *testing.T) {
+	ctx := context.Background()
+	harnesses := &fakeHarnessRegistry{items: []control.HarnessView{
+		{Harness: "codex", State: "available"},
+		{Harness: "gemini", State: "missing"},
+		{Harness: "claude-code", State: "degraded"},
+	}}
+	service := control.NewService(control.ServiceOptions{Store: openControlTestStore(t), Harnesses: harnesses})
+
+	result, err := service.HandleQuery(ctx, control.Source{Kind: control.SourceLocal}, control.Query{
+		Type:          control.QueryHarnessesList,
+		ListHarnesses: &control.ListHarnessesQuery{},
+	})
+	if err != nil {
+		t.Fatalf("HandleQuery(list harnesses) error = %v", err)
+	}
+	if result.Harnesses == nil || len(result.Harnesses.Items) != 1 || result.Harnesses.Items[0].Harness != "codex" {
+		t.Fatalf("filtered harnesses = %+v", result.Harnesses)
+	}
+
+	result, err = service.HandleQuery(ctx, control.Source{Kind: control.SourceLocal}, control.Query{
+		Type:          control.QueryHarnessesList,
+		ListHarnesses: &control.ListHarnessesQuery{IncludeMissing: true},
+	})
+	if err != nil {
+		t.Fatalf("HandleQuery(list harnesses all) error = %v", err)
+	}
+	if result.Harnesses == nil || len(result.Harnesses.Items) != 3 {
+		t.Fatalf("all harnesses = %+v", result.Harnesses)
 	}
 }
 
