@@ -115,8 +115,8 @@ func TestGenerateSystemdUserUnitRunsPaxdInForeground(t *testing.T) {
 	})
 
 	assert.Contains(t, unit, "Description=Pax Fleet Daemon")
-	assert.Contains(t, unit, `ExecStart="/home/dev/bin/paxd" "run" "--control-socket" "none"`)
-	assert.Contains(t, unit, `WorkingDirectory="/home/dev"`)
+	assert.Contains(t, unit, `ExecStart=/home/dev/bin/paxd run --control-socket none`)
+	assert.Contains(t, unit, `WorkingDirectory=/home/dev`)
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=5")
 	assert.Contains(t, unit, "KillMode=mixed")
@@ -137,8 +137,24 @@ func TestGenerateSystemdSystemUnitRunsAsConfiguredUser(t *testing.T) {
 	})
 
 	assert.Contains(t, unit, "User=pax")
-	assert.Contains(t, unit, `ExecStart="/usr/local/bin/paxd" "run"`)
+	assert.Contains(t, unit, `ExecStart=/usr/local/bin/paxd run`)
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
+}
+
+func TestGenerateSystemdUnitEscapesPathsWithoutQuotingThem(t *testing.T) {
+	target := serviceTarget{
+		GOOS:     "linux",
+		ExecPath: "/home/dev/Pax Tools/paxd",
+		Home:     "/home/dev/Pax Home",
+	}
+
+	unit := generateSystemdUnit(target, serviceInstallOptions{
+		DebugHTTP: "127.0.0.1:%8765",
+	})
+
+	assert.Contains(t, unit, `ExecStart=/home/dev/Pax\sTools/paxd run --debug-http 127.0.0.1:%%8765`)
+	assert.Contains(t, unit, `WorkingDirectory=/home/dev/Pax\sHome`)
+	assert.NotContains(t, unit, `WorkingDirectory="/home/dev/Pax Home"`)
 }
 
 func TestServicePathsAndSystemctlArgs(t *testing.T) {
@@ -237,6 +253,14 @@ func TestLaunchdBootstrapRetriesTransientFailure(t *testing.T) {
 func TestJoinSystemdArgsQuotesSpaces(t *testing.T) {
 	got := joinSystemdArgs([]string{"/tmp/Pax Tools/paxd", "run", "--debug-http", "127.0.0.1:8765"})
 
-	require.True(t, strings.Contains(got, `"/tmp/Pax Tools/paxd"`))
-	assert.Contains(t, got, `"127.0.0.1:8765"`)
+	require.True(t, strings.Contains(got, `/tmp/Pax\sTools/paxd`))
+	assert.Contains(t, got, `127.0.0.1:8765`)
+	assert.NotContains(t, got, `"`)
+}
+
+func TestJoinSystemdArgsEscapesExecSeparatorsAndSpecifiers(t *testing.T) {
+	got := joinSystemdArgs([]string{"/tmp/paxd", "run", "--debug-http", "127.0.0.1:%8765", "semi;colon"})
+
+	assert.Contains(t, got, `127.0.0.1:%%8765`)
+	assert.Contains(t, got, `semi\;colon`)
 }
