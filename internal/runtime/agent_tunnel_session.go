@@ -82,6 +82,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 		log.Printf("[paxd] agent tunnel id=%s auth headers failed remote_id=%s: %v", s.spec.ConnectionID, s.spec.RemoteID, err)
 		return AuthExit("auth_headers_failed", err.Error())
 	}
+	log.Printf("[paxd] agent tunnel id=%s remote_id=%s auth header summary: %s", s.spec.ConnectionID, s.spec.RemoteID, requestHeaderSummary(header))
 	wsURL, err := websocketURLFromHTTP(s.spec.CloudAPIURL, firstNonEmpty(s.spec.TunnelPath, DefaultAgentTunnelPath))
 	if err != nil {
 		log.Printf("[paxd] agent tunnel id=%s invalid cloud url %q: %v", s.spec.ConnectionID, s.spec.CloudAPIURL, err)
@@ -98,9 +99,9 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	s.emit(PhaseConnecting, nil)
 	log.Printf("[paxd] agent tunnel id=%s dialing %s", s.spec.ConnectionID, wsURL.Redacted())
 	conn, resp, err := s.deps.Dialer.Dial(ctx, wsURL.String(), header)
-	closeResponse(resp)
+	respDiag := consumeResponseDiagnostics(resp)
 	if err != nil {
-		log.Printf("[paxd] agent tunnel id=%s dial failed status=%d err=%v", s.spec.ConnectionID, responseStatus(resp), err)
+		log.Printf("[paxd] agent tunnel id=%s dial failed %s err=%v", s.spec.ConnectionID, respDiag.String(), err)
 		return classifyDialExit(err, resp)
 	}
 	if conn == nil {
