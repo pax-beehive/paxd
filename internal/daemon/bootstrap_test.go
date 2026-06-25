@@ -2,12 +2,18 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	runtimes "github.com/pax-beehive/paxd/internal/runtime"
+	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,12 +76,174 @@ func TestLocalAPIListenerValidationDoesNotBindWhenDisabledOrInvalid(t *testing.T
 	assert.NoError(t, (*LocalAPIServer)(nil).Close())
 }
 
+func TestStartUnixLocalAPIServesAndCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := filepath.Join("/private/tmp", fmt.Sprintf("paxd-test-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server, err := StartUnixLocalAPI(ctx, socketPath, http.NewServeMux())
+	if err != nil && errors.Is(err, os.ErrPermission) {
+		t.Skipf("unix socket bind not permitted in this sandbox: %v", err)
+	}
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	assert.NotNil(t, server.Addr())
+
+	require.NoError(t, server.Close())
+}
+
+func TestStartDebugHTTPServesAndCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server, err := StartDebugHTTP(ctx, "127.0.0.1:0", http.NewServeMux())
+	if err != nil && errors.Is(err, os.ErrPermission) {
+		t.Skipf("tcp bind not permitted in this sandbox: %v", err)
+	}
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	assert.NotNil(t, server.Addr())
+
+	require.NoError(t, server.Close())
+}
+
+func TestRuntimeSupervisorValidationAndNilBranches(t *testing.T) {
+	var nilRuntime *Runtime
+	nilRuntime.StartSupervisors(context.Background())
+	(&Runtime{}).StartSupervisors(context.Background())
+
+	empty := &runtimeSupervisors{}
+	empty.WakeRemotes()
+	empty.WakeAgentConnections()
+	empty.Start(context.Background())
+
+	if err := empty.Configure(nil, nil); err == nil {
+		t.Fatal("Configure(nil store) error = nil")
+	}
+	if err := empty.Configure(openTestStore(t), nil); err == nil {
+		t.Fatal("Configure(nil service) error = nil")
+	}
+
+	assert.Equal(t, "", firstNonEmpty("", ""))
+	assert.Equal(t, "/tmp/paxd", expandHome("/tmp/paxd"))
+}
+
+func TestRuntimeSupervisorsHelpers(t *testing.T) {
+	metrics := &fakeMetricsStarter{}
+	remote := &fakeDaemonSupervisor{}
+	agent := &fakeDaemonSupervisor{}
+	rt := &Runtime{
+		hostMetrics: metrics,
+		supervisors: &runtimeSupervisors{
+			remote: remote,
+			agent:  agent,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rt.StartSupervisors(ctx)
+
+	require.Eventually(t, func() bool {
+		return metrics.started && remote.started && agent.started
+	}, time.Second, 10*time.Millisecond)
+	rt.supervisors.WakeRemotes()
+	rt.supervisors.WakeAgentConnections()
+	assert.Equal(t, 1, remote.wakes)
+	assert.Equal(t, 1, agent.wakes)
+	cancel()
+}
+
+func TestRuntimeSupervisorsStartIgnoresCanceledAndDeadlineErrors(t *testing.T) {
+	remote := &fakeDaemonSupervisor{startErr: context.Canceled}
+	agent := &fakeDaemonSupervisor{startErr: context.DeadlineExceeded}
+	sups := &runtimeSupervisors{
+		remote: remote,
+		agent:  agent,
+	}
+	sups.Start(context.Background())
+	require.Eventually(t, func() bool {
+		return remote.startedCount() == 1 && agent.startedCount() == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestRuntimeSessionFactoriesReturnSessions(t *testing.T) {
+	remoteFactory := remoteControlSessionFactory{
+		headers: fakeHeaderProvider{},
+		dialer:  fakeWebSocketDialer{},
+		runner: runtimes.NodeControlRunnerFunc(func(context.Context, runtimes.WebSocketConn, runtimes.RemoteSpec) runtimes.Exit {
+			return runtimes.CanceledExit(context.Canceled)
+		}),
+	}
+	remoteSession := remoteFactory.NewRemoteControlSession(runtimes.RemoteSpec{
+		RemoteID:        "remote_prod",
+		CloudAPIURL:     "https://api.example.test",
+		NodeControlPath: "/api/v2/node/control",
+	})
+	require.NotNil(t, remoteSession)
+
+	agentFactory := agentTunnelSessionFactory{}
+	agentSession := agentFactory.NewAgentTunnelSession(runtimes.AgentConnectionSpec{
+		ConnectionID: "conn_codex",
+		RemoteID:     "remote_prod",
+		CloudAgentID: "agent_123",
+		InstanceID:   "inst_1",
+		CloudAPIURL:  "https://api.example.test",
+		Command:      []string{"codex"},
+	})
+	require.NotNil(t, agentSession)
+}
+
 func openTestStore(t *testing.T) *daemonstore.Store {
 	t.Helper()
 	store, err := daemonstore.OpenSQLite(filepath.Join(t.TempDir(), "paxd.db"))
 	require.NoError(t, err)
 	require.NoError(t, store.Migrate(context.Background()))
 	return store
+}
+
+type fakeMetricsStarter struct {
+	started bool
+}
+
+func (f *fakeMetricsStarter) Start(context.Context) {
+	f.started = true
+}
+
+type fakeDaemonSupervisor struct {
+	wakes    int
+	started  bool
+	starts   int
+	startErr error
+}
+
+func (f *fakeDaemonSupervisor) Start(context.Context) error {
+	f.started = true
+	f.starts++
+	return f.startErr
+}
+
+func (f *fakeDaemonSupervisor) Wake() {
+	f.wakes++
+}
+
+func (f *fakeDaemonSupervisor) Snapshot() supervisor.Snapshot {
+	return supervisor.Snapshot{}
+}
+
+func (f *fakeDaemonSupervisor) startedCount() int {
+	return f.starts
+}
+
+type fakeHeaderProvider struct{}
+
+func (fakeHeaderProvider) Headers(context.Context, string) (http.Header, error) {
+	return http.Header{}, nil
+}
+
+type fakeWebSocketDialer struct{}
+
+func (fakeWebSocketDialer) Dial(context.Context, string, http.Header) (runtimes.WebSocketConn, *http.Response, error) {
+	return nil, nil, errors.New("not dialed in factory test")
 }
 
 func assertNoBusinessRows(t *testing.T, store *daemonstore.Store) {

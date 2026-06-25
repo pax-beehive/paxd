@@ -283,6 +283,164 @@ func TestRunNodeControlAttributesRemoteSpec(t *testing.T) {
 	assert.Equal(t, KindAck, decodeWrittenFrame(t, conn.writes()[0]).Kind)
 }
 
+func TestHeartbeatReportFrameHasNoClientTTL(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	service := &reportingService{}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			HeartbeatInterval: time.Millisecond,
+			Now:               func() time.Time { return now },
+			NewID:             fixedReportID("rpt_heartbeat"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(conn.writes()) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+
+	got := decodeReportFrame(t, conn.writes()[0])
+	assert.Equal(t, KindReport, got.Kind)
+	assert.Equal(t, 1, got.Version)
+	assert.Equal(t, "rpt_heartbeat", got.ReportID)
+	assert.Equal(t, control.ReportHeartbeat, got.Report.Type)
+	assert.Equal(t, "remote_prod", got.Report.RemoteID)
+	assert.Equal(t, "node_123", got.Report.NodeID)
+	assert.Equal(t, "2026-06-24T12:00:00Z", got.Report.SentAt)
+	require.NotNil(t, got.Report.Heartbeat)
+	assert.Nil(t, got.Report.RuntimeSnapshot)
+	raw := string(conn.writes()[0].payload)
+	assert.NotContains(t, raw, "lease_ttl")
+	assert.NotContains(t, raw, "ttl")
+}
+
+func TestInitialRuntimeSnapshotReportUsesControlLayer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Date(2026, 6, 24, 12, 0, 3, 0, time.UTC)
+	service := &reportingService{
+		snapshot: control.RuntimeSnapshotReport{
+			SnapshotID: "snap_1",
+			Host: &control.HostMetricsReport{
+				CPUPercent:    21.4,
+				MemoryPercent: 63.2,
+				UptimeSeconds: 80422,
+				CollectedAt:   "2026-06-24T12:00:02Z",
+			},
+			Agents: []control.AgentRuntimeReport{{
+				ConnectionID: "conn_codex",
+				CloudAgentID: "agent_123",
+				RemoteID:     "remote_prod",
+				NodeID:       "node_123",
+				RuntimePhase: "running",
+			}},
+		},
+	}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			SendInitialSnapshot: true,
+			Now:                 func() time.Time { return now },
+			NewID:               fixedReportID("rpt_snapshot"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(conn.writes()) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, []string{"remote_prod"}, service.snapshotRemoteIDs)
+	assert.Equal(t, []string{"node_123"}, service.snapshotNodeIDs)
+	got := decodeReportFrame(t, conn.writes()[0])
+	assert.Equal(t, control.ReportRuntimeSnapshot, got.Report.Type)
+	require.NotNil(t, got.Report.RuntimeSnapshot)
+	assert.Equal(t, "snap_1", got.Report.RuntimeSnapshot.SnapshotID)
+	require.NotNil(t, got.Report.RuntimeSnapshot.Host)
+	assert.Equal(t, 21.4, got.Report.RuntimeSnapshot.Host.CPUPercent)
+	require.Len(t, got.Report.RuntimeSnapshot.Agents, 1)
+	assert.Equal(t, "conn_codex", got.Report.RuntimeSnapshot.Agents[0].ConnectionID)
+}
+
+func TestInitialSnapshotDoesNotBlockReadLoop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	block := make(chan struct{})
+	service := &reportingService{blockSnapshot: block}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			SendInitialSnapshot: true,
+			NewID:               fixedReportID("rpt_blocked_snapshot"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+
+	require.Eventually(t, conn.readStarted, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	close(block)
+	<-done
+	assert.Empty(t, conn.writes())
+}
+
+func TestStatusPokeSendsDebouncedRuntimeSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pokes := make(chan struct{}, 2)
+	service := &reportingService{
+		snapshot: control.RuntimeSnapshotReport{SnapshotID: "snap_poke"},
+	}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			StatusSubscribe: func(remoteID string) (<-chan struct{}, func()) {
+				assert.Equal(t, "remote_prod", remoteID)
+				return pokes, func() {}
+			},
+			PokeDebounce: time.Millisecond,
+			NewID:        fixedReportID("rpt_poke"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+	require.Eventually(t, conn.readStarted, 2*time.Second, 10*time.Millisecond)
+
+	pokes <- struct{}{}
+	pokes <- struct{}{}
+
+	require.Eventually(t, func() bool {
+		return len(conn.writes()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+	got := decodeReportFrame(t, conn.writes()[0])
+	assert.Equal(t, control.ReportRuntimeSnapshot, got.Report.Type)
+	require.NotNil(t, got.Report.RuntimeSnapshot)
+	assert.Equal(t, "snap_poke", got.Report.RuntimeSnapshot.SnapshotID)
+}
+
 func remoteSource() control.Source {
 	return control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}
 }
@@ -302,6 +460,18 @@ func decodeWrittenFrame(t *testing.T, write writtenMessage) controltest.ControlW
 	return frame
 }
 
+func decodeReportFrame(t *testing.T, write writtenMessage) ReportFrame {
+	t.Helper()
+	assert.Equal(t, websocket.TextMessage, write.messageType)
+	var frame ReportFrame
+	require.NoError(t, json.Unmarshal(write.payload, &frame))
+	return frame
+}
+
+func fixedReportID(id string) func(string) string {
+	return func(string) string { return id }
+}
+
 type resultWatchingService struct {
 	results  <-chan control.CommandAck
 	watchErr error
@@ -317,6 +487,38 @@ func (s *resultWatchingService) HandleQuery(context.Context, control.Source, con
 
 func (s *resultWatchingService) WatchCommandResults(context.Context, control.Source) (<-chan control.CommandAck, error) {
 	return s.results, s.watchErr
+}
+
+type reportingService struct {
+	snapshot          control.RuntimeSnapshotReport
+	snapshotErr       error
+	blockSnapshot     <-chan struct{}
+	snapshotRemoteIDs []string
+	snapshotNodeIDs   []string
+}
+
+func (s *reportingService) HandleCommand(context.Context, control.Source, control.Command) (control.CommandAck, error) {
+	return control.CommandAck{}, nil
+}
+
+func (s *reportingService) HandleQuery(context.Context, control.Source, control.Query) (control.QueryResult, error) {
+	return control.QueryResult{}, nil
+}
+
+func (s *reportingService) BuildRuntimeSnapshot(ctx context.Context, remoteID, nodeID string) (control.RuntimeSnapshotReport, error) {
+	s.snapshotRemoteIDs = append(s.snapshotRemoteIDs, remoteID)
+	s.snapshotNodeIDs = append(s.snapshotNodeIDs, nodeID)
+	if s.blockSnapshot != nil {
+		select {
+		case <-ctx.Done():
+			return control.RuntimeSnapshotReport{}, ctx.Err()
+		case <-s.blockSnapshot:
+		}
+	}
+	if s.snapshotErr != nil {
+		return control.RuntimeSnapshotReport{}, s.snapshotErr
+	}
+	return s.snapshot, nil
 }
 
 type fakeWebSocketConn struct {

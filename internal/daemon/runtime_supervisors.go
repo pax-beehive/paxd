@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/control"
@@ -16,8 +17,9 @@ import (
 )
 
 type runtimeSupervisors struct {
-	remote *supervisor.RemoteSupervisor
-	agent  *supervisor.AgentConnectionSupervisor
+	remote    supervisor.Supervisor
+	agent     supervisor.Supervisor
+	statusHub *statusHub
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -39,13 +41,24 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	headers := auth.NewProvider(store, nil)
 	dialer := runtimes.GorillaWebSocketDialer{}
 	runner := controlws.NewRunner(service)
+	runner.Reports = controlws.ReportOptions{
+		HeartbeatInterval:   10 * time.Second,
+		SnapshotInterval:    30 * time.Second,
+		SendInitialSnapshot: true,
+		PokeDebounce:        500 * time.Millisecond,
+	}
+	if s.statusHub != nil {
+		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
+	}
 
 	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
-		Store:   store,
-		Factory: remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner},
+		Store:      store,
+		Factory:    remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner},
+		StatusPoke: s.statusHub,
 	})
 	s.agent = supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
-		Store: store,
+		Store:      store,
+		StatusPoke: s.statusHub,
 		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
 			Headers:               headers,
 			Dialer:                dialer,
@@ -75,6 +88,9 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 	if r == nil || r.supervisors == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
+	}
+	if r.hostMetrics != nil {
+		r.hostMetrics.Start(ctx)
 	}
 	r.supervisors.Start(ctx)
 }

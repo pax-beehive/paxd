@@ -61,6 +61,40 @@ func TestRemoteSupervisorWakeLoopReconcilesDesiredState(t *testing.T) {
 	}
 }
 
+func TestStatusWritersPokeRemoteAfterSuccessfulWrite(t *testing.T) {
+	ctx := context.Background()
+	poke := &fakeStatusPoke{}
+	remoteStore := newFakeRemoteStore()
+	remoteWriter := remoteStatusWriter(remoteStore, poke)
+	if err := remoteWriter(ctx, remoteSpec("remote_1", 2, 0), statusWrite{Phase: "connected", At: time.Now()}); err != nil {
+		t.Fatalf("remote writer error = %v", err)
+	}
+	if got := poke.remotes(); len(got) != 1 || got[0] != "remote_1" {
+		t.Fatalf("remote pokes = %+v, want remote_1", got)
+	}
+	if err := remoteWriter(ctx, remoteSpec("remote_1", 1, 0), statusWrite{Phase: "stale", At: time.Now()}); err != nil {
+		t.Fatalf("stale remote writer error = %v", err)
+	}
+	if got := poke.remotes(); len(got) != 1 {
+		t.Fatalf("remote pokes after stale write = %+v, want no additional poke", got)
+	}
+
+	agentStore := newFakeAgentStore()
+	agentWriter := agentConnectionStatusWriter(agentStore, poke)
+	if err := agentWriter(ctx, agentSpec("conn_1", 2, 0), statusWrite{Phase: "running", At: time.Now()}); err != nil {
+		t.Fatalf("agent writer error = %v", err)
+	}
+	if got := poke.remotes(); len(got) != 2 || got[1] != "remote_1" {
+		t.Fatalf("agent pokes = %+v, want remote_1 appended", got)
+	}
+	if err := agentWriter(ctx, agentSpec("conn_1", 1, 0), statusWrite{Phase: "stale", At: time.Now()}); err != nil {
+		t.Fatalf("stale agent writer error = %v", err)
+	}
+	if got := poke.remotes(); len(got) != 2 {
+		t.Fatalf("agent pokes after stale write = %+v, want no additional poke", got)
+	}
+}
+
 func TestTransientExitEntersInterruptibleBackoffAndTimerRestarts(t *testing.T) {
 	clock := newFakeClock()
 	store := newFakeRemoteStore()
@@ -505,6 +539,23 @@ func (s *fakeAgentStore) latestStatus(id string) daemonstore.AgentConnectionStat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.latest[id]
+}
+
+type fakeStatusPoke struct {
+	mu     sync.Mutex
+	remote []string
+}
+
+func (f *fakeStatusPoke) Poke(remoteID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.remote = append(f.remote, remoteID)
+}
+
+func (f *fakeStatusPoke) remotes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.remote...)
 }
 
 func stale(gen, nonce, currentGen, currentNonce int64) bool {

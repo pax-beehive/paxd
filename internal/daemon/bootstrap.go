@@ -15,6 +15,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/harnessregistry"
+	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
 )
@@ -26,6 +27,7 @@ type Runtime struct {
 	Control      control.Service
 	LocalHandler http.Handler
 	supervisors  *runtimeSupervisors
+	hostMetrics  interface{ Start(context.Context) }
 }
 
 type Options struct {
@@ -33,6 +35,7 @@ type Options struct {
 	Store         *daemonstore.Store
 	Harnesses     control.HarnessRegistry
 	LocalSessions control.LocalSessions
+	HostMetrics   control.HostMetricsProvider
 }
 
 func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
@@ -59,12 +62,20 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if localSessions == nil {
 		localSessions = localsessions.New(store, nil)
 	}
-	supervisors := &runtimeSupervisors{}
+	metrics := opts.HostMetrics
+	var metricsStarter interface{ Start(context.Context) }
+	if metrics == nil {
+		sampler := hostmetrics.NewSampler(10 * time.Second)
+		metrics = sampler
+		metricsStarter = sampler
+	}
+	supervisors := &runtimeSupervisors{statusHub: newStatusHub()}
 	service := control.NewService(control.ServiceOptions{
 		Store:         store,
 		Supervisors:   supervisors,
 		Harnesses:     harnesses,
 		LocalSessions: localSessions,
+		HostMetrics:   metrics,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
@@ -74,6 +85,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Control:      service,
 		LocalHandler: localapi.NewHandler(service),
 		supervisors:  supervisors,
+		hostMetrics:  metricsStarter,
 	}, nil
 }
 

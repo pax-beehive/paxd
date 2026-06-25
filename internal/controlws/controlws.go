@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pax-beehive/paxd/internal/control"
@@ -21,6 +22,7 @@ const (
 	KindResponse      = "response"
 	KindError         = "error"
 	KindCommandResult = "command_result"
+	KindReport        = "report"
 )
 
 type WebSocketConn = runtimes.WebSocketConn
@@ -58,12 +60,30 @@ type CommandResultFrame struct {
 	CommandAck control.CommandAck `json:"command_ack"`
 }
 
+type ReportFrame struct {
+	Kind     string         `json:"kind"`
+	Version  int            `json:"version"`
+	ReportID string         `json:"report_id"`
+	Report   control.Report `json:"report"`
+}
+
 type CommandResultWatcher interface {
 	WatchCommandResults(ctx context.Context, src control.Source) (<-chan control.CommandAck, error)
 }
 
+type ReportOptions struct {
+	HeartbeatInterval   time.Duration
+	SnapshotInterval    time.Duration
+	SendInitialSnapshot bool
+	Now                 func() time.Time
+	NewID               func(prefix string) string
+	StatusSubscribe     func(remoteID string) (<-chan struct{}, func())
+	PokeDebounce        time.Duration
+}
+
 type Runner struct {
 	Service control.Service
+	Reports ReportOptions
 }
 
 func NewRunner(service control.Service) Runner {
@@ -71,10 +91,14 @@ func NewRunner(service control.Service) Runner {
 }
 
 func (r Runner) RunNodeControl(ctx context.Context, conn runtimes.WebSocketConn, spec runtimes.RemoteSpec) runtimes.Exit {
-	return Run(ctx, conn, control.Source{Kind: control.SourceRemote, RemoteID: spec.RemoteID}, r.Service)
+	return run(ctx, conn, control.Source{Kind: control.SourceRemote, RemoteID: spec.RemoteID}, r.Service, spec.NodeID, r.Reports)
 }
 
 func Run(ctx context.Context, conn WebSocketConn, src control.Source, service control.Service) runtimes.Exit {
+	return run(ctx, conn, src, service, "", ReportOptions{})
+}
+
+func run(ctx context.Context, conn WebSocketConn, src control.Source, service control.Service, nodeID string, reports ReportOptions) runtimes.Exit {
 	if conn == nil {
 		return runtimes.ConfigExit("missing_websocket", "websocket connection is required")
 	}
@@ -89,6 +113,7 @@ func Run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 	if watcher, ok := service.(CommandResultWatcher); ok {
 		startCommandResultPump(runCtx, cancel, writer, src, watcher)
 	}
+	startReportPumps(runCtx, cancel, writer, src.RemoteID, nodeID, service, reports)
 
 	for {
 		messageType, payload, err := conn.ReadMessage()
@@ -107,6 +132,132 @@ func Run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 		if err := handlePayload(runCtx, writer, src, service, payload); err != nil {
 			return writeExit(err)
 		}
+	}
+}
+
+func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
+	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil {
+		return
+	}
+	now := opts.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	newID := opts.NewID
+	if newID == nil {
+		newID = func(prefix string) string {
+			return fmt.Sprintf("%s_%d", prefix, time.Now().UTC().UnixNano())
+		}
+	}
+	if opts.HeartbeatInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(opts.HeartbeatInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					frame := reportFrame(newID("rpt"), control.Report{
+						Type:      control.ReportHeartbeat,
+						RemoteID:  remoteID,
+						NodeID:    nodeID,
+						SentAt:    now().UTC().Format(time.RFC3339Nano),
+						Heartbeat: &control.HeartbeatReport{},
+					})
+					if err := writer.write(frame); err != nil {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+	reporter, ok := service.(control.ReportService)
+	if !ok {
+		return
+	}
+	sendSnapshot := func() {
+		snapshot, err := reporter.BuildRuntimeSnapshot(ctx, remoteID, nodeID)
+		if err != nil {
+			return
+		}
+		frame := reportFrame(newID("rpt"), control.Report{
+			Type:            control.ReportRuntimeSnapshot,
+			RemoteID:        remoteID,
+			NodeID:          nodeID,
+			SentAt:          now().UTC().Format(time.RFC3339Nano),
+			RuntimeSnapshot: &snapshot,
+		})
+		if err := writer.write(frame); err != nil {
+			cancel()
+		}
+	}
+	if opts.SendInitialSnapshot {
+		go sendSnapshot()
+	}
+	if opts.SnapshotInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(opts.SnapshotInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					sendSnapshot()
+				}
+			}
+		}()
+	}
+	if opts.StatusSubscribe != nil {
+		pokes, unsubscribe := opts.StatusSubscribe(remoteID)
+		if pokes != nil {
+			go func() {
+				if unsubscribe != nil {
+					defer unsubscribe()
+				}
+				debounce := opts.PokeDebounce
+				if debounce <= 0 {
+					debounce = time.Second
+				}
+				var timer *time.Timer
+				var timerC <-chan time.Time
+				defer func() {
+					if timer != nil {
+						timer.Stop()
+					}
+				}()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case _, ok := <-pokes:
+						if !ok {
+							return
+						}
+						if timer == nil {
+							timer = time.NewTimer(debounce)
+							timerC = timer.C
+						}
+					case <-timerC:
+						timer.Stop()
+						timer = nil
+						timerC = nil
+						sendSnapshot()
+					}
+				}
+			}()
+		}
+	}
+}
+
+func reportFrame(reportID string, report control.Report) ReportFrame {
+	return ReportFrame{
+		Kind:     KindReport,
+		Version:  1,
+		ReportID: reportID,
+		Report:   report,
 	}
 }
 

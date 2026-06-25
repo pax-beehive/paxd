@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 )
 
 var (
@@ -88,6 +89,7 @@ type ServiceOptions struct {
 	Supervisors   Supervisors
 	Harnesses     HarnessRegistry
 	LocalSessions LocalSessions
+	HostMetrics   HostMetricsProvider
 }
 
 type ControlService struct {
@@ -95,6 +97,7 @@ type ControlService struct {
 	supervisors   Supervisors
 	harnesses     HarnessRegistry
 	localSessions LocalSessions
+	hostMetrics   HostMetricsProvider
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -103,6 +106,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		supervisors:   opts.Supervisors,
 		harnesses:     opts.Harnesses,
 		localSessions: opts.LocalSessions,
+		hostMetrics:   opts.HostMetrics,
 	}
 }
 
@@ -283,6 +287,48 @@ func (s *ControlService) handleStatusQuery(ctx context.Context) (QueryResult, er
 		}
 	}
 	return QueryResult{Type: QueryStatusGet, Status: &status}, nil
+}
+
+func (s *ControlService) BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (RuntimeSnapshotReport, error) {
+	if s.store == nil {
+		return RuntimeSnapshotReport{}, ControlError{Code: ErrCodeInternal, Message: "control store is not configured"}
+	}
+	conns, err := s.store.ListAgentConnections(ctx, ListAgentConnectionsQuery{RemoteID: remoteID, IncludeDisabled: true})
+	if err != nil {
+		return RuntimeSnapshotReport{}, err
+	}
+	snapshot := RuntimeSnapshotReport{
+		SnapshotID: fmt.Sprintf("snap_%d", time.Now().UTC().UnixNano()),
+		Agents:     make([]AgentRuntimeReport, 0, len(conns)),
+	}
+	if s.hostMetrics != nil {
+		if host, err := s.hostMetrics.CurrentHostMetrics(ctx); err == nil && host != nil {
+			copy := *host
+			snapshot.Host = &copy
+		}
+	}
+	for _, conn := range conns {
+		report := AgentRuntimeReport{
+			ConnectionID: conn.ID,
+			CloudAgentID: conn.CloudAgentID,
+			RemoteID:     conn.RemoteID,
+			NodeID:       nodeID,
+			Name:         conn.Name,
+			AgentType:    conn.AgentType,
+			DesiredState: conn.DesiredState,
+		}
+		if conn.Status != nil {
+			report.RuntimePhase = conn.Status.Phase
+			report.ObservedGeneration = conn.Status.ObservedGeneration
+			report.ObservedRestartNonce = conn.Status.ObservedRestartNonce
+			report.StatusUpdatedAt = conn.Status.UpdatedAt
+			report.FailureClass = conn.Status.FailureClass
+			report.LastErrorCode = conn.Status.LastErrorCode
+			report.LastErrorMessage = conn.Status.LastErrorMessage
+		}
+		snapshot.Agents = append(snapshot.Agents, report)
+	}
+	return snapshot, nil
 }
 
 func (s *ControlService) handleGetRemote(ctx context.Context, query GetRemoteQuery) (QueryResult, error) {

@@ -22,6 +22,14 @@ type Service interface {
 	HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error)
 }
 
+type ReportService interface {
+	BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (RuntimeSnapshotReport, error)
+}
+
+type HostMetricsProvider interface {
+	CurrentHostMetrics(ctx context.Context) (*HostMetricsReport, error)
+}
+
 type ControlError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -220,6 +228,55 @@ type CommandResult struct {
 	Remote          *RemoteView          `json:"remote,omitempty"`
 	AgentConnection *AgentConnectionView `json:"agent_connection,omitempty"`
 	Command         *CommandView         `json:"command,omitempty"`
+}
+
+type ReportType string
+
+const (
+	ReportHeartbeat       ReportType = "heartbeat"
+	ReportRuntimeSnapshot ReportType = "runtime.snapshot"
+)
+
+type Report struct {
+	Type     ReportType `json:"type"`
+	RemoteID string     `json:"remote_id"`
+	NodeID   string     `json:"node_id,omitempty"`
+	SentAt   string     `json:"sent_at"`
+
+	Heartbeat       *HeartbeatReport       `json:"heartbeat,omitempty"`
+	RuntimeSnapshot *RuntimeSnapshotReport `json:"runtime_snapshot,omitempty"`
+}
+
+type HeartbeatReport struct{}
+
+type RuntimeSnapshotReport struct {
+	SnapshotID string               `json:"snapshot_id"`
+	Host       *HostMetricsReport   `json:"host,omitempty"`
+	Agents     []AgentRuntimeReport `json:"agents"`
+}
+
+type HostMetricsReport struct {
+	CPUPercent    float64 `json:"cpu_percent,omitempty"`
+	MemoryPercent float64 `json:"memory_percent,omitempty"`
+	UptimeSeconds int64   `json:"uptime_seconds,omitempty"`
+	CollectedAt   string  `json:"collected_at,omitempty"`
+}
+
+type AgentRuntimeReport struct {
+	ConnectionID         string       `json:"connection_id"`
+	CloudAgentID         string       `json:"cloud_agent_id,omitempty"`
+	RemoteID             string       `json:"remote_id"`
+	NodeID               string       `json:"node_id,omitempty"`
+	Name                 string       `json:"name,omitempty"`
+	AgentType            string       `json:"agent_type,omitempty"`
+	DesiredState         DesiredState `json:"desired_state,omitempty"`
+	RuntimePhase         string       `json:"runtime_phase,omitempty"`
+	ObservedGeneration   int64        `json:"observed_generation,omitempty"`
+	ObservedRestartNonce int64        `json:"observed_restart_nonce,omitempty"`
+	StatusUpdatedAt      string       `json:"status_updated_at,omitempty"`
+	FailureClass         string       `json:"failure_class,omitempty"`
+	LastErrorCode        string       `json:"last_error_code,omitempty"`
+	LastErrorMessage     string       `json:"last_error_message,omitempty"`
 }
 
 type QueryType string

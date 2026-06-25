@@ -22,6 +22,10 @@ type Supervisor interface {
 	Snapshot() Snapshot
 }
 
+type StatusPoke interface {
+	Poke(remoteID string)
+}
+
 type Snapshot struct {
 	Slots []SlotSnapshot
 }
@@ -97,6 +101,7 @@ type AgentConnectionStore interface {
 type RemoteSupervisorOptions struct {
 	Store             RemoteStore
 	Factory           runtimes.RemoteControlSessionFactory
+	StatusPoke        StatusPoke
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
@@ -105,6 +110,7 @@ type RemoteSupervisorOptions struct {
 type AgentConnectionSupervisorOptions struct {
 	Store             AgentConnectionStore
 	Factory           runtimes.AgentTunnelSessionFactory
+	StatusPoke        StatusPoke
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
@@ -121,7 +127,7 @@ func NewRemoteSupervisor(opts RemoteSupervisorOptions) *RemoteSupervisor {
 		restartNonce:  func(spec runtimes.RemoteSpec) int64 { return spec.RestartNonce },
 		startingPhase: string(runtimes.PhaseConnecting),
 		newSession:    opts.Factory.NewRemoteControlSession,
-		writeStatus:   remoteStatusWriter(opts.Store),
+		writeStatus:   remoteStatusWriter(opts.Store, opts.StatusPoke),
 	}
 	return &RemoteSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredRemotes, ops, baseOptions{
 		Name:              "remote",
@@ -149,7 +155,7 @@ func NewAgentConnectionSupervisor(opts AgentConnectionSupervisorOptions) *AgentC
 		restartNonce:  func(spec runtimes.AgentConnectionSpec) int64 { return spec.RestartNonce },
 		startingPhase: string(runtimes.PhaseStarting),
 		newSession:    opts.Factory.NewAgentTunnelSession,
-		writeStatus:   agentConnectionStatusWriter(opts.Store),
+		writeStatus:   agentConnectionStatusWriter(opts.Store, opts.StatusPoke),
 	}
 	return &AgentConnectionSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredAgentConnections, ops, baseOptions{
 		Name:              "agent_connection",
@@ -608,12 +614,12 @@ func (s *runtimeSlot[S]) writeStatusLoggedLocked(spec S, write statusWrite) {
 	}
 }
 
-func remoteStatusWriter(store RemoteStore) func(context.Context, runtimes.RemoteSpec, statusWrite) error {
+func remoteStatusWriter(store RemoteStore, poke StatusPoke) func(context.Context, runtimes.RemoteSpec, statusWrite) error {
 	return func(ctx context.Context, spec runtimes.RemoteSpec, write statusWrite) error {
 		if store == nil {
 			return nil
 		}
-		_, err := store.ConditionalRemoteStatusUpdate(ctx, daemonstore.RemoteStatusUpdate{
+		ok, err := store.ConditionalRemoteStatusUpdate(ctx, daemonstore.RemoteStatusUpdate{
 			RemoteID:             spec.RemoteID,
 			ObservedGeneration:   spec.Generation,
 			ObservedRestartNonce: spec.RestartNonce,
@@ -626,16 +632,19 @@ func remoteStatusWriter(store RemoteStore) func(context.Context, runtimes.Remote
 			ConnectedAt:          connectedAt(write.Phase, write.At),
 			StoppedAt:            stoppedAt(write.Phase, write.At),
 		})
+		if err == nil && ok && poke != nil && spec.RemoteID != "" {
+			poke.Poke(spec.RemoteID)
+		}
 		return err
 	}
 }
 
-func agentConnectionStatusWriter(store AgentConnectionStore) func(context.Context, runtimes.AgentConnectionSpec, statusWrite) error {
+func agentConnectionStatusWriter(store AgentConnectionStore, poke StatusPoke) func(context.Context, runtimes.AgentConnectionSpec, statusWrite) error {
 	return func(ctx context.Context, spec runtimes.AgentConnectionSpec, write statusWrite) error {
 		if store == nil {
 			return nil
 		}
-		_, err := store.ConditionalAgentConnectionStatusUpdate(ctx, daemonstore.AgentConnectionStatusUpdate{
+		ok, err := store.ConditionalAgentConnectionStatusUpdate(ctx, daemonstore.AgentConnectionStatusUpdate{
 			ConnectionID:         spec.ConnectionID,
 			ObservedGeneration:   spec.Generation,
 			ObservedRestartNonce: spec.RestartNonce,
@@ -650,6 +659,9 @@ func agentConnectionStatusWriter(store AgentConnectionStore) func(context.Contex
 			StoppedAt:            stoppedAt(write.Phase, write.At),
 			DetailsJSON:          "{}",
 		})
+		if err == nil && ok && poke != nil && spec.RemoteID != "" {
+			poke.Poke(spec.RemoteID)
+		}
 		return err
 	}
 }

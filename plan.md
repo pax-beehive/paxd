@@ -1,1046 +1,799 @@
-# paxd daemon/client split plan
+# paxd Status And Liveness Plan
 
-## Current state
-
-- `paxd run` reads YAML config and starts runtime services from that static snapshot.
-- ACP forwarding is already one WebSocket per enabled agent connection.
-- There is no node-control WebSocket today.
-- Remote node and agent commands currently arrive through HTTP mailbox polling.
-- `internal/cloud/ws.go` exists, but the main daemon loop does not wire it in.
-- `cmd/paxd/main.go` mixes daemon lifecycle, onboarding, configuration, harness inspection, and one-off forwarder commands.
-
-## Target model
-
-Split paxd into two conceptual parts:
-
-- `paxd`: daemon service. It owns long-running runtime state, local storage, remote tunnels, local harness discovery, local session observation, status reporting, and connection supervision.
-- `paxctl` / TUI / other clients: local clients. They modify or observe paxd only through the local control API.
-
-YAML should stop being the source of truth. SQLite becomes the durable local state store for remotes, desired agent connections, runtime status, harness inventory, local session cache, command history, and ACP transport journal.
-
-Hermes HTTP is not part of the target model. The target model is ACP-first plus local harness/session observation.
-
-## Control planes
-
-All control transports should be thin protocol adapters over one shared control service.
+The previous daemon/client split plan is archived at:
 
 ```text
-paxctl / TUI
-  -> Unix socket
-      -> localapi handler
-          -> control.Service
-
-curl / Postman / browser debug
-  -> optional 127.0.0.1 HTTP
-      -> localapi handler
-          -> control.Service
-
-pax-manager
-  -> node-control WebSocket
-      -> controlws handler
-          -> control.Service
+archive/daemon-client-split-plan.md
 ```
 
-Transport adapters:
+This plan records the status and liveness direction for the new paxd runtime.
 
-- Unix socket local API: default local transport for paxctl, TUI, and local programs.
-- Optional localhost HTTP debug API: same local API handler over `127.0.0.1` for curl/Postman/browser debugging.
-- Remote node-control WebSocket: remote transport between pax-manager and paxd.
+## Decision
 
-The shared `control.Service` owns query handling, desired-state mutation, command idempotency, and supervisor wakeups. Transport adapters must not implement business logic independently.
-
-### Control service boundary
-
-Put all control-plane business logic in `internal/control.Service`.
-
-Transport packages should only translate protocol messages into control queries/commands and encode responses:
+The long-term source of truth for node liveness is the authenticated
+node-control WebSocket as observed by pax-manager.
 
 ```text
-internal/localapi   -- Unix socket and localhost debug HTTP handler
-internal/controlws  -- remote node-control WebSocket adapter
-internal/control    -- shared business service
+pax-manager receives fresh node-control lease evidence
+  -> node is online
+
+pax-manager has not received lease evidence past TTL
+  -> node is degraded or offline
 ```
 
-Transport adapters must not write desired-state tables directly. They should not import the GORM store or supervisor packages except through `internal/control`.
+HTTP `POST /api/v1/node/status` is not the long-term authority. It may remain
+only as a migration bridge while pax-manager and pax-console still depend on
+`nodes.last_heartbeat`, `agents.last_heartbeat`, and legacy `status` fields.
 
-Unix socket and localhost debug HTTP should share the exact same `http.Handler`, served on different listeners:
+Paxd may report what it observes locally, but pax-manager owns the effective
+online/offline decision. Paxd must not try to report itself offline as an
+authoritative fact, because a disconnected paxd cannot reliably send that fact.
+
+## Status Layers
+
+Keep these meanings separate:
+
+- Node liveness: whether pax-manager has recently received authenticated
+  node-control lease evidence for a node.
+- Control-channel health: whether paxd's node-control WebSocket is connected,
+  backing off, failed, reconnecting, or stopped.
+- Agent runtime health: whether an `agent_connection` is starting, running,
+  backing off, failed, stopping, or stopped.
+- Workload/session status: whether a particular session or run is idle,
+  running, waiting for approval, done, or failed.
+
+This plan covers node liveness and agent runtime projection. Workload/session
+status should use a separate contract unless a later design explicitly folds it
+into runtime snapshots.
+
+## Current Gap
+
+Current pax-manager node-control handling authenticates and reads frames, but
+does not process a control protocol or refresh node liveness.
+
+Current paxd runtime has:
+
+- transport ping/pong heartbeat in `internal/runtime/heartbeat.go`
+- runtime phase events through `runtime.SessionEventSink`
+- supervisor writes into local SQLite status tables
+
+But production wiring does not yet push node lease reports or remote-scoped
+runtime snapshots to pax-manager over the node-control WebSocket.
+
+## Protocol Shape
+
+Node-control WebSocket supports bidirectional control traffic:
+
+Paxd to manager:
 
 ```text
-http.Serve(unixListener, localapi.NewHandler(controlService))
-http.Serve(localhostDebugListener, localapi.NewHandler(controlService))
+report
+command_result
 ```
 
-The remote WebSocket adapter uses a separate protocol adapter, but it calls the same `control.Service`.
-
-Test split:
-
-- `control.Service` tests use real or test stores and assert desired-state changes, generation/restart nonce behavior, idempotency, status reads, and supervisor wakeups.
-- Transport adapter tests use a mock control service. They assert that protocol inputs are translated into the expected `control.Query` or `control.Command`, and that mock service results are encoded into the expected protocol responses.
-- Transport tests should not assert database state. Business state changes belong only in `control.Service` tests.
-
-### Local control plane
-
-Use a Unix domain socket for local client-to-daemon control.
-
-Default socket:
+Manager to paxd:
 
 ```text
-~/.paxd/paxd.sock
+query
+command
 ```
 
-The local client should not write config files or start forwarders directly. It should call the daemon, and the daemon should persist desired state and reconcile runtime state.
+`status.get` is a query type, not a top-level frame kind.
 
-The optional HTTP debug listener must bind only to localhost by default and should be disabled unless explicitly requested, for example with a daemon flag such as `--debug-http 127.0.0.1:8765`.
+Keep top-level `kind` values as broad message families. Status concepts belong
+inside typed payloads, not in new top-level frame kinds.
 
-Example local endpoints:
-
-```text
-GET    /v1/status
-GET    /v1/remotes
-POST   /v1/remotes
-PATCH  /v1/remotes/{id}
-DELETE /v1/remotes/{id}
-POST   /v1/remotes/{id}/restart
-
-GET    /v1/agent-connections
-POST   /v1/agent-connections
-GET    /v1/agent-connections/{id}
-PATCH  /v1/agent-connections/{id}
-DELETE /v1/agent-connections/{id}
-POST   /v1/agent-connections/{id}/restart
-
-GET    /v1/harnesses
-POST   /v1/harnesses/discover
-
-GET    /v1/local/overview
-GET    /v1/local/sessions
-POST   /v1/local/sessions/sync
-GET    /v1/local/sessions/{session_id}
-```
-
-### Remote control plane
-
-Each enabled remote gets one node-control WebSocket.
-
-This is separate from ACP agent tunnels:
-
-```text
-pax-manager <-> paxd node-control websocket
-pax-manager <-> paxd ACP tunnel websocket <-> local harness
-```
-
-The node-control WebSocket is for daemon and machine-level management:
-
-- discover harnesses
-- create, update, delete, enable, disable, or restart agent connections
-- refresh policy
-- collect diagnostics
-- upgrade paxd
-- report command execution results
-
-The ACP tunnel remains data-plane only. It carries ACP JSON-RPC payloads for a specific agent/session and should not be used for daemon administration.
-
-`agent_connection.id` / `connection_id` is a paxd-owned durable local identity.
-It identifies one desired local connection on this node and is the stable key
-for runtime slots, local status, and the ACP transport journal. The
-pax-manager-owned `cloud_agent_id` remains the remote business identity used
-for manager-side routing and agent registration. pax-manager may store and echo
-`connection_id` for ACK/replay and diagnostics, but it should not be the
-authority that creates it.
-
-### Remote auth injection
-
-Remote authentication material belongs to the remote, not to individual agent connections.
-
-Both node-control WebSocket sessions and agent ACP tunnel sessions should obtain headers from one shared provider:
-
-```text
-AuthHeadersProvider(remote_id)
-  -> reads remote + remote_auth
-  -> resolves secret refs through SecretResolver
-  -> returns X-Pax-Key and optional CF Access headers
-```
-
-Suggested interfaces:
-
-```go
-type AuthHeadersProvider interface {
-    Headers(ctx context.Context, remoteID string) (http.Header, error)
-}
-
-type SecretResolver interface {
-    Resolve(ctx context.Context, ref string) (string, error)
-}
-```
-
-`agent_connection` must not store Cloudflare Access credentials. Agent tunnel sessions reference `remote_id`; auth headers are derived from that remote at runtime.
-
-Resolved secrets must not be logged, returned by debug APIs, shown in TUI, or persisted in command audit results.
-
-## WebSocket cardinality
-
-The desired steady state is:
-
-```text
-count(enabled remote rows) node-control WebSockets
-count(enabled agent_connection rows) ACP tunnel WebSockets
-```
-
-For example, a node with two enabled remotes and four enabled agent connections should have two node-control WebSockets and four ACP tunnel WebSockets.
-
-Do not multiplex node-control and ACP traffic in the first version. Keeping them separate avoids mixing permission boundaries, reconnect behavior, flow control, ACK semantics, and debugging.
-
-## Node-control message semantics
-
-Node-control has two message families:
-
-- Query/request: read-only or cache refresh work, such as status reads and `harness.discover`. These return a direct response and do not enter the command idempotency table.
-- Command: mutates desired state, such as remote registration, agent connection create/update/delete/restart, or paxd upgrade. These are persisted in `control_command`.
-
-For commands, synchronous success means the desired state and command record were durably committed. Runtime completion is observed later by polling status. A best-effort `command_result` can be sent over the node-control WebSocket when available, but it is not the source of truth.
-
-Manager sends:
+All paxd-originated report frames use this envelope:
 
 ```json
 {
-  "kind": "command",
-  "command_id": "cmd_123",
-  "type": "agent_connection.update",
-  "payload": {}
-}
-```
-
-paxd immediately replies:
-
-```json
-{
-  "kind": "ack",
-  "command_id": "cmd_123",
-  "ok": true,
-  "status": "received"
-}
-```
-
-The ACK means the daemon received the command and durably committed the desired-state mutation. It does not mean the runtime has fully applied the change.
-
-Rejected command ACKs use `ok=false` and `status=rejected`. Processing failures use `status=failed`.
-
-paxd later may reply:
-
-```json
-{
-  "kind": "command_result",
-  "command_id": "cmd_123",
-  "status": "applied",
-  "payload": {}
-}
-```
-
-Every mutating command must be idempotent by `command_id`.
-
-## Desired-state reconciliation
-
-Both local Unix socket requests and remote node-control commands should call the same internal control service.
-
-```text
-local paxctl/TUI request
-remote node-control command
-        |
-        v
-internal control service
-        |
-        v
-SQLite desired state
-        |
-        v
-supervisors reconcile runtime state
-```
-
-Concrete `agent_connection.create` flow:
-
-```mermaid
-sequenceDiagram
-    participant Client as paxctl / TUI / pax-manager
-    participant Transport as localapi / controlws
-    participant Control as control.Service
-    participant Store as daemonstore
-    participant Sup as AgentConnectionSupervisor
-    participant Slot as RuntimeSlot
-    participant Runtime as AgentTunnelSession
-    participant Manager as pax-manager
-    participant Harness as local ACP harness
-
-    Client->>Transport: agent_connection.create
-    Transport->>Transport: Decode wire payload into control.Command
-    Transport->>Control: HandleCommand(src, cmd)
-    Control->>Control: Validate command and oneof payload
-    Control->>Store: WithTx(...)
-    Store->>Store: Insert control_command row
-    Store->>Store: Insert agent_connection desired row
-    Store-->>Control: Commit desired state
-    Control->>Sup: WakeAgentConnections()
-    Control-->>Transport: CommandAck{ok:true,status:received}
-    Transport-->>Client: ACK / HTTP response
-
-    Sup->>Store: ListDesiredAgentConnections()
-    Store-->>Sup: Desired agent specs
-    Sup->>Slot: ApplyDesired(spec)
-    Slot->>Runtime: Run(ctx, spec)
-    Runtime->>Manager: Register/bind cloud agent if cloud_agent_id is missing
-    Manager-->>Runtime: cloud_agent_id
-    Runtime->>Store: Persist cloud_agent_id and status
-    Runtime->>Manager: Open ACP tunnel WebSocket
-    Runtime->>Harness: Start local ACP process
-    Runtime->>Runtime: Bridge ACP traffic
-```
-
-`control.Service` must not call pax-manager directly. It commits desired state and wakes supervisors; remote registration, `cloud_agent_id` discovery, tunnel dialing, and local process startup belong to supervisor/runtime layers.
-
-## Module responsibilities
-
-- `internal/control`: Shared business control service for typed commands, queries, validation, desired-state mutation, idempotency, query orchestration, and supervisor wakeups.
-- `internal/localapi`: Local Unix socket and optional localhost debug HTTP transport adapter over `control.Service`.
-- `internal/controlws`: Remote node-control WebSocket transport adapter over `control.Service`.
-- `internal/daemonstore`: GORM-backed SQLite store for desired state, runtime status, command audit, local caches, message history, settings, and migrations.
-- `internal/supervisor`: Reconciles desired state into runtime slots and owns start, stop, restart, retry, and interruptible backoff decisions.
-- `internal/runtime`: One-shot runtime sessions for node-control WebSockets and ACP tunnel/process lifecycles.
-- `internal/auth`: Resolves remote auth records and secret refs into outbound HTTP/WebSocket headers.
-- `internal/acphistory`: Projects ACP JSON-RPC payloads into daemonstore message history.
-- `internal/harnessregistry`: Discovers local harnesses/adapters and refreshes cached harness inventory without adopting them.
-- `internal/localsessions`: Manages local-only session observation and optional local timeline cache for TUI/CLI.
-- `internal/testkit/controltest`: Test-only JSON fixtures, loaders, and mock `control.Service` for control-plane transport tests.
-- `internal/store`: Legacy raw SQL store for old daemon state/orphan tables and the shared SQLite handle used by paxkit transport journal.
-
-```mermaid
-flowchart TD
-    Clients["Clients / peers<br/>paxctl, TUI, curl, pax-manager"]
-    LocalAPI["internal/localapi<br/>Unix socket + debug HTTP adapter"]
-    ControlWS["internal/controlws<br/>node-control WebSocket adapter"]
-    Control["internal/control<br/>typed business service"]
-    DaemonStore["internal/daemonstore<br/>GORM desired/status store"]
-    HarnessRegistry["internal/harnessregistry<br/>local harness discovery"]
-    LocalSessions["internal/localsessions<br/>local session observation"]
-    Supervisor["internal/supervisor<br/>desired-state reconciler"]
-    Runtime["internal/runtime<br/>one-shot sessions"]
-    Auth["internal/auth<br/>remote auth headers"]
-    RawStore["internal/store<br/>raw SQL ACP journal/history"]
-    ControlTest["internal/testkit/controltest<br/>test-only fixtures + mock service"]
-    System["Local system deps<br/>SQLite, filesystem, env, PATH"]
-    Manager["pax-manager"]
-    Harness["local ACP harness"]
-
-    Clients --> LocalAPI
-    Clients --> ControlWS
-    LocalAPI --> Control
-    ControlWS --> Control
-
-    Control --> DaemonStore
-    Control --> HarnessRegistry
-    Control --> LocalSessions
-    Control --> Supervisor
-
-    HarnessRegistry --> DaemonStore
-    LocalSessions --> DaemonStore
-    DaemonStore --> System
-    RawStore --> System
-
-    Supervisor --> DaemonStore
-    Supervisor --> Runtime
-    Runtime --> Auth
-    Runtime --> ControlWS
-    Runtime --> RawStore
-    Runtime --> Manager
-    Runtime --> Harness
-    Auth --> DaemonStore
-
-    ControlTest -. "transport tests only" .-> LocalAPI
-    ControlTest -. "transport tests only" .-> ControlWS
-```
-
-## Module dependency layers
-
-Dependency direction should point downward. Upper layers may depend on lower layers; lower layers must not import upper layers.
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│ Clients / peers                                             │
-│ paxctl, TUI, curl/Postman, pax-manager                      │
-└──────────────┬───────────────────────────────┬──────────────┘
-               │                               │
-┌──────────────▼──────────────┐   ┌────────────▼──────────────┐
-│ internal/localapi           │   │ internal/controlws         │
-│ Unix socket + debug HTTP    │   │ node-control WS adapter    │
-└──────────────┬──────────────┘   └────────────┬──────────────┘
-               │                               │
-               └──────────────┬────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ internal/control                                            │
-│ typed commands/queries, validation, desired-state mutation, │
-│ idempotency, query orchestration, supervisor wakeups         │
-└───────┬───────────────┬───────────────────────┬─────────────┘
-        │               │                       │
-        ▼               ▼                       ▼
-┌───────────────┐ ┌───────────────┐     ┌─────────────────────┐
-│ daemonstore   │ │ harnessregistry│     │ localsessions       │
-│ desired/status│ │ discovery cache│     │ local observer cache│
-└───────┬───────┘ └───────┬───────┘     └──────────┬──────────┘
-        │                 │                        │
-        │                 └────────────┬───────────┘
-        │                              │
-        ▼                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ local system dependencies                                  │
-│ SQLite/GORM, existing raw SQL store, filesystem, env, PATH  │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ internal/supervisor                                         │
-│ reconcile loops, runtime slots, interruptible backoff       │
-└──────────────┬───────────────────────────┬──────────────────┘
-               │                           │
-               ▼                           ▼
-       ┌──────────────┐             ┌──────────────┐
-       │ daemonstore  │             │ runtime      │
-       │ desired/status             │ one-shot     │
-       └──────────────┘             │ sessions     │
-                                    └──────┬───────┘
-                                           ▼
-                              ┌────────────────────────┐
-                              │ auth + controlws       │
-                              │ headers, WS adapter    │
-                              └────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ internal/testkit/controltest                                │
-│ test-only JSON fixtures and mock control.Service            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-Important dependency rules:
-
-- `localapi` and `controlws` depend on `control`, not on `daemonstore` or `supervisor`.
-- `control` depends on ports implemented by `daemonstore`, `harnessregistry`, `localsessions`, and supervisor wake handles.
-- `supervisor` depends on `daemonstore` repository ports and `runtime` session factories.
-- `runtime` depends on injected dialers/process runners, `auth.HeaderProvider`, and for remote node-control sessions the `controlws` adapter.
-- `auth` depends on `daemonstore` auth material ports and secret resolvers.
-- `daemonstore` must not depend on `control`, transport adapters, or supervisors.
-- `testkit/controltest` is test-only and must not be imported by production code.
-
-Use two reconciliation loops:
-
-- `RemoteSupervisor`: reconciles `remote` rows to node-control WebSockets.
-- `AgentConnectionSupervisor`: reconciles `agent_connection` rows to ACP tunnel WebSockets.
-
-Runtime transition rules:
-
-- new enabled remote: start node-control WebSocket
-- updated remote: restart node-control WebSocket if runtime-affecting fields changed
-- disabled or deleted remote: cancel node-control runtime
-- new enabled agent connection: start ACP forwarder
-- updated agent connection: restart if runtime-affecting fields changed
-- disabled or deleted agent connection: cancel ACP runtime and close tunnel
-- crashed connection: classify failure, update status, and reconnect with backoff when appropriate
-- status changes: persist to SQLite for clients to poll
-
-Conflict handling uses `generation` and `restart_nonce`:
-
-- Mutating desired-state updates increment `generation`.
-- Manual restart increments `restart_nonce`.
-- Runtime status writes include the observed generation and restart nonce.
-- Stale runtime results must not overwrite newer observed state.
-
-### Runtime slots, sessions, and interruptible backoff
-
-Supervisors should not let single sessions own infinite reconnect loops. Each desired runtime should have a `RuntimeSlot` owned by the relevant supervisor:
-
-```text
-Reconciler
-  -> updates slot desired spec
-
-RuntimeSlot
-  -> owns lifecycle, current handle, pending desired spec, backoff, restart, stop
-
-RuntimeSession
-  -> Run(ctx, spec) for one concrete session, then returns a classified exit
-```
-
-`RuntimeSession` should run one lifecycle only:
-
-- connect WebSocket
-- start local process when applicable
-- bridge traffic
-- keep the live connection healthy with heartbeat/read-deadline checks
-- return when WebSocket closes, process exits, context is canceled, or setup fails
-
-The important ownership boundary is tunnel handoff:
-
-- `RuntimeSlot` owns the long-lived tunnel lifecycle.
-- `RuntimeSession` borrows that lifecycle for one concrete connection attempt.
-- During `Run(ctx, spec)`, the session owns the live WebSocket/process handles.
-- During `Run(ctx, spec)`, the session owns heartbeat, read/write pumps, and any
-  watchdogs needed to detect stuck live handles.
-- When the session exits for any reason, it must close/release those handles and return a classified exit to the slot.
-- The session must not sleep and reconnect by itself after returning from a broken tunnel.
-- The slot receives the exit and decides whether to retry, back off, fail, stop, or start a newer desired spec.
-
-`RuntimeSlot` decides whether and when to retry. Concrete session types can be named by runtime:
-
-- `RemoteControlSession`: one node-control WebSocket session.
-- `AgentTunnelSession`: one ACP tunnel WebSocket plus local ACP process session.
-
-Heartbeat policy belongs inside the runtime session because the session owns
-the concrete WebSocket handle. A session should send periodic ping frames,
-refresh a read deadline when it receives pong or data, and return a
-`transient` exit such as `heartbeat_timeout` when the peer stops responding.
-Heartbeat failure is not a special desired-state mutation; it is a session exit
-that the slot handles through the normal backoff/retry path.
-
-Status observation should flow upward as events, not through direct supervisor
-or database imports:
-
-```text
-RuntimeSession event
-  -> RuntimeSlot / Supervisor
-  -> conditional status write guarded by generation + restart_nonce
-```
-
-Runtime events should describe observed phases such as `connecting`,
-`connected`, `starting`, `running`, and `stopping`. The supervisor decides
-whether the event is still fresh enough to persist.
-
-For the first migration version, `AgentTunnelSession` owns the ACP process and
-the WebSocket together. If the WebSocket exits, the session terminates the
-local harness process, returns a classified exit, and lets the slot decide
-whether to create a new session. A later optimization may lift the harness
-process into the slot so it can survive transient WebSocket reconnects, but
-that should not be required for the first runtime/supervisor implementation.
-
-Backoff must be interruptible. Do not use an uninterruptible sleep. A slot in backoff should wait on:
-
-```text
-backoff timer fires
-desired update arrives
-restart_nonce changes
-disable/delete arrives
-daemon context cancels
-```
-
-If desired state changes while a slot is waiting to reconnect, the slot must stop the timer and reconcile immediately.
-
-Failure classes:
-
-- `transient`: network errors, DNS timeouts, manager restart, 5xx, normal WebSocket close. Enter `backoff` and retry.
-- `auth`: node key rejected, CF Access denied, 401/403. Enter `failed` or long backoff; retry only after credential update or manual restart.
-- `config`: missing command, missing working directory, invalid URL, missing cloud agent id. Enter `failed`; retry only after config update or manual restart.
-- `terminal`: disable/delete/cancel. Enter `stopped`; do not retry.
-
-Backoff policy:
-
-```text
-initial: reconnect_interval or 1s
-factor: 2x
-max: 30s or 60s
-jitter: +/-20%
-reset: after a stable connection window
-```
-
-Status during backoff should include:
-
-```text
-phase = backoff
-failure_class = transient
-reconnect_attempt = N
-next_retry_at = timestamp
-last_error_code / last_error_message
-```
-
-User operations must interrupt runtime state:
-
-- disable/delete: cancel current session or pending backoff, clear pending retry, write `stopped`.
-- restart: increment `restart_nonce`; interrupt running, failed, or backoff state and attempt latest desired spec immediately.
-- update: increment `generation`; interrupt running, failed, or backoff state and attempt latest desired spec immediately.
-
-Pending desired state should be coalesced. If several updates arrive while an old session is stopping, keep only the latest desired spec. Do not build a long per-connection operation queue.
-
-Session exit/status writes must be conditional on the observed `generation` and `restart_nonce`; stale exits from canceled sessions must not overwrite newer status.
-
-## Harness discovery and local TUI
-
-Move harness discovery into a daemon-owned registry module.
-
-Candidate package:
-
-```text
-internal/harnessregistry
-```
-
-The registry should detect available local harnesses and adapters:
-
-- Codex
-- Claude Code
-- Gemini
-- future ACP-compatible adapters
-
-Discovery should distinguish:
-
-- installed or missing
-- native ACP support vs external adapter
-- resolved command
-- install hint
-- available local sessions, when cheap and safe
-
-The daemon may periodically refresh inventory and report it to pax-manager. It should not silently install adapters or automatically adopt every discovered harness without user or policy approval.
-
-Pure local TUI should not be modeled as `remote=localhost`. A local Pax manager running at `http://localhost:8080` is a real remote; local observation is a separate local mode exposed through the Unix socket.
-
-The TUI should be thin:
-
-```text
-pax-tui -> Unix socket -> paxd local API -> harness registry/session cache
-```
-
-TUI should not directly scan `~/.codex`, start ACP commands, or read SQLite.
-
-## SQLite and ORM strategy
-
-Use GORM for the new control-plane tables:
-
-- `remote`
-- `remote_auth`
-- `remote_status`
-- `agent_connection`
-- `agent_connection_status`
-- `control_command`
-- `harness_inventory`
-- `local_session`
-- `local_session_element`
-- `setting`
-
-Keep `transport_journal` out of GORM because reliable delivery, replay, ACK ranges, and retention belong to paxkit reliablemq.
-
-Do not mix GORM into the ACP transport journal. Supervisor writes that guard against stale generations must use conditional updates, even when implemented through GORM.
-
-## Target tables
-
-### remote
-
-`remote.enabled = true` means paxd should maintain a node-control WebSocket for that remote.
-
-```text
-id TEXT PRIMARY KEY
-name TEXT NOT NULL
-cloud_api_url TEXT NOT NULL
-node_id TEXT
-cloud_api_key_ref TEXT
-enabled INTEGER NOT NULL DEFAULT 1
-generation INTEGER NOT NULL DEFAULT 1
-restart_nonce INTEGER NOT NULL DEFAULT 0
-registered_at TEXT
-created_at TEXT NOT NULL
-updated_at TEXT NOT NULL
-UNIQUE(cloud_api_url)
-```
-
-### remote_auth
-
-Remote endpoint identity and remote access credentials should be separate. `remote` owns the Pax manager endpoint and node identity; `remote_auth` owns optional access-gateway configuration such as Cloudflare Access.
-
-Do not store resolved secrets in normal fields. Store secret references where possible and resolve them at runtime through a secret resolver.
-
-```text
-remote_id TEXT PRIMARY KEY
-kind TEXT NOT NULL                  -- none | cloudflare_access
-config_json TEXT NOT NULL DEFAULT '{}'
-created_at TEXT NOT NULL
-updated_at TEXT NOT NULL
-```
-
-Example `config_json`:
-
-```json
-{
-  "cloudflareAccess": {
-    "clientId": "xxx",
-    "clientSecretRef": "env:PAX_CF_SECRET_PROD"
+  "kind": "report",
+  "version": 1,
+  "report_id": "rpt_01J...",
+  "report": {
+    "type": "heartbeat",
+    "remote_id": "remote_prod",
+    "node_id": "node_123",
+    "sent_at": "2026-06-24T12:00:00Z",
+    "heartbeat": {}
   }
 }
 ```
 
-Supported secret ref schemes for the first version:
+Envelope fields:
 
 ```text
-env:NAME
-file:/absolute/path
-inline:value        -- dev/debug only; not recommended
+kind       broad frame family, always "report" here
+version    report schema version, starts at 1
+report_id  paxd-generated unique id for logs and idempotency diagnostics
+report     typed report payload
 ```
 
-Future resolvers can add remote vaults, platform credential stores such as macOS Keychain, or KMS-backed refs without changing the remote schema or control contract.
-
-### remote_status
+Report metadata fields:
 
 ```text
-remote_id TEXT PRIMARY KEY
-observed_generation INTEGER NOT NULL DEFAULT 0
-observed_restart_nonce INTEGER NOT NULL DEFAULT 0
-phase TEXT NOT NULL                 -- stopped | connecting | connected | backoff | failed
-last_error_code TEXT NOT NULL DEFAULT ''
-last_error_message TEXT NOT NULL DEFAULT ''
-failure_class TEXT NOT NULL DEFAULT ''
-reconnect_attempt INTEGER NOT NULL DEFAULT 0
-next_retry_at TEXT
-connected_at TEXT
-stopped_at TEXT
-updated_at TEXT NOT NULL
+type       heartbeat | runtime.snapshot
+remote_id  local paxd remote id that owns this node-control session
+node_id    pax-manager node id for the authenticated node
+sent_at    paxd clock, diagnostic only
 ```
 
-### agent_connection
+`sent_at` must not be used to refresh node liveness. Pax-manager refreshes
+leases using server receive time.
 
-Each enabled row maps to one desired ACP tunnel WebSocket.
+## Report Types
 
-`id` is generated and owned by paxd. It must remain stable across remote
-registration, cloud agent rebinding, renames, restarts, and reconnects. It is
-the `connection_id` used by runtime slots and by the ACP transport journal.
-`cloud_agent_id` is optional remote state owned by pax-manager.
+V1 report types:
 
 ```text
-id TEXT PRIMARY KEY
-remote_id TEXT NOT NULL
-name TEXT NOT NULL
-cloud_agent_id TEXT
-instance_id TEXT NOT NULL
-agent_type TEXT NOT NULL
-harness TEXT NOT NULL
-command_json TEXT NOT NULL
-working_dir TEXT NOT NULL DEFAULT ''
-tunnel_path TEXT NOT NULL DEFAULT '/api/v1/agent/tunnel'
-env_json TEXT NOT NULL DEFAULT '{}'
-enabled INTEGER NOT NULL DEFAULT 1
-desired_state TEXT NOT NULL         -- running | stopped | deleted
-generation INTEGER NOT NULL DEFAULT 1
-restart_nonce INTEGER NOT NULL DEFAULT 0
-created_at TEXT NOT NULL
-updated_at TEXT NOT NULL
-deleted_at TEXT
-UNIQUE(remote_id, name)
-UNIQUE(remote_id, cloud_agent_id)
+heartbeat
+runtime.snapshot
 ```
 
-### agent_connection_status
+Future report types:
 
 ```text
-connection_id TEXT PRIMARY KEY
-observed_generation INTEGER NOT NULL DEFAULT 0
-observed_restart_nonce INTEGER NOT NULL DEFAULT 0
-phase TEXT NOT NULL                 -- stopped | starting | running | stopping | backoff | failed
-pid INTEGER
-last_error_code TEXT NOT NULL DEFAULT ''
-last_error_message TEXT NOT NULL DEFAULT ''
-failure_class TEXT NOT NULL DEFAULT ''
-reconnect_attempt INTEGER NOT NULL DEFAULT 0
-next_retry_at TEXT
-started_at TEXT
-connected_at TEXT
-stopped_at TEXT
-updated_at TEXT NOT NULL
-details_json TEXT NOT NULL DEFAULT '{}'
+runtime.delta
 ```
 
-### control_command
+Do not implement `runtime.delta` in the first version. Snapshots are simpler
+and avoid ordering, gap detection, and merge complexity. Add deltas only after
+snapshot size or frequency is proven to be a problem.
 
-Only mutating desired-state commands go here. Read/query operations such as `harness.discover`, status reads, and local session sync do not need command ACK semantics.
+### heartbeat
+
+Heartbeat report:
+
+```json
+{
+  "kind": "report",
+  "version": 1,
+  "report_id": "rpt_01J...",
+  "report": {
+    "type": "heartbeat",
+    "remote_id": "remote_prod",
+    "node_id": "node_123",
+    "sent_at": "2026-06-24T12:00:00Z",
+    "heartbeat": {}
+  }
+}
+```
+
+Heartbeat semantics:
+
+- It is a normal WebSocket text frame.
+- It is business lease evidence, not WebSocket ping/pong.
+- It contains no client-selected TTL.
+- Pax-manager records lease freshness using the time the frame is accepted.
+- Pax-manager may also accept `runtime.snapshot` as lease evidence, because it
+  proves the authenticated node-control channel is alive.
+
+Example server-side lease policy:
 
 ```text
-command_id TEXT PRIMARY KEY
-source TEXT NOT NULL                -- local | remote
-type TEXT NOT NULL
-target_type TEXT NOT NULL DEFAULT ''
-target_id TEXT NOT NULL DEFAULT ''
-payload_json TEXT NOT NULL DEFAULT '{}'
-status TEXT NOT NULL                -- unknown | received | rejected | applied | failed
-desired_generation INTEGER
-error_code TEXT NOT NULL DEFAULT ''
-error_message TEXT NOT NULL DEFAULT ''
-result_json TEXT NOT NULL DEFAULT '{}'
-received_at TEXT NOT NULL
-applied_at TEXT
-updated_at TEXT NOT NULL
+received within 30s
+  -> online
+
+received within 5m
+  -> degraded
+
+otherwise
+  -> offline
 ```
 
-### harness_inventory
+Heartbeat interval must be shorter than the online TTL. For example, send every
+10s when the online TTL is 30s.
+
+### runtime.snapshot
+
+Runtime snapshots report paxd's last-known runtime state for the current
+`remote_id`. They are cloud projection payloads, not local daemon status dumps.
+
+Do not wrap or reuse `control.DaemonStatus` as the wire payload. That type is a
+local overview and may include other remotes, harness inventory, local session
+summary, or fields that are not safe or useful for pax-manager.
+
+Snapshot report:
+
+```json
+{
+  "kind": "report",
+  "version": 1,
+  "report_id": "rpt_01J...",
+  "report": {
+    "type": "runtime.snapshot",
+    "remote_id": "remote_prod",
+    "node_id": "node_123",
+    "sent_at": "2026-06-24T12:00:03Z",
+    "runtime_snapshot": {
+      "snapshot_id": "snap_01J...",
+      "host": {
+        "cpu_percent": 21.4,
+        "memory_percent": 63.2,
+        "uptime_seconds": 80422,
+        "collected_at": "2026-06-24T12:00:02Z"
+      },
+      "agents": [
+        {
+          "connection_id": "conn_codex",
+          "cloud_agent_id": "agent_123",
+          "remote_id": "remote_prod",
+          "node_id": "node_123",
+          "name": "work",
+          "agent_type": "codex",
+          "desired_state": "running",
+          "runtime_phase": "running",
+          "observed_generation": 7,
+          "observed_restart_nonce": 0,
+          "status_updated_at": "2026-06-24T12:00:02Z",
+          "failure_class": "",
+          "last_error_code": "",
+          "last_error_message": ""
+        }
+      ]
+    }
+  }
+}
+```
+
+Snapshot rules:
+
+- Include only agent connections for the report `remote_id`.
+- Include enabled, stopped, backoff, failed, and running connections.
+- Include disabled or deleted connections only if manager needs tombstone or
+  cleanup semantics; if included, mark `desired_state` explicitly.
+- Include host CPU, memory, and uptime metrics when available.
+- Do not include harness inventory, local session lists, command payloads,
+  environment values, resolved secrets, or local-only details.
+- `connection_id` is paxd's local stable identity. It is useful for diagnostics
+  and idempotency, but manager business updates should prefer `cloud_agent_id`.
+- If `cloud_agent_id` is empty, manager must not create a new cloud agent from
+  the snapshot by accident. It should either ignore that entry, store it as an
+  unbound local runtime entry, or return a safe protocol error according to the
+  migration stage.
+- Error fields must be safe for cloud storage and UI display. Paxd should
+  redact secrets, auth headers, and sensitive environment/path details before
+  reporting.
+
+## Heartbeat Types
+
+There are two heartbeat types. Do not mix them.
+
+Transport heartbeat:
+
+- Lives in `internal/runtime/heartbeat.go`.
+- Uses WebSocket ping/pong.
+- Detects a stuck or broken socket.
+- Causes the runtime session to exit with a transient failure.
+- Does not update pax-manager business status directly.
+
+Node lease heartbeat:
+
+- Lives in the node-control report protocol.
+- Is a normal WebSocket text frame with `kind=report` and
+  `report.type=heartbeat`.
+- Refreshes pax-manager node lease using server receive time.
+- Does not replace WebSocket ping/pong.
+
+## Paxd Source Of Runtime Reports
+
+Runtime snapshots should be built from daemonstore through the control business
+layer, not from transient event payloads and not by giving `controlws` direct
+database access.
 
 ```text
-harness TEXT PRIMARY KEY
-display_name TEXT NOT NULL
-state TEXT NOT NULL                 -- available | missing | degraded
-capability TEXT NOT NULL DEFAULT '' -- acp | local-log | gateway
-command_json TEXT NOT NULL DEFAULT '[]'
-version TEXT NOT NULL DEFAULT ''
-source TEXT NOT NULL DEFAULT ''     -- native | adapter | npm | local
-install_hint TEXT NOT NULL DEFAULT ''
-last_error TEXT NOT NULL DEFAULT ''
-discovered_at TEXT NOT NULL
-updated_at TEXT NOT NULL
+supervisor/runtime observes state
+  -> conditional write to daemonstore
+  -> status channel is poked
+  -> control service reads a remote-scoped projection from daemonstore
+  -> controlws encodes and writes report frames
 ```
 
-### local_session
+Daemonstore remains the source of snapshot truth. Events only accelerate
+reporting.
 
-Local observer cache for TUI and CLI.
+Relevant daemonstore tables:
 
 ```text
-id TEXT PRIMARY KEY                 -- codex:sess_xxx
-agent TEXT NOT NULL                 -- codex | claude-code | gemini
-native_id TEXT NOT NULL
-title TEXT NOT NULL DEFAULT ''
-status TEXT NOT NULL DEFAULT ''
-preview TEXT NOT NULL DEFAULT ''
-project_id TEXT NOT NULL DEFAULT ''
-updated_at TEXT
-last_active TEXT
-last_listed_at TEXT NOT NULL
-last_synced_at TEXT
-metadata_json TEXT NOT NULL DEFAULT '{}'
-UNIQUE(agent, native_id)
+remote
+remote_status
+agent_connection
+agent_connection_status
 ```
 
-### local_session_element
+`local_session` is intentionally excluded from the v1 runtime snapshot unless a
+separate workload/session reporting contract is added.
 
-Optional local timeline cache for agents that support cheap local history extraction.
+## Paxd Implementation Plan
+
+### 1. Add report contracts in internal/control
+
+Add versioned business payload types to `internal/control`:
+
+```go
+type ReportType string
+
+const (
+    ReportHeartbeat       ReportType = "heartbeat"
+    ReportRuntimeSnapshot ReportType = "runtime.snapshot"
+)
+
+type Report struct {
+    Type     ReportType `json:"type"`
+    RemoteID string     `json:"remote_id"`
+    NodeID   string     `json:"node_id,omitempty"`
+    SentAt   string     `json:"sent_at"`
+
+    Heartbeat       *HeartbeatReport       `json:"heartbeat,omitempty"`
+    RuntimeSnapshot *RuntimeSnapshotReport `json:"runtime_snapshot,omitempty"`
+}
+
+type HeartbeatReport struct{}
+
+type RuntimeSnapshotReport struct {
+    SnapshotID string               `json:"snapshot_id"`
+    Host       *HostMetricsReport   `json:"host,omitempty"`
+    Agents     []AgentRuntimeReport `json:"agents"`
+}
+
+type HostMetricsReport struct {
+    CPUPercent    float64 `json:"cpu_percent,omitempty"`
+    MemoryPercent float64 `json:"memory_percent,omitempty"`
+    UptimeSeconds int64   `json:"uptime_seconds,omitempty"`
+    CollectedAt    string  `json:"collected_at,omitempty"`
+}
+```
+
+`AgentRuntimeReport` should be a cloud-safe, remote-scoped projection. It must
+not reuse local debug or status overview types wholesale.
+
+Host metrics should come from an injected provider, not from direct system calls
+inside `controlws`:
+
+```go
+type HostMetricsProvider interface {
+    CurrentHostMetrics(ctx context.Context) (*HostMetricsReport, error)
+}
+```
+
+The provider may use `gopsutil`, matching the legacy collector's CPU, memory,
+and uptime behavior. It should prefer background sampling with a cached latest
+value, because calls such as CPU percentage sampling can block. Snapshot
+construction should read the latest sample and omit `host` if no sample is
+available.
+
+### 2. Keep controlws as the wire adapter
+
+Update `internal/controlws` so one node-control session can write:
+
+- ACK frames
+- query response frames
+- command result frames
+- report frames
+
+All outbound writes must go through one serialized writer path. Heartbeat,
+snapshot, ACK, response, and command result pumps must not call
+`conn.WriteMessage` directly.
+
+`controlws` should still depend on business interfaces, not daemonstore. It may
+depend on a narrow report provider interface implemented by `control.Service`:
+
+```go
+type RuntimeSnapshotProvider interface {
+    BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (control.RuntimeSnapshotReport, error)
+}
+```
+
+If this interface fits better inside `control.Service`, prefer that over adding
+a second dependency.
+
+### 3. Start read and write pumps together
+
+After `RemoteControlSession` connects and delegates to `controlws`, `controlws`
+should start:
 
 ```text
-id INTEGER PRIMARY KEY AUTOINCREMENT
-session_id TEXT NOT NULL
-seq INTEGER NOT NULL
-kind TEXT NOT NULL
-role TEXT NOT NULL DEFAULT ''
-text TEXT NOT NULL DEFAULT ''
-raw_json TEXT NOT NULL DEFAULT '{}'
-started_at TEXT
-completed_at TEXT
-UNIQUE(session_id, seq)
+read pump
+heartbeat ticker
+snapshot ticker
+status poke pump
+command result pump
 ```
 
-### setting
+The read pump must start promptly so manager commands and queries are not
+blocked behind snapshot construction or slow writes.
 
-Small daemon settings use key-value storage to avoid schema churn.
+Suggested initial timing:
 
 ```text
-key TEXT PRIMARY KEY
-value_json TEXT NOT NULL
-updated_at TEXT NOT NULL
+heartbeat interval  10s
+snapshot interval   60s
+poke debounce       250ms to 1s
+poke max wait       5s
 ```
 
-### transport_journal
+These values are configuration defaults, not protocol guarantees.
 
-`transport_journal` is owned by paxkit reliablemq `sqlstore`, not by
-daemonstore GORM models or paxd-specific repository helpers. paxd opens the
-shared SQLite handle and passes it to paxkit with table name
-`transport_journal`.
+### 4. Add a status poke path
 
-ACP tunnel replay policy:
+Expose a small interface:
 
-- Outbound local-harness stdout frames are durably inserted before WebSocket
-  send.
-- Outbound frames remain replayable while `pending` or `sent` and become
-  complete only after manager ACK marks them `acked`.
-- Inbound manager frames are inserted through paxkit reliablemq
-  `SaveInboundIfAbsent`; a duplicate `queue_id + stream + seq + direction` must
-  be ACKed but not dispatched to ACP stdin again.
-- Inbound frames that are `received` but not `applied` remain replayable to ACP
-  stdin after session restart.
-- The tunnel layer can provide at-least-once delivery with duplicate
-  suppression at the transport boundary. It cannot guarantee end-to-end
-  exactly-once if the local harness accepted a stdin frame and paxd crashed
-  before marking it `applied`.
+```go
+type StatusPoke interface {
+    Poke(remoteID string)
+}
+```
 
-## Legacy tables
+When supervisor status writes succeed, call `Poke(spec.RemoteID)`.
 
-These are migration-period legacy tables and should not be source of truth in the target model:
+The poke must not carry status payloads. It only tells the active node-control
+status pump to read a fresh remote-scoped snapshot from daemonstore through the
+control layer.
+
+Pokes are an optimization, not the reliability mechanism. Periodic snapshots
+must remain so pax-manager can recover from missed pokes, restarts, or local
+status drift.
+
+### 5. Keep transport heartbeat independent
+
+Do not move business lease logic into `internal/runtime/heartbeat.go`.
+
+Transport heartbeat should only close broken sockets. The session exit will be
+handled by the remote supervisor and then reflected in local daemonstore.
+
+## Pax-manager Implementation Plan
+
+### 1. Decode node-control report frames
+
+Update `internal/manager/node_control_tunnel.go` so it decodes text frames into
+the node-control protocol instead of only logging bytes.
+
+For an authenticated node-control session:
 
 ```text
-node_state        -> replaced by remote
-agent_state       -> remove
-hermes_instances  -> remove with Hermes HTTP model
-cloud_agents      -> replaced by agent_connection
-orphaned_messages -> remove with old Hermes/mailbox executor path
+valid heartbeat report
+  -> touch node lease using server receive time
+
+valid runtime.snapshot report
+  -> touch node lease using server receive time
+  -> apply runtime snapshot projection
+
+invalid report
+  -> reject/log protocol error
+  -> do not refresh lease
 ```
 
-`messages` and `message_parts` may stay as local history storage, but they must not participate in supervisor decisions.
+Do not trust `sent_at` for lease freshness. It is diagnostic metadata only.
 
-## Migration path
+### 2. Add explicit store methods
 
-1. Extract daemon runtime logic from `cmd/paxd/main.go` into `internal/daemon`.
-2. Add local Unix socket control API with read-only status and listing endpoints.
-3. Add GORM-backed target tables for remotes, agent connections, status, commands, harness inventory, local sessions, and settings.
-4. Import existing YAML config into `remote` and `agent_connection` on startup.
-5. Change `paxd run` to build runtime desired state from SQLite, not YAML.
-6. Add `RemoteSupervisor` for node-control WebSockets.
-7. Add `AgentConnectionSupervisor` for per-agent ACP tunnel WebSockets.
-8. Move `configure`, `harnesses`, and one-off control commands to `paxctl`.
-9. Move harness detection and local session scanning into daemon-owned packages exposed through the local API.
-10. Add TUI as a thin local API client.
-11. Deprecate YAML reads, remove YAML writes, then remove the YAML dependency.
+Do not overload old node status reporting as the long-term abstraction. Add
+methods similar to:
 
-## Implementation order
+```go
+TouchNodeLease(ctx, nodeID string, receivedAt time.Time) error
+ApplyNodeRuntimeSnapshot(ctx, nodeID string, snapshot RuntimeSnapshot, receivedAt time.Time) error
+```
 
-Implement from stable contracts upward, keeping each step testable before wiring the next layer.
+Short-term, `TouchNodeLease` may update `nodes.last_heartbeat` so existing
+`computed_status(last_heartbeat)` and pax-console behavior continue to work.
 
-Current checkpoint:
+Short-term, `ApplyNodeRuntimeSnapshot` may update legacy `agents.status` and
+`agents.last_heartbeat` for bound agents while pax-console still reads those
+fields. The projection must keep node lease freshness separate from last-known
+agent runtime phase.
 
-- Steps 1-9 are implemented through the shared `control.Service`, `localapi`, `controlws`, daemonstore repositories, auth/runtime/supervisor scaffolding, harness registry, and local session observer packages.
-- Step 10 is implemented for the migration phase: `internal/daemon` bootstraps daemonstore migrations, imports YAML into `remote` and `agent_connection`, builds the shared control service, exposes the local API handler, and `paxd run` starts the Unix socket plus optional localhost debug HTTP while preserving the compatibility runtime path.
-- Step 11 is implemented for local clients: `paxctl` now manages remotes, agent connections, harness discovery, and local sessions through local API calls, and `paxtui` is a thin local API client over local overview data. Neither client reads SQLite directly.
-- Hard removal of Hermes HTTP/YAML compatibility remains intentionally deferred until the migration runtime fully replaces the compatibility path; the new code no longer requires YAML writes, and startup import keeps YAML as migration input rather than the desired-state authority.
-- Current focused coverage checkpoint: `internal/daemon` 66.8%, `internal/controlws` 92.3%, `internal/control` 91.8%, `internal/harnessregistry` 85.5%, `internal/localsessions` 87.2%, `internal/daemonstore` 77.0%, `internal/localapi` 76.2%, `cmd/paxctl` 68.2%, `cmd/paxtui` 60.0%.
+### 3. Make snapshot application idempotent
 
-### 1. Control contracts and testkit
+Runtime snapshot application must tolerate retries, duplicate frames, reconnects,
+and out-of-order delivery.
 
-- Define typed `internal/control` command/query/result structs using explicit oneof-like payload fields.
-- Implement `Validate()` for commands and queries.
-- Add `internal/testkit/controltest` loader and mock `control.Service`.
-- Add initial golden JSON request/response fixtures for one remote command, one agent connection command, and one query.
+Manager should condition updates using available monotonic-ish fields:
 
-Acceptance:
+```text
+node_id
+cloud_agent_id
+connection_id for diagnostics/local binding only
+observed_generation
+observed_restart_nonce
+status_updated_at
+server received_at
+```
 
-- Unit tests can load canonical JSON fixtures into typed control structs.
-- Invalid oneof combinations fail validation.
-- Transport packages can use the mock service without importing stores.
+Older snapshots must not overwrite newer runtime state. If ordering cannot be
+proven, prefer preserving the newer server-received projection and logging the
+conflict.
 
-### 2. daemonstore schema and repositories
+### 4. Compute effective agent status from node liveness
 
-- Add GORM setup and migrations for `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, `messages`, `message_parts`, and `setting`.
-- Implement repository methods required by `control.Service` and supervisors.
-- Keep `transport_journal` outside daemonstore repositories; message history storage belongs to daemonstore and ACP projection belongs to `internal/acphistory`.
+Agent last-known runtime phase and effective online state are different.
 
-Acceptance:
+Example:
 
-- Migrations are idempotent on temporary SQLite.
-- Repository tests cover uniqueness, generation/restart nonce updates, command idempotency, and stale conditional status updates.
+```text
+node online + agent runtime_phase running
+  -> agent effective online/running
 
-### 3. control.Service
+node offline + agent last-known runtime_phase running
+  -> agent effective offline, last-known running
+```
 
-- Implement command handling for remotes, remote auth, and agent connections.
-- Implement query handling for status/list/get operations with fake harness/local session ports first.
-- Ensure mutating commands commit desired state and command record in one transaction.
-- Wake remote or agent supervisors after relevant desired-state commits.
+Avoid showing stale agent runtime as current online state after node lease
+expiration.
 
-Acceptance:
+### 5. Define connection uniqueness
 
-- `internal/control` BDD scenarios pass with test stores and fake wake ports.
-- Synchronous command success means desired state was committed, not runtime completion.
-- Command audit never stores resolved secrets.
+For a given `node_id`, pax-manager should define what happens when multiple
+node-control WebSockets are open at the same time:
 
-### 4. localapi transport
+- Prefer one active session per node.
+- A newer authenticated connection may supersede and close the older one.
+- Only the active session should apply runtime snapshots.
 
-- Implement `localapi.NewHandler(control.Service) http.Handler`.
-- Serve the same handler over Unix socket and optional localhost-only debug HTTP in daemon bootstrap.
-- Map HTTP routes to typed control commands/queries.
+This prevents two paxd processes or stale reconnects from racing status writes.
 
-Acceptance:
+## HTTP Compatibility Bridge
 
-- `localapi` tests use mock `control.Service` and golden fixtures.
-- Debug HTTP cannot bind non-loopback by default.
-- Unix socket and debug HTTP share the same handler.
+HTTP `POST /api/v1/node/status` can remain temporarily if pax-console or other
+manager paths need legacy status before node-control report processing is fully
+landed.
 
-### 5. auth provider
+If used, keep it explicitly labeled as compatibility:
 
-- Implement `auth.HeaderProvider` and `SecretResolver`.
-- Support `env:`, `file:`, and dev-only `inline:` secret refs.
-- Use `remote_auth` for Cloudflare Access headers and `remote.cloud_api_key_ref` for the Pax node key ref.
+```text
+daemonstore remote-scoped projection
+  -> compatibility HTTP status report
+  -> pax-manager legacy last_heartbeat/status fields
+```
 
-Acceptance:
+Do not make HTTP status reporter the long-term core status architecture.
 
-- Header construction tests pass without logging or returning resolved secrets.
-- Runtime sessions can request headers by `remote_id` only.
+During migration, maintain pax-console expectations:
 
-### 6. runtime one-shot sessions
+- `nodes.online/status/last_heartbeat` continue to work.
+- `agents.online/status/last_heartbeat` continue to work for bound agents.
+- Agent effective online state is derived from node lease freshness plus
+  last-known runtime phase, not from agent heartbeat alone.
 
-- Implement `RemoteControlSession` as one node-control WebSocket session.
-- Implement `AgentTunnelSession` as one ACP tunnel WebSocket plus local ACP process session.
-- Refactor or wrap existing `acpforwarder` behavior so retry/backoff is not owned by the session.
-- Move heartbeat/read-deadline logic into runtime sessions.
-- Move ACP stdin/stdout pump ownership into `AgentTunnelSession`; keep replay
-  and ACK state in the raw SQL transport journal.
-- Classify exits as `transient`, `auth`, `config`, or `terminal`.
+## Implementation Order
 
-Acceptance:
+1. Manager: add report frame decoding and validation on node-control WS.
+2. Manager: add `TouchNodeLease` and update legacy `nodes.last_heartbeat`.
+3. Paxd: send heartbeat reports over node-control WS through the serialized
+   controlws writer.
+4. Manager: verify node online/degraded/offline behavior through existing TTL
+   logic.
+5. Paxd: add remote-scoped runtime snapshot contracts and builder through the
+   control layer.
+6. Paxd: send runtime snapshot on connect and periodically.
+7. Manager: apply runtime snapshots idempotently to bound agents and legacy
+   compatibility fields.
+8. Paxd: add supervisor status poke with debounce and max wait.
+9. Manager: enforce one active node-control session per node.
+10. Later: add `runtime.delta` if snapshots are too heavy.
+11. Later: remove or disable HTTP compatibility reporter.
 
-- Runtime tests use mock dialers/processes/auth providers.
-- Sessions close/release handles before returning.
-- Sessions do not sleep and reconnect internally.
-- WebSocket heartbeat timeout returns a transient classified exit.
-- Agent tunnel tests cover journal-before-send, ACK handling, duplicate inbound
-  suppression, and replay of unacked/unapplied frames.
+## Tests
 
-### 7. supervisor and runtime slots
+Use BDD scenarios to prove the design at package boundaries before wiring the
+full daemon path. The goal is not to test implementation details; it is to
+prove the contracts that prevent stale liveness, wrong remote scoping, unsafe
+payloads, and WebSocket lifecycle leaks.
 
-- Implement `RemoteSupervisor` and `AgentConnectionSupervisor`.
-- Implement slots with interruptible backoff, pending desired coalescing, generation/restart nonce conflict handling, and stale exit protection.
-- Wire supervisor wake ports into `control.Service`.
+### Paxd BDD
 
-Acceptance:
+#### Scenario: heartbeat report is lease evidence without client TTL
 
-- Supervisor tests cover wake/ticker/exit reconcile triggers.
-- Disable/delete/restart/update interrupt running, failed, and backoff states immediately.
-- Stale exits cannot overwrite newer status.
+Given a node-control session is connected for `remote_prod` and `node_123`
+When the heartbeat ticker fires
+Then `controlws` writes a text frame with `kind=report`
+And the report type is `heartbeat`
+And the frame includes `version`, `report_id`, `remote_id`, `node_id`, and
+`sent_at`
+And the frame does not include a client-selected TTL
 
-### 8. controlws remote transport
+#### Scenario: runtime snapshot is built through the control layer
 
-- Implement node-control WebSocket frame adapter over `control.Service`.
-- Add ACK for received/rejected commands and direct responses for queries.
-- Add best-effort command result frame support if the result stream is available.
+Given `controlws` has a report-capable control service
+And daemonstore contains agent connections for `remote_prod` and
+`remote_staging`
+When the `remote_prod` node-control session sends a runtime snapshot
+Then `controlws` asks the control layer to build a snapshot for `remote_prod`
+And the frame includes only `remote_prod` agent runtime entries
+And `controlws` does not import or call daemonstore directly
 
-Acceptance:
+#### Scenario: runtime snapshot is cloud-safe
 
-- `controlws` tests use mock `control.Service` and golden fixtures.
-- Frame parsing/encoding is tested independently from DB/runtime.
-- Disconnects return classified exits to `RemoteControlSession`.
+Given daemonstore contains harness inventory, local session cache, command
+payloads, environment values, and runtime error details
+When a runtime snapshot report is built
+Then the report includes only the cloud projection fields needed by
+pax-manager
+And it excludes harness inventory, local sessions, command payloads,
+environment values, and resolved secrets
+And error messages are redacted according to the reporting policy
 
-### 9. harnessregistry and localsessions
+#### Scenario: runtime snapshot includes cached host metrics
 
-- Move existing harness detection into `internal/harnessregistry`.
-- Port release-era local session cache/scanning concepts into `internal/localsessions`.
-- Expose both through `control.Service` queries.
+Given the host metrics provider has a recent CPU, memory, and uptime sample
+When a runtime snapshot report is built
+Then the snapshot includes `host.cpu_percent`, `host.memory_percent`,
+`host.uptime_seconds`, and `host.collected_at`
+And snapshot construction does not block on fresh CPU sampling
 
-Acceptance:
+#### Scenario: host metrics failure does not block runtime reporting
 
-- Discovery refreshes `harness_inventory` but does not create agent connections.
-- Local session sync/list/get works without remotes.
-- TUI can consume all local observer data through local API.
+Given the host metrics provider has no sample or returns an error
+When a runtime snapshot report is built
+Then the snapshot omits `host` or sends only the available fields
+And agent runtime entries are still reported
+And the node-control session stays healthy
 
-### 10. daemon integration and YAML migration
+#### Scenario: status poke emits a debounced snapshot
 
-- Extract daemon bootstrap from `cmd/paxd/main.go`.
-- Open SQLite/GORM stores, run migrations, construct `control.Service`, start local transports, supervisors, and optional debug HTTP.
-- Import existing YAML config into `remote` and `agent_connection`.
-- Keep compatibility path while new model stabilizes.
+Given a node-control reporter is active for `remote_prod`
+And supervisor status writes call `Poke("remote_prod")` many times quickly
+When the debounce window closes
+Then exactly one runtime snapshot is written for that burst
+And if pokes continue indefinitely, a max-wait timer eventually writes a
+snapshot
 
-Acceptance:
+#### Scenario: missed pokes do not break correctness
 
-- Existing basic paxd run path still works during migration.
-- New local API can list remotes and agent connections from imported config.
-- No YAML writes are required in the new path.
+Given no node-control reporter is active for `remote_prod`
+When supervisor status writes call `Poke("remote_prod")`
+Then the poke may be dropped or coalesced without durable retry
+And when a later node-control session connects, it sends an initial runtime
+snapshot
+And periodic snapshots continue after connect
 
-### 11. paxctl/TUI and cleanup
+#### Scenario: node-control writes are serialized
 
-- Move configure/harness/connection management into paxctl commands that call local API.
-- Build TUI as a thin Unix socket client over local overview/session/harness/status endpoints.
-- Remove Hermes HTTP model, old YAML source-of-truth behavior, and legacy tables after migration is complete.
+Given heartbeat, runtime snapshot, query response, ACK, and command result
+pumps can all write frames
+When they become ready concurrently
+Then all frames are written through one serialized writer path
+And no goroutine writes directly to the WebSocket connection
 
-Acceptance:
+#### Scenario: reporter stops with the WebSocket session
 
-- paxctl/TUI do not read SQLite directly.
-- Pure local TUI works without any configured remote.
-- Legacy code removal does not break ACP tunnel operation.
+Given a node-control session has active heartbeat, snapshot, poke, and command
+result pumps
+When the read loop fails, a write fails, or the session context is canceled
+Then all report pumps stop
+And the poke subscription is unregistered
+And `RunNodeControl` returns a classified runtime exit
 
-## Guiding boundary
+### Pax-manager BDD
 
-Unix socket is local control and local observation.
+#### Scenario: heartbeat refreshes node lease using server time
 
-`remote` models Pax manager endpoints and owns node-control WebSockets.
+Given an authenticated node-control session for `node_123`
+And paxd sends a valid heartbeat report with `sent_at` far in the past or
+future
+When pax-manager accepts the frame
+Then it updates the node lease using server receive time
+And it does not use `sent_at` for liveness calculation
 
-`agent_connection` models per-agent ACP tunnel desired state.
+#### Scenario: invalid reports do not refresh lease
 
-ACP tunnel WebSocket is agent data-plane.
+Given an authenticated node-control session for `node_123`
+When pax-manager receives malformed JSON, an unsupported report version, a
+missing report type, or a report whose `node_id` conflicts with the
+authenticated node
+Then it records a protocol error
+And it does not refresh the node lease
+And it does not apply runtime projection updates
 
-Pure local TUI uses local APIs; it is not represented as `remote=localhost`.
+#### Scenario: runtime snapshot applies bound agent projection
+
+Given pax-manager has a node `node_123` and a bound agent `agent_123`
+When it receives a valid runtime snapshot containing
+`cloud_agent_id=agent_123` and `runtime_phase=running`
+Then it refreshes the node lease using server receive time
+And it records the agent last-known runtime phase
+And during the compatibility period it updates legacy agent status fields
+needed by pax-console
+
+#### Scenario: unbound runtime entries do not create agents accidentally
+
+Given pax-manager receives a runtime snapshot entry with an empty
+`cloud_agent_id`
+When snapshot projection is applied
+Then pax-manager does not create a new cloud agent implicitly
+And it either ignores the entry, stores an unbound diagnostic projection, or
+returns a safe protocol error according to the migration policy
+
+#### Scenario: older snapshots do not overwrite newer state
+
+Given pax-manager has already applied a runtime projection for `agent_123` with
+a newer generation, restart nonce, status timestamp, or server receive time
+When an older duplicate or delayed snapshot arrives
+Then pax-manager preserves the newer runtime projection
+And logs enough metadata to diagnose the dropped stale update
+
+#### Scenario: node lease controls effective online state
+
+Given an agent's last-known runtime phase is `running`
+And the owning node lease is stale past the offline TTL
+When pax-console or API clients read effective agent state
+Then the agent is effectively offline
+And the last-known runtime phase remains available as historical context
+
+#### Scenario: one active node-control session owns projection writes
+
+Given two authenticated node-control WebSockets exist for the same `node_id`
+When pax-manager chooses the newer session as active
+Then the older session is closed or isolated
+And only the active session can refresh lease and apply runtime snapshots
+
+### Integration BDD
+
+#### Scenario: fresh node-control heartbeat makes the node online
+
+Given paxd is configured with one enabled remote
+And pax-manager accepts the node-control WebSocket
+When paxd connects and sends heartbeat reports
+Then pax-manager marks the node online through the same fields read by
+pax-console during migration
+
+#### Scenario: agent runtime status survives reconnect
+
+Given paxd reports an agent runtime snapshot with phase `running`
+And the node-control WebSocket disconnects and reconnects
+When paxd sends the connect-time snapshot on the new session
+Then pax-manager keeps a consistent last-known agent runtime phase
+And the node effective state follows the refreshed node lease
+
+#### Scenario: HTTP compatibility bridge does not fight node-control reports
+
+Given both HTTP compatibility status reporting and node-control reporting are
+enabled during migration
+When both paths report the same bound agent
+Then legacy node and agent heartbeat/status fields remain monotonic enough for
+pax-console
+And neither path overwrites newer runtime projection with stale data
+
+## Test Placement
+
+Paxd:
+
+- `controlws` serializes concurrent report, ACK, response, and command result
+  writes through one writer.
+- `controlws` starts read handling without waiting for snapshot construction.
+- heartbeat reports contain no client-selected TTL.
+- runtime snapshot builder filters by `remote_id`.
+- runtime snapshot includes host CPU, memory, and uptime metrics when a metrics
+  sample is available.
+- runtime snapshot excludes harness inventory, local sessions, command/env
+  values, and secrets.
+- status pokes debounce bursts but eventually emit a snapshot.
+- periodic snapshot still emits without pokes.
+
+Pax-manager:
+
+- authenticated heartbeat refreshes node lease using server receive time.
+- `sent_at` in the future or past does not affect lease freshness.
+- malformed reports do not refresh node lease.
+- runtime snapshot refreshes node lease and applies runtime projection.
+- older snapshots do not overwrite newer projected runtime state.
+- duplicate snapshots are idempotent.
+- unbound `cloud_agent_id=""` entries do not create accidental cloud agents.
+- stale node lease makes agents effectively offline even if last runtime phase
+  was running.
+- a newer node-control session supersedes or isolates an older session.
+
+Migration:
+
+- pax-console node and agent resource pages continue to receive
+  `online/status/last_heartbeat` during the bridge period.
+- HTTP compatibility reporter and node-control reporter do not fight each other
+  or regress status when both are enabled.
+
+## Non-goals
+
+- Do not use ACP tunnel WebSockets for daemon/node status.
+- Do not make a single agent tunnel responsible for node liveness.
+- Do not have paxd push `offline` as the authoritative node state.
+- Do not let last-known runtime phase override stale node lease state.
+- Do not put local session/workload state into v1 runtime snapshots.

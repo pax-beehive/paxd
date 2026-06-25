@@ -651,6 +651,108 @@ func TestServiceQueryMissingStore(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeSnapshotFiltersRemoteAndIncludesHostMetrics(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	for _, remoteID := range []string{"remote_prod", "remote_staging"} {
+		if _, err := store.CreateRemote(ctx, *createRemoteCommand("seed_"+remoteID, remoteID, "https://"+remoteID+".example.test").CreateRemote); err != nil {
+			t.Fatalf("CreateRemote(%s) error = %v", remoteID, err)
+		}
+	}
+	prod := createAgentConnectionCommand("seed_prod_conn", "remote_prod", "conn_prod").CreateAgentConnection
+	prod.CloudAgentID = "agent_prod"
+	prod.Name = "prod"
+	prod.Env = map[string]string{"SECRET_TOKEN": "do-not-report"}
+	prod.Command = []string{"codex", "--secret", "do-not-report"}
+	if _, err := store.CreateAgentConnection(ctx, *prod); err != nil {
+		t.Fatalf("CreateAgentConnection(prod) error = %v", err)
+	}
+	staging := createAgentConnectionCommand("seed_staging_conn", "remote_staging", "conn_staging").CreateAgentConnection
+	staging.CloudAgentID = "agent_staging"
+	if _, err := store.CreateAgentConnection(ctx, *staging); err != nil {
+		t.Fatalf("CreateAgentConnection(staging) error = %v", err)
+	}
+	if err := store.UpsertAgentConnectionStatus(ctx, daemonstore.AgentConnectionStatusUpdate{
+		ConnectionID:         "conn_prod",
+		ObservedGeneration:   1,
+		ObservedRestartNonce: 2,
+		Phase:                "running",
+		FailureClass:         "transient",
+		LastErrorCode:        "last_error",
+		LastErrorMessage:     "safe error",
+		DetailsJSON:          `{"secret":"do-not-report"}`,
+	}); err != nil {
+		t.Fatalf("UpsertAgentConnectionStatus() error = %v", err)
+	}
+	metrics := control.HostMetricsReport{
+		CPUPercent:    12.5,
+		MemoryPercent: 61.25,
+		UptimeSeconds: 12345,
+		CollectedAt:   "2026-06-24T12:00:00Z",
+	}
+	service := control.NewService(control.ServiceOptions{
+		Store:       store,
+		HostMetrics: fakeHostMetricsProvider{metrics: &metrics},
+	})
+
+	snapshot, err := service.BuildRuntimeSnapshot(ctx, "remote_prod", "node_123")
+	if err != nil {
+		t.Fatalf("BuildRuntimeSnapshot() error = %v", err)
+	}
+	if snapshot.SnapshotID == "" {
+		t.Fatal("SnapshotID is empty")
+	}
+	if snapshot.Host == nil || snapshot.Host.CPUPercent != 12.5 || snapshot.Host.MemoryPercent != 61.25 || snapshot.Host.UptimeSeconds != 12345 {
+		t.Fatalf("snapshot host = %+v", snapshot.Host)
+	}
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("snapshot agents = %+v, want only remote_prod agent", snapshot.Agents)
+	}
+	agent := snapshot.Agents[0]
+	if agent.ConnectionID != "conn_prod" || agent.CloudAgentID != "agent_prod" || agent.RemoteID != "remote_prod" || agent.NodeID != "node_123" {
+		t.Fatalf("agent identity = %+v", agent)
+	}
+	if agent.Name != "prod" || agent.AgentType != "codex" || agent.DesiredState != control.DesiredStateRunning || agent.RuntimePhase != "running" {
+		t.Fatalf("agent projection = %+v", agent)
+	}
+	if agent.ObservedGeneration != 1 || agent.ObservedRestartNonce != 2 || agent.FailureClass != "transient" || agent.LastErrorMessage != "safe error" {
+		t.Fatalf("agent status projection = %+v", agent)
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("Marshal(snapshot) error = %v", err)
+	}
+	if contains(string(raw), "do-not-report") {
+		t.Fatalf("snapshot leaked local-only data: %s", raw)
+	}
+}
+
+func TestBuildRuntimeSnapshotOmitHostMetricsOnProviderFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	if _, err := store.CreateRemote(ctx, *createRemoteCommand("seed_remote", "remote_prod", "https://api.example.test").CreateRemote); err != nil {
+		t.Fatalf("CreateRemote() error = %v", err)
+	}
+	if _, err := store.CreateAgentConnection(ctx, *createAgentConnectionCommand("seed_conn", "remote_prod", "conn_codex").CreateAgentConnection); err != nil {
+		t.Fatalf("CreateAgentConnection() error = %v", err)
+	}
+	service := control.NewService(control.ServiceOptions{
+		Store:       store,
+		HostMetrics: fakeHostMetricsProvider{err: errors.New("metrics unavailable")},
+	})
+
+	snapshot, err := service.BuildRuntimeSnapshot(ctx, "remote_prod", "node_123")
+	if err != nil {
+		t.Fatalf("BuildRuntimeSnapshot() error = %v", err)
+	}
+	if snapshot.Host != nil {
+		t.Fatalf("snapshot host = %+v, want omitted on metrics failure", snapshot.Host)
+	}
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("snapshot agents = %+v, want agent reporting to continue", snapshot.Agents)
+	}
+}
+
 type failingCommandRecordStore struct {
 	*daemonstore.Store
 	err error
@@ -738,6 +840,19 @@ func (f *fakeLocalSessions) Get(ctx context.Context, query control.GetLocalSessi
 		}
 	}
 	return nil, control.ErrNotFound
+}
+
+type fakeHostMetricsProvider struct {
+	metrics *control.HostMetricsReport
+	err     error
+}
+
+func (f fakeHostMetricsProvider) CurrentHostMetrics(ctx context.Context) (*control.HostMetricsReport, error) {
+	_ = ctx
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.metrics, nil
 }
 
 func openControlTestStore(t *testing.T) *daemonstore.Store {
