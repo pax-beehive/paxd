@@ -208,7 +208,7 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	case QueryAgentConnectionGet:
 		return s.handleGetAgentConnection(ctx, *query.GetAgentConnection)
 	case QueryHarnessesList:
-		return s.handleListHarnesses(ctx)
+		return s.handleListHarnesses(ctx, *query.ListHarnesses)
 	case QueryHarnessesDiscover:
 		return s.handleDiscoverHarnesses(ctx, *query.DiscoverHarnesses)
 	case QueryLocalOverviewGet:
@@ -237,7 +237,7 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Comma
 		return receivedRemoteAck(cmd.CommandID, view), true, false, err
 	case CommandRemoteDelete:
 		view, err := tx.DeleteRemote(ctx, *cmd.DeleteRemote)
-		return receivedRemoteAck(cmd.CommandID, view), true, false, err
+		return receivedRemoteAck(cmd.CommandID, view), true, true, err
 	case CommandRemoteRestart:
 		view, err := tx.RestartRemote(ctx, *cmd.RestartRemote)
 		return receivedRemoteAck(cmd.CommandID, view), true, false, err
@@ -357,12 +357,25 @@ func (s *ControlService) handleGetAgentConnection(ctx context.Context, query Get
 	return QueryResult{Type: QueryAgentConnectionGet, Error: ptr(notFoundError("agent connection not found", "connection_id"))}, nil
 }
 
-func (s *ControlService) handleListHarnesses(ctx context.Context) (QueryResult, error) {
+func (s *ControlService) handleListHarnesses(ctx context.Context, query ListHarnessesQuery) (QueryResult, error) {
 	if s.harnesses == nil {
 		return QueryResult{Type: QueryHarnessesList, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "harness registry is not configured"})}, nil
 	}
 	items, err := s.harnesses.ListCached(ctx)
+	if err == nil && !query.IncludeMissing {
+		items = filterAvailableHarnesses(items)
+	}
 	return QueryResult{Type: QueryHarnessesList, Harnesses: &ListHarnessesResult{Items: items}, Error: errorPtr(err)}, nil
+}
+
+func filterAvailableHarnesses(items []HarnessView) []HarnessView {
+	out := make([]HarnessView, 0, len(items))
+	for _, item := range items {
+		if item.State == "" || item.State == "available" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (s *ControlService) handleDiscoverHarnesses(ctx context.Context, query DiscoverHarnessesQuery) (QueryResult, error) {

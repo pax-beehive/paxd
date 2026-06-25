@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
@@ -76,6 +77,13 @@ func TestLocalAPIListenerValidationDoesNotBindWhenDisabledOrInvalid(t *testing.T
 	assert.NoError(t, (*LocalAPIServer)(nil).Close())
 }
 
+func TestDefaultControlSocketPathExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	assert.Equal(t, filepath.Join(home, ".paxd", "paxd.sock"), DefaultControlSocketPath())
+}
+
 func TestStartUnixLocalAPIServesAndCloses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -129,10 +137,12 @@ func TestRuntimeSupervisorValidationAndNilBranches(t *testing.T) {
 
 func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	metrics := &fakeMetricsStarter{}
+	harnesses := &fakeDaemonHarnessRegistry{}
 	remote := &fakeDaemonSupervisor{}
 	agent := &fakeDaemonSupervisor{}
 	rt := &Runtime{
 		hostMetrics: metrics,
+		harnesses:   harnesses,
 		supervisors: &runtimeSupervisors{
 			remote: remote,
 			agent:  agent,
@@ -144,7 +154,7 @@ func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	rt.StartSupervisors(ctx)
 
 	require.Eventually(t, func() bool {
-		return metrics.started && remote.started && agent.started
+		return metrics.started && harnesses.discovered && remote.started && agent.started
 	}, time.Second, 10*time.Millisecond)
 	rt.supervisors.WakeRemotes()
 	rt.supervisors.WakeAgentConnections()
@@ -207,6 +217,19 @@ type fakeMetricsStarter struct {
 
 func (f *fakeMetricsStarter) Start(context.Context) {
 	f.started = true
+}
+
+type fakeDaemonHarnessRegistry struct {
+	discovered bool
+}
+
+func (f *fakeDaemonHarnessRegistry) ListCached(context.Context) ([]control.HarnessView, error) {
+	return nil, nil
+}
+
+func (f *fakeDaemonHarnessRegistry) Discover(context.Context, control.DiscoverHarnessesQuery) ([]control.HarnessView, error) {
+	f.discovered = true
+	return nil, nil
 }
 
 type fakeDaemonSupervisor struct {

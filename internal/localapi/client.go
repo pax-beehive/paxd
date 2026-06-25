@@ -112,6 +112,11 @@ func (c *Client) CreateAgentConnection(ctx context.Context, commandID string, cm
 	return c.postCommand(ctx, "/v1/agent-connections", cmd, commandID)
 }
 
+func (c *Client) UpdateAgentConnection(ctx context.Context, commandID string, connectionID string, cmd control.UpdateAgentConnectionCommand) (control.CommandAck, error) {
+	cmd.ConnectionID = connectionID
+	return c.patchCommand(ctx, "/v1/agent-connections/"+url.PathEscape(connectionID), cmd, commandID)
+}
+
 func (c *Client) RestartAgentConnection(ctx context.Context, commandID string, connectionID string) (control.CommandAck, error) {
 	return c.postCommand(ctx, "/v1/agent-connections/"+url.PathEscape(connectionID)+"/restart", nil, commandID)
 }

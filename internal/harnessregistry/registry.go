@@ -152,7 +152,7 @@ func DefaultDetectors() []Detector {
 				"@zed-industries/codex-acp",
 			},
 			Source:      "official",
-			InstallHint: "install codex-acp or make npx available",
+			InstallHint: "install codex-acp or use fallback: npx -y @zed-industries/codex-acp",
 		},
 		CommandDetector{
 			Harness:     "claude-code",
@@ -164,7 +164,7 @@ func DefaultDetectors() []Detector {
 				"@agentclientprotocol/claude-agent-acp",
 			},
 			Source:      "official",
-			InstallHint: "install claude-agent-acp or make npx available",
+			InstallHint: "install claude-agent-acp or use fallback: npx -y @agentclientprotocol/claude-agent-acp",
 		},
 		CommandDetector{
 			Harness:     "gemini",

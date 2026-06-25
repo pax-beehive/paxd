@@ -17,6 +17,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -26,15 +27,28 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/control"
 	paxdaemon "github.com/pax-beehive/paxd/internal/daemon"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/localapi"
+	"github.com/pax-beehive/paxd/internal/remotelogin"
+	"github.com/pax-beehive/paxd/internal/remotesecrets"
 	"github.com/pax-beehive/paxd/internal/state"
 	"github.com/urfave/cli/v3"
 )
 
 var version = "0.1.0"
+
+type remoteLoginFunc func(context.Context, remotelogin.LoginSpec, remotelogin.Options) (remotelogin.LoginResult, error)
+
+var runRemoteLogin remoteLoginFunc = remotelogin.Login
+var installPaxdService = serviceInstall
+var controlPaxdService = serviceControl
+var verifyPaxdLocalAPI = verifyLocalAPI
 
 func main() {
 	if err := newApp().Run(context.Background(), os.Args); err != nil {
@@ -48,6 +62,8 @@ func newApp() *cli.Command {
 		Usage:   "Pax Fleet Daemon",
 		Version: version,
 		Commands: []*cli.Command{
+			cmdSetupCommand(),
+			cmdLoginCommand(),
 			{
 				Name:            "run",
 				Usage:           "start the daemon",
@@ -62,19 +78,227 @@ func newApp() *cli.Command {
 	}
 }
 
+func cmdLoginCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "login",
+		Usage: "login this machine to a Pax remote",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "remote", Value: "default", Usage: "local remote id"},
+			&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
+			&cli.StringFlag{Name: "api-endpoint", Usage: "optional local API endpoint advertised for this node"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			cfg := defaultRuntimeConfig()
+			cloudURL := strings.TrimRight(firstNonEmpty(cmd.String("cloud-url"), cfg.Cloud.APIURL, config.DefaultCloudAPIURL), "/")
+			remoteID := strings.TrimSpace(cmd.String("remote"))
+			result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
+				RemoteID:    remoteID,
+				CloudAPIURL: cloudURL,
+				Node: remotelogin.NodeRegistrationInfo{
+					Name:        cfg.Agent.Name,
+					Hostname:    cfg.Agent.Hostname,
+					MachineType: cfg.Agent.MachineType,
+					OS:          runtime.GOOS,
+					Arch:        runtime.GOARCH,
+					PaxdVersion: version,
+					APIEndpoint: cmd.String("api-endpoint"),
+				},
+			}, remotelogin.Options{
+				Client: cloud.NewClient(cloudURL, ""),
+				Stdout: commandWriter(cmd),
+			})
+			if err != nil {
+				return err
+			}
+			if err := commitRemoteLogin(ctx, cfg, result); err != nil {
+				return err
+			}
+			fmt.Fprintf(commandWriter(cmd), "Connected %s remote as %s.\n", result.RemoteID, result.NodeID)
+			return nil
+		},
+	}
+}
+
+func cmdSetupCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "setup",
+		Usage: "login this machine and start paxd as a background service",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return cmdSetup(ctx, cmd)
+		},
+	}
+}
+
+func cmdSetup(ctx context.Context, cmd *cli.Command) error {
+	if err := ensurePaxdHome(); err != nil {
+		return err
+	}
+	cfg := defaultRuntimeConfig()
+	cloudURL := strings.TrimRight(firstNonEmpty(cmd.String("cloud-url"), config.DefaultCloudAPIURL), "/")
+	remoteID := "default"
+	result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
+		RemoteID:    remoteID,
+		CloudAPIURL: cloudURL,
+		Node: remotelogin.NodeRegistrationInfo{
+			Name:        cfg.Agent.Name,
+			Hostname:    cfg.Agent.Hostname,
+			MachineType: cfg.Agent.MachineType,
+			OS:          runtime.GOOS,
+			Arch:        runtime.GOARCH,
+			PaxdVersion: version,
+		},
+	}, remotelogin.Options{
+		Client: cloud.NewClient(cloudURL, ""),
+		Stdout: commandWriter(cmd),
+	})
+	if err != nil {
+		return err
+	}
+	if err := commitRemoteLogin(ctx, cfg, result); err != nil {
+		return err
+	}
+	fmt.Fprintf(commandWriter(cmd), "Connected %s remote as %s.\n", result.RemoteID, result.NodeID)
+
+	installOpts := serviceInstallOptions{
+		Force:             true,
+		SuppressNextSteps: true,
+	}
+	if err := installPaxdService(installOpts); err != nil {
+		return err
+	}
+	if err := controlPaxdService("restart", installOpts.System); err != nil {
+		return err
+	}
+	fmt.Fprintln(commandWriter(cmd), "Background service started.")
+	if err := verifyPaxdLocalAPI(ctx, 20*time.Second); err != nil {
+		return err
+	}
+	return nil
+}
+
+func commandWriter(cmd *cli.Command) io.Writer {
+	if cmd != nil && cmd.Writer != nil {
+		return cmd.Writer
+	}
+	return os.Stdout
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func defaultRuntimeConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	if strings.TrimSpace(cfg.Agent.Hostname) == "" {
+		host, _ := os.Hostname()
+		cfg.Agent.Hostname = host
+	}
+	return &cfg
+}
+
+func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelogin.LoginResult) error {
+	remoteID := strings.TrimSpace(result.RemoteID)
+	if remoteID == "" {
+		return fmt.Errorf("remote id is required")
+	}
+	secretRef, err := (remotesecrets.Store{}).StoreNodeKey(ctx, remoteID, result.NodeAPIKey)
+	if err != nil {
+		return err
+	}
+	store, closeStore, err := openDaemonStore(cfg.Daemon.DBPath)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+
+	enabled := true
+	remotes, err := store.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+	if err != nil {
+		return err
+	}
+	for _, remote := range remotes {
+		if remote.Remote.ID != remoteID {
+			continue
+		}
+		name := firstNonEmpty(remote.Remote.Name, remoteID)
+		cloudURL := result.CloudAPIURL
+		nodeID := result.NodeID
+		_, err := store.UpdateRemote(ctx, control.UpdateRemoteCommand{
+			RemoteID: remoteID,
+			Remote: control.RemotePatch{
+				Name:        &name,
+				CloudAPIURL: &cloudURL,
+				NodeID:      &nodeID,
+				Enabled:     &enabled,
+			},
+			CloudAPIKeyRef: &secretRef,
+		})
+		return err
+	}
+	_, err = store.CreateRemote(ctx, control.CreateRemoteCommand{
+		Remote: control.Remote{
+			ID:          remoteID,
+			Name:        remoteID,
+			CloudAPIURL: result.CloudAPIURL,
+			NodeID:      result.NodeID,
+			Enabled:     &enabled,
+		},
+		CloudAPIKeyRef: secretRef,
+	})
+	return err
+}
+
+func ensurePaxdHome() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	return os.MkdirAll(filepath.Join(home, ".paxd"), 0700)
+}
+
+func verifyLocalAPI(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	client := localapi.NewUnixClient(paxdaemon.DefaultControlSocketPath())
+	var lastErr error
+	for {
+		if _, err := client.GetStatus(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("verify local control API: %w", lastErr)
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // cmdRun starts the always-on local daemon. Remote and agent runtime state is
 // driven from daemonstore desired state, not from registration gates.
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	configPath := fs.String("config", "", "Config file path (default: ~/.paxd/paxd.yaml)")
 	controlSocket := fs.String("control-socket", paxdaemon.DefaultControlSocket, "Unix socket path for local control API, or empty/none to disable")
 	debugHTTP := fs.String("debug-http", "", "optional loopback debug HTTP address, for example 127.0.0.1:8765")
 	fs.Parse(args)
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
+	cfg := defaultRuntimeConfig()
 
 	log.Printf("[paxd] starting v%s on %s/%s", version, runtime.GOOS, runtime.GOARCH)
 
@@ -153,17 +377,19 @@ func closeDaemonStore(store *daemonstore.Store) {
 
 const (
 	paxdServiceName   = "paxd"
-	paxdLaunchdLabel  = "com.toddzheng.paxd"
+	paxdLaunchdLabel  = "com.paxtech.paxd"
 	paxdServiceLogDir = ".paxd/logs"
 )
 
+var legacyPaxdLaunchdLabels = []string{"com.toddzheng.paxd"}
+
 type serviceInstallOptions struct {
-	Force         bool
-	System        bool
-	RunAsUser     string
-	Config        string
-	ControlSocket string
-	DebugHTTP     string
+	Force             bool
+	System            bool
+	RunAsUser         string
+	ControlSocket     string
+	DebugHTTP         string
+	SuppressNextSteps bool
 }
 
 type serviceTarget struct {
@@ -186,11 +412,10 @@ func cmdServiceCommand() *cli.Command {
 						Force:         cmd.Bool("force"),
 						System:        cmd.Bool("system"),
 						RunAsUser:     cmd.String("run-as-user"),
-						Config:        cmd.String("config"),
 						ControlSocket: cmd.String("control-socket"),
 						DebugHTTP:     cmd.String("debug-http"),
 					}
-					return serviceInstall(opts)
+					return installPaxdService(opts)
 				},
 			},
 			serviceLifecycleCommand("start"),
@@ -207,7 +432,6 @@ func serviceInstallFlags() []cli.Flag {
 		&cli.BoolFlag{Name: "force", Usage: "overwrite existing service definition"},
 		&cli.BoolFlag{Name: "system", Usage: "install as a Linux system service"},
 		&cli.StringFlag{Name: "run-as-user", Usage: "user account for Linux system service"},
-		&cli.StringFlag{Name: "config", Usage: "config path passed to paxd run"},
 		&cli.StringFlag{Name: "control-socket", Usage: "Unix socket path passed to paxd run"},
 		&cli.StringFlag{Name: "debug-http", Usage: "loopback debug HTTP address passed to paxd run"},
 	}
@@ -221,7 +445,7 @@ func serviceLifecycleCommand(action string) *cli.Command {
 			&cli.BoolFlag{Name: "system", Usage: "target Linux system service"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return serviceControl(action, cmd.Bool("system"))
+			return controlPaxdService(action, cmd.Bool("system"))
 		},
 	}
 }
@@ -275,6 +499,9 @@ func serviceControl(action string, system bool) error {
 }
 
 func installLaunchdService(target serviceTarget, opts serviceInstallOptions) error {
+	if err := cleanupLegacyLaunchdServices(target); err != nil {
+		return err
+	}
 	plistPath := launchdPlistPath(target.Home)
 	if !opts.Force && fileExists(plistPath) {
 		fmt.Printf("Service already installed at: %s\n", plistPath)
@@ -291,6 +518,9 @@ func installLaunchdService(target serviceTarget, opts serviceInstallOptions) err
 		return fmt.Errorf("write launchd plist: %w", err)
 	}
 	fmt.Printf("LaunchAgent installed at: %s\n", plistPath)
+	if opts.SuppressNextSteps {
+		return nil
+	}
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  paxd service start")
@@ -322,6 +552,9 @@ func installSystemdService(target serviceTarget, opts serviceInstallOptions) err
 		return err
 	}
 	fmt.Printf("Systemd %s service installed at: %s\n", serviceScope(opts.System), unitPath)
+	if opts.SuppressNextSteps {
+		return nil
+	}
 	fmt.Println()
 	fmt.Println("Next steps:")
 	prefix := ""
@@ -341,26 +574,54 @@ func launchdControl(target serviceTarget, action string) error {
 	label := paxdLaunchdLabel
 	switch action {
 	case "start":
-		return runCommand("launchctl", "bootstrap", launchdDomain(), plistPath)
+		_ = runCommandQuiet("launchctl", "bootout", launchdDomain()+"/"+label)
+		return launchdBootstrap(plistPath)
 	case "stop":
 		return runCommand("launchctl", "bootout", launchdDomain()+"/"+label)
 	case "restart":
-		if err := runCommand("launchctl", "bootout", launchdDomain()+"/"+label); err != nil {
-			return err
-		}
-		return runCommand("launchctl", "bootstrap", launchdDomain(), plistPath)
+		_ = runCommandQuiet("launchctl", "bootout", launchdDomain()+"/"+label)
+		return launchdBootstrap(plistPath)
 	case "status":
 		return runCommand("launchctl", "print", launchdDomain()+"/"+label)
 	case "uninstall":
-		_ = runCommand("launchctl", "bootout", launchdDomain()+"/"+label)
-		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove launchd plist: %w", err)
+		for _, label := range append([]string{paxdLaunchdLabel}, legacyPaxdLaunchdLabels...) {
+			_ = runCommandQuiet("launchctl", "bootout", launchdDomain()+"/"+label)
+			path := launchdPlistPathForLabel(target.Home, label)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove launchd plist: %w", err)
+			}
 		}
 		fmt.Printf("LaunchAgent removed: %s\n", plistPath)
 		return nil
 	default:
 		return fmt.Errorf("unknown service action %q", action)
 	}
+}
+
+func launchdBootstrap(plistPath string) error {
+	const attempts = 10
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := runCommandQuiet("launchctl", "bootstrap", launchdDomain(), plistPath); err == nil {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return runCommand("launchctl", "bootstrap", launchdDomain(), plistPath)
+}
+
+func cleanupLegacyLaunchdServices(target serviceTarget) error {
+	for _, label := range legacyPaxdLaunchdLabels {
+		plistPath := launchdPlistPathForLabel(target.Home, label)
+		if !fileExists(plistPath) {
+			continue
+		}
+		_ = runCommandQuiet("launchctl", "bootout", launchdDomain()+"/"+label)
+		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove legacy launchd plist: %w", err)
+		}
+		fmt.Printf("Legacy LaunchAgent removed: %s\n", plistPath)
+	}
+	return nil
 }
 
 func systemdControl(action string, system bool) error {
@@ -399,6 +660,14 @@ var runCommand = func(name string, args ...string) error {
 	return nil
 }
 
+var runCommandQuiet = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return nil
+}
+
 func runCommandArgs(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing command")
@@ -427,6 +696,11 @@ func generateLaunchdPlist(target serviceTarget, opts serviceInstallOptions) stri
 %s    </array>
     <key>WorkingDirectory</key>
     <string>%s</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>%s</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -437,7 +711,7 @@ func generateLaunchdPlist(target serviceTarget, opts serviceInstallOptions) stri
     <string>%s</string>
 </dict>
 </plist>
-`, paxdLaunchdLabel, programArgs.String(), xmlEscape(target.Home), xmlEscape(filepath.Join(logDir, "paxd.log")), xmlEscape(filepath.Join(logDir, "paxd.error.log")))
+`, paxdLaunchdLabel, programArgs.String(), xmlEscape(target.Home), xmlEscape(servicePATH(target.Home)), xmlEscape(filepath.Join(logDir, "paxd.log")), xmlEscape(filepath.Join(logDir, "paxd.error.log")))
 }
 
 func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) string {
@@ -484,9 +758,6 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 
 func serviceRunArgs(execPath string, opts serviceInstallOptions) []string {
 	args := []string{execPath, "run"}
-	if opts.Config != "" {
-		args = append(args, "--config", opts.Config)
-	}
 	if opts.ControlSocket != "" {
 		args = append(args, "--control-socket", opts.ControlSocket)
 	}
@@ -494,6 +765,23 @@ func serviceRunArgs(execPath string, opts serviceInstallOptions) []string {
 		args = append(args, "--debug-http", opts.DebugHTTP)
 	}
 	return args
+}
+
+func servicePATH(home string) string {
+	parts := []string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
+		filepath.Join(home, "bin"),
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/usr/local/bin",
+		"/usr/local/sbin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	}
+	return strings.Join(parts, ":")
 }
 
 func systemctlArgs(action string, system bool, rest ...string) []string {
@@ -506,7 +794,11 @@ func systemctlArgs(action string, system bool, rest ...string) []string {
 }
 
 func launchdPlistPath(home string) string {
-	return filepath.Join(home, "Library", "LaunchAgents", paxdLaunchdLabel+".plist")
+	return launchdPlistPathForLabel(home, paxdLaunchdLabel)
+}
+
+func launchdPlistPathForLabel(home string, label string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
 }
 
 func systemdUnitPath(home string, system bool) string {

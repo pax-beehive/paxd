@@ -13,12 +13,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/agentregistry"
+	"github.com/pax-beehive/paxd/internal/auth"
+	"github.com/pax-beehive/paxd/internal/cloud"
+	"github.com/pax-beehive/paxd/internal/config"
+	"github.com/pax-beehive/paxd/internal/control"
+	paxdaemon "github.com/pax-beehive/paxd/internal/daemon"
+	"github.com/pax-beehive/paxd/internal/localapi"
+	"github.com/pax-beehive/paxd/internal/remotelogin"
+	"github.com/pax-beehive/paxd/internal/remotesecrets"
 	"github.com/pax-beehive/paxd/internal/sessionrender"
 	"github.com/pax-beehive/paxd/internal/sessionstore"
 	"github.com/urfave/cli/v3"
@@ -34,6 +43,47 @@ const (
 )
 
 var steerSession = agentregistry.SteerSession
+
+type remoteLoginFunc func(context.Context, remotelogin.LoginSpec, remotelogin.Options) (remotelogin.LoginResult, error)
+
+type localControlClient interface {
+	GetStatus(context.Context) (control.QueryResult, error)
+	ListRemotes(context.Context, bool) (control.QueryResult, error)
+	CreateRemote(context.Context, string, control.CreateRemoteCommand) (control.CommandAck, error)
+	RestartRemote(context.Context, string, string) (control.CommandAck, error)
+	DeleteRemote(context.Context, string, string, bool) (control.CommandAck, error)
+	ListAgentConnections(context.Context, bool) (control.QueryResult, error)
+	CreateAgentConnection(context.Context, string, control.CreateAgentConnectionCommand) (control.CommandAck, error)
+	UpdateAgentConnection(context.Context, string, string, control.UpdateAgentConnectionCommand) (control.CommandAck, error)
+	RestartAgentConnection(context.Context, string, string) (control.CommandAck, error)
+	DeleteAgentConnection(context.Context, string, string) (control.CommandAck, error)
+	ListHarnesses(context.Context, bool) (control.QueryResult, error)
+	DiscoverHarnesses(context.Context, control.DiscoverHarnessesQuery) (control.QueryResult, error)
+}
+
+var runRemoteLogin remoteLoginFunc = remotelogin.Login
+var loadRemoteNodeKey = func(ctx context.Context, remoteID string) (string, error) {
+	ref, err := (remotesecrets.Store{}).NodeKeyRef(remoteID)
+	if err != nil {
+		return "", err
+	}
+	return auth.NewDefaultResolver().Resolve(ctx, ref)
+}
+var registerCloudAgent = func(ctx context.Context, remote control.Remote, nodeKey string, name string, agentType string) (string, error) {
+	resp, err := cloud.NewClient(remote.CloudAPIURL, nodeKey).RegisterNodeAgent(&cloud.RegisterNodeAgentRequest{
+		Agent: cloud.RegisterNodeAgentPayload{Name: name, AgentType: agentType},
+	}, "")
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || strings.TrimSpace(resp.AgentID) == "" {
+		return "", errors.New("register cloud agent returned empty agent id")
+	}
+	return resp.AgentID, nil
+}
+var newLocalControlClient = func() localControlClient {
+	return localapi.NewUnixClient(paxdaemon.DefaultControlSocketPath())
+}
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -57,33 +107,66 @@ func newPaxCommand(stdout, stderr io.Writer) *cli.Command {
 		ErrWriter: stderr,
 		Commands: []*cli.Command{
 			{
+				Name:  "status",
+				Usage: "Show local paxd status",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return statusCommand(ctx, newLocalControlClient(), stdout)
+				},
+			},
+			remotesCommand(stdout),
+			{
 				Name:  "agents",
-				Usage: "Inspect local agent sources",
+				Usage: "Manage local agent connections",
 				Commands: []*cli.Command{
 					{
 						Name:  "list",
-						Usage: "List supported local agents and adapters",
+						Usage: "List local agent connections",
 						Flags: []cli.Flag{
-							&cli.StringFlag{Name: "format", Value: "table", Usage: "Output format: table or jsonl"},
-							&cli.BoolFlag{Name: "probe", Usage: "Probe gateway-backed agents for live reachability"},
+							&cli.BoolFlag{Name: "all", Usage: "Include disabled/deleted connections"},
 						},
 						Action: func(ctx context.Context, cmd *cli.Command) error {
-							return agentsList(cmd, stdout)
+							return agentConnectionsList(ctx, newLocalControlClient(), stdout, cmd.Bool("all"))
 						},
 					},
 					{
-						Name:  "setup",
-						Usage: "Install local adapter commands for supported agents",
+						Name:  "create",
+						Usage: "Create a local agent connection",
 						Flags: []cli.Flag{
-							&cli.StringFlag{Name: "agents", Usage: "Comma-separated agents to install"},
-							&cli.BoolFlag{Name: "dry-run", Usage: "Print install commands without running them"},
+							&cli.StringFlag{Name: "remote", Usage: "Remote id"},
+							&cli.StringFlag{Name: "harness", Usage: "Harness to run"},
+							&cli.StringFlag{Name: "name", Usage: "Agent connection name"},
 						},
 						Action: func(ctx context.Context, cmd *cli.Command) error {
-							return agentsSetup(ctx, cmd, stdout, stderr)
+							return agentConnectionCreate(ctx, newLocalControlClient(), stdout, cmd)
+						},
+					},
+					{
+						Name:      "restart",
+						Usage:     "Restart a local agent connection",
+						ArgsUsage: "<name-or-id>",
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return agentConnectionRestart(ctx, newLocalControlClient(), stdout, cmd.Args().First())
+						},
+					},
+					{
+						Name:      "stop",
+						Usage:     "Stop a local agent connection",
+						ArgsUsage: "<name-or-id>",
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return agentConnectionStop(ctx, newLocalControlClient(), stdout, cmd.Args().First())
+						},
+					},
+					{
+						Name:      "remove",
+						Usage:     "Remove a local agent connection",
+						ArgsUsage: "<name-or-id>",
+						Action: func(ctx context.Context, cmd *cli.Command) error {
+							return agentConnectionRemove(ctx, newLocalControlClient(), stdout, cmd.Args().First())
 						},
 					},
 				},
 			},
+			harnessesCommand(stdout),
 			{
 				Name:  "sessions",
 				Usage: "List, sync, and render local agent sessions",
@@ -208,6 +291,572 @@ func newPaxCommand(stdout, stderr io.Writer) *cli.Command {
 			},
 		},
 	}
+}
+
+func remotesCommand(stdout io.Writer) *cli.Command {
+	return &cli.Command{
+		Name:  "remotes",
+		Usage: "Manage Pax remotes",
+		Commands: []*cli.Command{
+			{
+				Name:  "list",
+				Usage: "List configured remotes",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "all", Usage: "Include disabled remotes"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return remotesList(ctx, newLocalControlClient(), stdout, cmd.Bool("all"))
+				},
+			},
+			{
+				Name:      "login",
+				Usage:     "Login another remote through the running daemon",
+				ArgsUsage: "<remote>",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return remotesLogin(ctx, newLocalControlClient(), stdout, cmd.Args().First(), cmd.String("cloud-url"))
+				},
+			},
+			{
+				Name:      "restart",
+				Usage:     "Restart a remote control connection",
+				ArgsUsage: "<remote>",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return remotesRestart(ctx, newLocalControlClient(), stdout, cmd.Args().First())
+				},
+			},
+			{
+				Name:      "disconnect",
+				Usage:     "Disable a remote",
+				ArgsUsage: "<remote>",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return remotesDisconnect(ctx, newLocalControlClient(), stdout, cmd.Args().First())
+				},
+			},
+			{
+				Name:      "remove",
+				Usage:     "Remove a remote and its local agent connections",
+				ArgsUsage: "<remote>",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return remotesRemove(ctx, newLocalControlClient(), stdout, cmd.Args().First())
+				},
+			},
+		},
+	}
+}
+
+func harnessesCommand(stdout io.Writer) *cli.Command {
+	return &cli.Command{
+		Name:  "harnesses",
+		Usage: "List and discover local harnesses",
+		Commands: []*cli.Command{
+			{
+				Name:  "list",
+				Usage: "List known harnesses",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "all", Usage: "Include missing harnesses"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return harnessesList(ctx, newLocalControlClient(), stdout, cmd.Bool("all"))
+				},
+			},
+			{
+				Name:      "discover",
+				Usage:     "Discover harness availability",
+				ArgsUsage: "[harness...]",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "probe", Usage: "Probe live reachability where supported"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return harnessesDiscover(ctx, newLocalControlClient(), stdout, control.DiscoverHarnessesQuery{
+						Probe: cmd.Bool("probe"),
+						Names: cmd.Args().Slice(),
+					})
+				},
+			},
+		},
+	}
+}
+
+func statusCommand(ctx context.Context, client localControlClient, stdout io.Writer) error {
+	result, err := client.GetStatus(ctx)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return err
+	}
+	status := result.Status
+	if status == nil {
+		return errors.New("local API returned no status")
+	}
+	fmt.Fprintf(stdout, "DAEMON\t%s\n", firstNonEmpty(status.Phase, "unknown"))
+	if len(status.Remotes) > 0 {
+		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "REMOTE\tPHASE\tERROR")
+		for _, item := range status.Remotes {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", item.RemoteID, firstNonEmpty(item.Phase, "-"), firstNonEmpty(item.LastErrorMessage, "-"))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	if len(status.AgentConnections) > 0 {
+		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "AGENT\tPHASE\tERROR")
+		for _, item := range status.AgentConnections {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", item.ConnectionID, firstNonEmpty(item.Phase, "-"), firstNonEmpty(item.LastErrorMessage, "-"))
+		}
+		return tw.Flush()
+	}
+	return nil
+}
+
+func remotesList(ctx context.Context, client localControlClient, stdout io.Writer, includeDisabled bool) error {
+	result, err := client.ListRemotes(ctx, includeDisabled)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return err
+	}
+	items := remoteItems(result)
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "REMOTE\tNAME\tURL\tENABLED\tPHASE")
+	for _, item := range items {
+		enabled := true
+		if item.Remote.Enabled != nil {
+			enabled = *item.Remote.Enabled
+		}
+		phase := "-"
+		if item.Status != nil {
+			phase = firstNonEmpty(item.Status.Phase, "-")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\n", item.Remote.ID, item.Remote.Name, item.Remote.CloudAPIURL, enabled, phase)
+	}
+	return tw.Flush()
+}
+
+func remotesLogin(ctx context.Context, client localControlClient, stdout io.Writer, remoteID string, cloudURL string) error {
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID == "" {
+		return errors.New("usage: paxctl remotes login <remote>")
+	}
+	cloudURL = strings.TrimRight(firstNonEmpty(cloudURL, config.DefaultCloudAPIURL), "/")
+	result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
+		RemoteID:    remoteID,
+		CloudAPIURL: cloudURL,
+		Node: remotelogin.NodeRegistrationInfo{
+			OS:          runtime.GOOS,
+			Arch:        runtime.GOARCH,
+			PaxdVersion: "paxctl",
+		},
+	}, remotelogin.Options{
+		Client: cloud.NewClient(cloudURL, ""),
+		Stdout: stdout,
+	})
+	if err != nil {
+		return err
+	}
+	secretRef, err := (remotesecrets.Store{}).StoreNodeKey(ctx, result.RemoteID, result.NodeAPIKey)
+	if err != nil {
+		return err
+	}
+	enabled := true
+	ack, err := client.CreateRemote(ctx, newCommandID(), control.CreateRemoteCommand{
+		Remote: control.Remote{
+			ID:          result.RemoteID,
+			Name:        result.RemoteID,
+			CloudAPIURL: result.CloudAPIURL,
+			NodeID:      result.NodeID,
+			Enabled:     &enabled,
+		},
+		CloudAPIKeyRef: secretRef,
+	})
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Remote %s login committed.\n", result.RemoteID)
+	return nil
+}
+
+func remotesRestart(ctx context.Context, client localControlClient, stdout io.Writer, remoteID string) error {
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID == "" {
+		return errors.New("usage: paxctl remotes restart <remote>")
+	}
+	ack, err := client.RestartRemote(ctx, newCommandID(), remoteID)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Restart requested for remote %s.\n", remoteID)
+	return nil
+}
+
+func remotesDisconnect(ctx context.Context, client localControlClient, stdout io.Writer, remoteID string) error {
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID == "" {
+		return errors.New("usage: paxctl remotes disconnect <remote>")
+	}
+	ack, err := client.DeleteRemote(ctx, newCommandID(), remoteID, false)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Disconnected remote %s.\n", remoteID)
+	return nil
+}
+
+func remotesRemove(ctx context.Context, client localControlClient, stdout io.Writer, remoteID string) error {
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID == "" {
+		return errors.New("usage: paxctl remotes remove <remote>")
+	}
+	ack, err := client.DeleteRemote(ctx, newCommandID(), remoteID, true)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	if err := (remotesecrets.Store{}).DeleteRemote(ctx, remoteID); err != nil && !errors.Is(err, remotesecrets.ErrInvalidRemoteID) {
+		return err
+	}
+	fmt.Fprintf(stdout, "Removed remote %s.\n", remoteID)
+	return nil
+}
+
+func selectRemote(ctx context.Context, client localControlClient, explicit string) (string, error) {
+	remote, err := selectRemoteView(ctx, client, explicit)
+	if err != nil {
+		return "", err
+	}
+	return remote.Remote.ID, nil
+}
+
+func selectRemoteView(ctx context.Context, client localControlClient, explicit string) (control.RemoteView, error) {
+	explicit = strings.TrimSpace(explicit)
+	result, err := client.ListRemotes(ctx, false)
+	if err != nil {
+		return control.RemoteView{}, localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return control.RemoteView{}, err
+	}
+	items := remoteItems(result)
+	if explicit != "" {
+		for _, item := range items {
+			if item.Remote.ID == explicit {
+				return item, nil
+			}
+		}
+		return control.RemoteView{}, fmt.Errorf("remote %q is not configured or is disabled", explicit)
+	}
+	switch len(items) {
+	case 0:
+		return control.RemoteView{}, errors.New("no remotes configured; run paxd login first or paxctl remotes login <remote>")
+	case 1:
+		return items[0], nil
+	default:
+		return control.RemoteView{}, errors.New("multiple remotes configured; pass --remote")
+	}
+}
+
+func agentConnectionsList(ctx context.Context, client localControlClient, stdout io.Writer, includeDisabled bool) error {
+	result, err := client.ListAgentConnections(ctx, includeDisabled)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "AGENT\tREMOTE\tNAME\tHARNESS\tDESIRED\tPHASE")
+	for _, item := range agentItems(result) {
+		phase := "-"
+		if item.Status != nil {
+			phase = firstNonEmpty(item.Status.Phase, "-")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", item.ID, item.RemoteID, item.Name, item.Harness, item.DesiredState, phase)
+	}
+	return tw.Flush()
+}
+
+func agentConnectionCreate(ctx context.Context, client localControlClient, stdout io.Writer, cmd *cli.Command) error {
+	harness := strings.TrimSpace(cmd.String("harness"))
+	name := strings.TrimSpace(cmd.String("name"))
+	if harness == "" || name == "" {
+		return errors.New("usage: paxctl agents create [--remote <remote>] --harness <harness> --name <name>")
+	}
+	remote, err := selectRemoteView(ctx, client, cmd.String("remote"))
+	if err != nil {
+		return err
+	}
+	command, err := resolveHarnessCommand(ctx, client, harness)
+	if err != nil {
+		return err
+	}
+	nodeKey, err := loadRemoteNodeKey(ctx, remote.Remote.ID)
+	if err != nil {
+		return err
+	}
+	cloudAgentID, err := registerCloudAgent(ctx, remote.Remote, nodeKey, name, harness)
+	if err != nil {
+		return err
+	}
+	ack, err := client.CreateAgentConnection(ctx, newCommandID(), control.CreateAgentConnectionCommand{
+		RemoteID:     remote.Remote.ID,
+		Name:         name,
+		CloudAgentID: cloudAgentID,
+		InstanceID:   name,
+		AgentType:    harness,
+		Harness:      harness,
+		Command:      command,
+		DesiredState: control.DesiredStateRunning,
+	})
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Agent create requested for %s on remote %s as %s.\n", name, remote.Remote.ID, cloudAgentID)
+	return nil
+}
+
+func resolveHarnessCommand(ctx context.Context, client localControlClient, harness string) ([]string, error) {
+	result, err := client.ListHarnesses(ctx, true)
+	if err != nil {
+		return nil, localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return nil, err
+	}
+	command, cached, cachedErr := commandForHarness(harnessItems(result), harness)
+	if cached && cachedErr == nil {
+		return command, nil
+	}
+
+	result, err = client.DiscoverHarnesses(ctx, control.DiscoverHarnessesQuery{Names: []string{harness}})
+	if err != nil {
+		return nil, localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return nil, err
+	}
+	if command, ok, err := commandForHarness(harnessItems(result), harness); ok || err != nil {
+		return command, err
+	}
+	if cachedErr != nil {
+		return nil, cachedErr
+	}
+	return nil, fmt.Errorf("harness %q is not known; run `paxctl harnesses discover %s` and choose an available harness", harness, harness)
+}
+
+func commandForHarness(items []control.HarnessView, harness string) ([]string, bool, error) {
+	for _, item := range items {
+		if !strings.EqualFold(item.Harness, harness) {
+			continue
+		}
+		state := strings.TrimSpace(item.State)
+		if state != "" && state != "available" {
+			reason := firstNonEmpty(item.LastError, item.InstallHint, "harness is not available")
+			return nil, true, fmt.Errorf("harness %q is %s: %s", harness, state, reason)
+		}
+		if len(item.Command) == 0 {
+			return nil, true, fmt.Errorf("harness %q has no command configured; run `paxctl harnesses discover %s`", harness, harness)
+		}
+		return append([]string(nil), item.Command...), true, nil
+	}
+	return nil, false, nil
+}
+
+func agentConnectionRestart(ctx context.Context, client localControlClient, stdout io.Writer, connectionID string) error {
+	connectionID = strings.TrimSpace(connectionID)
+	if connectionID == "" {
+		return errors.New("usage: paxctl agents restart <name-or-id>")
+	}
+	connectionID, err := resolveAgentConnectionID(ctx, client, connectionID)
+	if err != nil {
+		return err
+	}
+	ack, err := client.RestartAgentConnection(ctx, newCommandID(), connectionID)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Restart requested for agent %s.\n", connectionID)
+	return nil
+}
+
+func agentConnectionStop(ctx context.Context, client localControlClient, stdout io.Writer, connectionID string) error {
+	connectionID = strings.TrimSpace(connectionID)
+	if connectionID == "" {
+		return errors.New("usage: paxctl agents stop <name-or-id>")
+	}
+	connectionID, err := resolveAgentConnectionID(ctx, client, connectionID)
+	if err != nil {
+		return err
+	}
+	state := control.DesiredStateStopped
+	ack, err := client.UpdateAgentConnection(ctx, newCommandID(), connectionID, control.UpdateAgentConnectionCommand{DesiredState: &state})
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Stop requested for agent %s.\n", connectionID)
+	return nil
+}
+
+func agentConnectionRemove(ctx context.Context, client localControlClient, stdout io.Writer, connectionID string) error {
+	connectionID = strings.TrimSpace(connectionID)
+	if connectionID == "" {
+		return errors.New("usage: paxctl agents remove <name-or-id>")
+	}
+	connectionID, err := resolveAgentConnectionID(ctx, client, connectionID)
+	if err != nil {
+		return err
+	}
+	ack, err := client.DeleteAgentConnection(ctx, newCommandID(), connectionID)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := ackOK(ack); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Remove requested for agent %s.\n", connectionID)
+	return nil
+}
+
+func resolveAgentConnectionID(ctx context.Context, client localControlClient, nameOrID string) (string, error) {
+	result, err := client.ListAgentConnections(ctx, true)
+	if err != nil {
+		return "", localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return "", err
+	}
+	var matches []control.AgentConnectionView
+	for _, item := range agentItems(result) {
+		if item.ID == nameOrID || item.Name == nameOrID {
+			matches = append(matches, item)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("agent connection %q not found", nameOrID)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, item := range matches {
+			ids = append(ids, item.ID)
+		}
+		return "", fmt.Errorf("agent connection name %q is ambiguous; use one of: %s", nameOrID, strings.Join(ids, ", "))
+	}
+}
+
+func harnessesList(ctx context.Context, client localControlClient, stdout io.Writer, includeMissing bool) error {
+	result, err := client.ListHarnesses(ctx, includeMissing)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return err
+	}
+	return renderHarnesses(stdout, harnessItems(result))
+}
+
+func harnessesDiscover(ctx context.Context, client localControlClient, stdout io.Writer, query control.DiscoverHarnessesQuery) error {
+	result, err := client.DiscoverHarnesses(ctx, query)
+	if err != nil {
+		return localAPIGuidance(err)
+	}
+	if err := queryOK(result); err != nil {
+		return err
+	}
+	return renderHarnesses(stdout, harnessItems(result))
+}
+
+func renderHarnesses(stdout io.Writer, items []control.HarnessView) error {
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "HARNESS\tSTATE\tCOMMAND\tSOURCE\tNOTE")
+	for _, item := range items {
+		command := "-"
+		if len(item.Command) > 0 {
+			command = strings.Join(item.Command, " ")
+		}
+		note := firstNonEmpty(item.LastError, item.InstallHint, "-")
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.Harness, firstNonEmpty(item.State, "-"), command, firstNonEmpty(item.Source, "-"), note)
+	}
+	return tw.Flush()
+}
+
+func queryOK(result control.QueryResult) error {
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
+func ackOK(ack control.CommandAck) error {
+	if ack.OK || ack.Status == control.CommandStatusReceived || ack.Status == control.CommandStatusApplied {
+		return nil
+	}
+	if ack.Error != nil {
+		return ack.Error
+	}
+	return fmt.Errorf("local API command failed: %s", firstNonEmpty(string(ack.Status), "unknown"))
+}
+
+func localAPIGuidance(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w; is paxd running? try `paxd run` or `paxd setup`", err)
+}
+
+func remoteItems(result control.QueryResult) []control.RemoteView {
+	if result.Remotes == nil {
+		return nil
+	}
+	return result.Remotes.Items
+}
+
+func agentItems(result control.QueryResult) []control.AgentConnectionView {
+	if result.AgentConnections == nil {
+		return nil
+	}
+	return result.AgentConnections.Items
+}
+
+func harnessItems(result control.QueryResult) []control.HarnessView {
+	if result.Harnesses == nil {
+		return nil
+	}
+	return result.Harnesses.Items
+}
+
+func newCommandID() string {
+	id, err := newLocalID("cmd")
+	if err != nil {
+		return "cmd_local_fallback"
+	}
+	return id
 }
 
 func agentsList(cmd *cli.Command, stdout io.Writer) error {

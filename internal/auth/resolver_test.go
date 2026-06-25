@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,33 @@ func TestDefaultResolverRejectsUnsupportedAndMissingRefs(t *testing.T) {
 				t.Fatalf("Resolve(%q) error = %v, want %v", test.ref, err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestDefaultResolverReadsOwnerOnlySecretFile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "node_key")
+	if err := os.WriteFile(path, []byte("node-secret\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != fs.FileMode(0o600) {
+		t.Fatalf("secret file mode = %v, want %v", got, fs.FileMode(0o600))
+	}
+
+	got, err := NewDefaultResolver().Resolve(ctx, "file:"+path)
+	if err != nil {
+		t.Fatalf("Resolve(file) error = %v", err)
+	}
+	if got != "node-secret" {
+		t.Fatalf("Resolve(file) = %q, want %q", got, "node-secret")
 	}
 }
 

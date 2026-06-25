@@ -22,11 +22,16 @@ import (
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
 
+func DefaultControlSocketPath() string {
+	return expandHome(DefaultControlSocket)
+}
+
 type Runtime struct {
 	Store        *daemonstore.Store
 	Control      control.Service
 	LocalHandler http.Handler
 	supervisors  *runtimeSupervisors
+	harnesses    control.HarnessRegistry
 	hostMetrics  interface{ Start(context.Context) }
 }
 
@@ -85,6 +90,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Control:      service,
 		LocalHandler: localapi.NewHandler(service),
 		supervisors:  supervisors,
+		harnesses:    harnesses,
 		hostMetrics:  metricsStarter,
 	}, nil
 }
