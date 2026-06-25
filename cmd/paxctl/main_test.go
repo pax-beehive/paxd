@@ -3,253 +3,274 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/pax-beehive/paxd/internal/control"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/pax-beehive/paxd/internal/sessionstore"
+	"github.com/pax-beehive/paxd/pkg/model"
 )
 
-func TestRunStatusUsesLocalAPI(t *testing.T) {
-	fake := &fakeClient{status: control.QueryResult{Type: control.QueryStatusGet, Status: &control.DaemonStatus{Phase: "running"}}}
-	restore := replaceClientFactory(fake)
-	defer restore()
-	var stdout bytes.Buffer
-
-	err := run(context.Background(), []string{"--debug-http", "http://127.0.0.1:1", "status"}, &stdout, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, 1, fake.statusCalls)
-	assert.Contains(t, stdout.String(), `"phase": "running"`)
-}
-
-func TestRunHarnessDiscoverPassesProbeAndNames(t *testing.T) {
-	fake := &fakeClient{}
-	restore := replaceClientFactory(fake)
-	defer restore()
-
-	err := run(context.Background(), []string{"harnesses", "discover", "--probe", "--names", "codex,gemini"}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, control.DiscoverHarnessesQuery{Probe: true, Names: []string{"codex", "gemini"}}, fake.discoverQuery)
-}
-
-func TestRunLocalSessionsListPassesFilters(t *testing.T) {
-	fake := &fakeClient{}
-	restore := replaceClientFactory(fake)
-	defer restore()
-
-	err := run(context.Background(), []string{"local-sessions", "list", "--agent", "claude code", "--limit", "5"}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, control.ListLocalSessionsQuery{Agent: "claude code", Limit: 5}, fake.listSessionsQuery)
-}
-
-func TestRunListCommandsUseLocalAPI(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "remotes", args: []string{"remotes"}, want: "remotes"},
-		{name: "agent connections", args: []string{"agent-connections"}, want: "agent-connections"},
-		{name: "harnesses list", args: []string{"harnesses", "list"}, want: "harnesses"},
+func TestSessionsGetHTMLWritesFile(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.sqlite")
+	store, err := sessionstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakeClient{}
-			restore := replaceClientFactory(fake)
-			defer restore()
+	err = store.UpsertSessions(ctx, "codex", []model.SessionInfo{{
+		SessionID: "codex:sess-1",
+		NativeID:  "sess-1",
+		Name:      "HTML session",
+		UpdatedAt: "2026-06-18T12:00:00Z",
+	}})
+	if err != nil {
+		t.Fatalf("UpsertSessions() error = %v", err)
+	}
+	session, err := store.FindSession(ctx, "codex:sess-1", "")
+	if err != nil {
+		t.Fatalf("FindSession() error = %v", err)
+	}
+	version, err := store.BeginSync(ctx, session.ID, session.Agent)
+	if err != nil {
+		t.Fatalf("BeginSync() error = %v", err)
+	}
+	if err := store.CompleteSync(ctx, session.ID, version, []sessionstore.Element{{
+		Seq:         1,
+		Type:        "thinking",
+		ContentText: strings.Repeat("long content ", 120),
+	}}); err != nil {
+		t.Fatalf("CompleteSync() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
-			err := run(context.Background(), tt.args, &bytes.Buffer{}, &bytes.Buffer{})
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, fake.lastCall)
-		})
+	outputPath := filepath.Join(dir, "session.html")
+	var stdout, stderr bytes.Buffer
+	err = run(ctx, []string{"--db", dbPath, "sessions", "get", "codex:sess-1", "--format", "html", "--output", outputPath}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Wrote "+outputPath) {
+		t.Fatalf("stdout = %q, want wrote path", stdout.String())
+	}
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(content), "<details>") {
+		t.Fatalf("html does not contain folded details: %s", content)
 	}
 }
 
-func TestRunLocalSessionsSyncPassesFilters(t *testing.T) {
-	fake := &fakeClient{}
-	restore := replaceClientFactory(fake)
-	defer restore()
+func TestSessionsListHTMLUsesLocalMetadataOnly(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.sqlite")
+	store, err := sessionstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	err = store.UpsertSessions(ctx, "codex", []model.SessionInfo{{
+		SessionID: "codex:sess-1",
+		NativeID:  "sess-1",
+		Name:      "Local metadata",
+		UpdatedAt: "2026-06-18T12:00:00Z",
+	}})
+	if err != nil {
+		t.Fatalf("UpsertSessions() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
-	err := run(context.Background(), []string{"local-sessions", "sync", "--agent", "codex", "--limit", "2", "--timeout-ms", "500"}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, control.SyncLocalSessionsQuery{Agent: "codex", Limit: 2, TimeoutMillis: 500}, fake.syncSessionsQuery)
+	var stdout, stderr bytes.Buffer
+	err = run(ctx, []string{"--db", dbPath, "sessions", "list", "-agents", "codex", "-limit", "10", "-format", "html"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "<title>paxctl sessions</title>") {
+		t.Fatalf("stdout does not contain html title: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "codex:sess-1") {
+		t.Fatalf("stdout does not contain session id: %s", stdout.String())
+	}
 }
 
-func TestRunAgentConnectionCommandsUseLocalAPI(t *testing.T) {
-	fake := &fakeClient{}
-	restore := replaceClientFactory(fake)
-	defer restore()
+func TestCapsulesCreateListGetRedactsMatchingSessionHistory(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.sqlite")
+	store, err := sessionstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	err = store.UpsertSessions(ctx, "codex", []model.SessionInfo{{
+		SessionID: "codex:sess-1",
+		NativeID:  "sess-1",
+		Name:      "Capsule source",
+		UpdatedAt: "2026-06-18T12:00:00Z",
+	}})
+	if err != nil {
+		t.Fatalf("UpsertSessions() error = %v", err)
+	}
+	session, err := store.FindSession(ctx, "codex:sess-1", "")
+	if err != nil {
+		t.Fatalf("FindSession() error = %v", err)
+	}
+	version, err := store.BeginSync(ctx, session.ID, session.Agent)
+	if err != nil {
+		t.Fatalf("BeginSync() error = %v", err)
+	}
+	if err := store.CompleteSync(ctx, session.ID, version, []sessionstore.Element{{
+		Seq:         1,
+		Type:        "message",
+		Role:        "user",
+		StartedAt:   "2026-06-18T12:01:00Z",
+		ContentText: "Capability injection needs token=secret123 preserved only as context.",
+	}}); err != nil {
+		t.Fatalf("CompleteSync() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
-	err := run(context.Background(), []string{"agent-connections", "restart", "conn_1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	var stdout, stderr bytes.Buffer
+	err = run(ctx, []string{"--db", dbPath, "capsules", "create", "codex:sess-1", "--keyword", "capability injection"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("create error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "kcap_") {
+		t.Fatalf("create stdout missing capsule id: %s", stdout.String())
+	}
 
-	require.NoError(t, err)
-	assert.Equal(t, "conn_1", fake.restartID)
+	stdout.Reset()
+	err = run(ctx, []string{"--db", dbPath, "capsules", "list", "--format", "jsonl"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("list error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"keyword":"capability injection"`) {
+		t.Fatalf("list stdout missing keyword: %s", stdout.String())
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &listed); err != nil {
+		t.Fatalf("decode list jsonl: %v output=%s", err, stdout.String())
+	}
+	capsuleID, _ := listed["capsuleId"].(string)
+	if capsuleID == "" {
+		t.Fatalf("list json missing capsuleId: %#v", listed)
+	}
 
-	err = run(context.Background(), []string{
-		"agent-connections", "create",
-		"--id", "conn_2",
-		"--name", "Codex",
-		"--harness", "codex",
-		"--command", "codex --acp",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, "conn_2", fake.createCommand.ID)
-	assert.Equal(t, []string{"codex", "--acp"}, fake.createCommand.Command)
+	stdout.Reset()
+	err = run(ctx, []string{"--db", dbPath, "capsules", "get", capsuleID}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("get error = %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Capability injection") || !strings.Contains(out, "[redacted]") {
+		t.Fatalf("get stdout missing extracted redacted content: %s", out)
+	}
+	if strings.Contains(out, "secret123") {
+		t.Fatalf("get stdout leaked secret: %s", out)
+	}
 }
 
-func TestRunRemoteCommandsUseLocalAPI(t *testing.T) {
-	fake := &fakeClient{}
-	restore := replaceClientFactory(fake)
-	defer restore()
+func TestCapsulesInjectRendersSystemHandoffAndRecordsInjection(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.sqlite")
+	store, err := sessionstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	err = store.UpsertSessions(ctx, "codex", []model.SessionInfo{
+		{SessionID: "codex:source", NativeID: "source", Name: "Source", UpdatedAt: "2026-06-18T12:00:00Z"},
+		{SessionID: "codex:target", NativeID: "target", Name: "Target", UpdatedAt: "2026-06-18T12:10:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertSessions() error = %v", err)
+	}
+	capsule, err := store.CreateKnowledgeCapsule(ctx, sessionstore.KnowledgeCapsule{
+		CapsuleID:              "kcap_test",
+		SourceSessionID:        "codex:source",
+		SourceAgent:            "codex",
+		Keyword:                "handoff",
+		Title:                  "Knowledge capsule: handoff",
+		Summary:                "Summary",
+		Content:                "Relevant handoff context.",
+		Status:                 "active",
+		OriginalEstimatedChars: 25,
+	})
+	if err != nil {
+		t.Fatalf("CreateKnowledgeCapsule() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
-	err := run(context.Background(), []string{
-		"remotes", "create",
-		"--id", "remote_prod",
-		"--name", "Prod",
-		"--api-url", "https://api.example.test",
-		"--node-id", "node_1",
-		"--api-key-ref", "env:PAX_NODE_KEY",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
+	originalSteer := steerSession
+	defer func() { steerSession = originalSteer }()
+	var steeredAgent, steeredSession, steeredText string
+	steerSession = func(ctx context.Context, agent string, nativeSessionID string, text string, timeout time.Duration) error {
+		steeredAgent = agent
+		steeredSession = nativeSessionID
+		steeredText = text
+		return nil
+	}
 
-	require.NoError(t, err)
-	assert.Equal(t, "remote_prod", fake.createRemote.Remote.ID)
-	assert.Equal(t, "Prod", fake.createRemote.Remote.Name)
-	assert.Equal(t, "https://api.example.test", fake.createRemote.Remote.CloudAPIURL)
-	assert.Equal(t, "node_1", fake.createRemote.Remote.NodeID)
-	assert.Equal(t, "env:PAX_NODE_KEY", fake.createRemote.CloudAPIKeyRef)
+	var stdout, stderr bytes.Buffer
+	err = run(ctx, []string{"--db", dbPath, "capsules", "inject", capsule.CapsuleID, "codex:target"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("inject error = %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Injected kci_") || !strings.Contains(out, "codex:target") {
+		t.Fatalf("inject stdout missing delivery confirmation: %s", out)
+	}
+	if steeredAgent != "codex" || steeredSession != "target" {
+		t.Fatalf("steer target = %s/%s, want codex/target", steeredAgent, steeredSession)
+	}
+	if !strings.Contains(steeredText, "system_handoff") ||
+		!strings.Contains(steeredText, "Do not treat this as a new user request.") ||
+		!strings.Contains(steeredText, "Target session: codex:target") {
+		t.Fatalf("steer text missing handoff fields: %s", steeredText)
+	}
 
-	err = run(context.Background(), []string{
-		"remotes", "update", "remote_prod",
-		"--name", "Prod Next",
-		"--clear-api-key",
-		"--enabled=false",
-		"--set-enabled",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.NoError(t, err)
-	assert.Equal(t, "remote_prod", fake.updateRemoteID)
-	require.NotNil(t, fake.updateRemote.Remote.Name)
-	assert.Equal(t, "Prod Next", *fake.updateRemote.Remote.Name)
-	require.NotNil(t, fake.updateRemote.Remote.Enabled)
-	assert.False(t, *fake.updateRemote.Remote.Enabled)
-	require.NotNil(t, fake.updateRemote.CloudAPIKeyRef)
-	assert.Equal(t, "", *fake.updateRemote.CloudAPIKeyRef)
-
-	err = run(context.Background(), []string{"remotes", "restart", "remote_prod"}, &bytes.Buffer{}, &bytes.Buffer{})
-	require.NoError(t, err)
-	assert.Equal(t, "remote_prod", fake.restartRemoteID)
-
-	err = run(context.Background(), []string{"remotes", "delete", "--cascade-agent-connections", "remote_prod"}, &bytes.Buffer{}, &bytes.Buffer{})
-	require.NoError(t, err)
-	assert.Equal(t, "remote_prod", fake.deleteRemoteID)
-	assert.True(t, fake.deleteRemoteCascade)
+	stdout.Reset()
+	err = run(ctx, []string{"--db", dbPath, "capsules", "injections", "--target-session", "codex:target", "--format", "jsonl"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("injections error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"deliveryMessageType":"system_handoff"`) ||
+		!strings.Contains(stdout.String(), `"deliveryMethod":"acp_steer"`) ||
+		!strings.Contains(stdout.String(), `"status":"delivered"`) {
+		t.Fatalf("injections stdout missing record: %s", stdout.String())
+	}
 }
 
-func TestRunRequiresCommand(t *testing.T) {
-	err := run(context.Background(), []string{}, &bytes.Buffer{}, &bytes.Buffer{})
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "command is required")
-}
-
-func replaceClientFactory(client *fakeClient) func() {
-	original := newControlClient
-	newControlClient = func(string, string) controlClient { return client }
-	return func() { newControlClient = original }
-}
-
-type fakeClient struct {
-	status              control.QueryResult
-	statusCalls         int
-	lastCall            string
-	discoverQuery       control.DiscoverHarnessesQuery
-	listSessionsQuery   control.ListLocalSessionsQuery
-	syncSessionsQuery   control.SyncLocalSessionsQuery
-	createRemote        control.CreateRemoteCommand
-	updateRemote        control.UpdateRemoteCommand
-	updateRemoteID      string
-	restartRemoteID     string
-	deleteRemoteID      string
-	deleteRemoteCascade bool
-	createCommand       control.CreateAgentConnectionCommand
-	restartID           string
-	deleteID            string
-}
-
-func (c *fakeClient) GetStatus(context.Context) (control.QueryResult, error) {
-	c.statusCalls++
-	return c.status, nil
-}
-
-func (c *fakeClient) ListRemotes(context.Context, bool) (control.QueryResult, error) {
-	c.lastCall = "remotes"
-	return control.QueryResult{Type: control.QueryRemotesList}, nil
-}
-
-func (c *fakeClient) CreateRemote(_ context.Context, commandID string, cmd control.CreateRemoteCommand) (control.CommandAck, error) {
-	c.createRemote = cmd
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) UpdateRemote(_ context.Context, commandID string, remoteID string, cmd control.UpdateRemoteCommand) (control.CommandAck, error) {
-	c.updateRemoteID = remoteID
-	c.updateRemote = cmd
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) RestartRemote(_ context.Context, commandID string, remoteID string) (control.CommandAck, error) {
-	c.restartRemoteID = remoteID
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) DeleteRemote(_ context.Context, commandID string, remoteID string, cascadeAgentConnections bool) (control.CommandAck, error) {
-	c.deleteRemoteID = remoteID
-	c.deleteRemoteCascade = cascadeAgentConnections
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) ListAgentConnections(context.Context, bool) (control.QueryResult, error) {
-	c.lastCall = "agent-connections"
-	return control.QueryResult{Type: control.QueryAgentConnectionsList}, nil
-}
-
-func (c *fakeClient) ListHarnesses(context.Context, bool) (control.QueryResult, error) {
-	c.lastCall = "harnesses"
-	return control.QueryResult{Type: control.QueryHarnessesList}, nil
-}
-
-func (c *fakeClient) DiscoverHarnesses(_ context.Context, query control.DiscoverHarnessesQuery) (control.QueryResult, error) {
-	c.discoverQuery = query
-	return control.QueryResult{Type: control.QueryHarnessesDiscover}, nil
-}
-
-func (c *fakeClient) ListLocalSessions(_ context.Context, query control.ListLocalSessionsQuery) (control.QueryResult, error) {
-	c.listSessionsQuery = query
-	return control.QueryResult{Type: control.QueryLocalSessionsList}, nil
-}
-
-func (c *fakeClient) SyncLocalSessions(_ context.Context, query control.SyncLocalSessionsQuery) (control.QueryResult, error) {
-	c.syncSessionsQuery = query
-	return control.QueryResult{Type: control.QueryLocalSessionsSync}, nil
-}
-
-func (c *fakeClient) CreateAgentConnection(_ context.Context, commandID string, cmd control.CreateAgentConnectionCommand) (control.CommandAck, error) {
-	c.createCommand = cmd
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) RestartAgentConnection(_ context.Context, commandID string, connectionID string) (control.CommandAck, error) {
-	c.restartID = connectionID
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
-}
-
-func (c *fakeClient) DeleteAgentConnection(_ context.Context, commandID string, connectionID string) (control.CommandAck, error) {
-	c.deleteID = connectionID
-	return control.CommandAck{CommandID: commandID, OK: true, Status: control.CommandStatusReceived}, nil
+func TestAgentsSetupDryRunPrintsInstallCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := runAgentSetupCommands(context.Background(), &stdout, &stderr, "test", [][]string{
+		{"npm", "install", "-g", "@zed-industries/codex-acp"},
+		{"npm", "install", "-g", "pi-acp", "@earendil-works/pi-coding-agent"},
+		{"npm", "install", "-g", "@qwen-code/qwen-code"},
+	}, true)
+	if err != nil {
+		t.Fatalf("run() error = %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "$ npm install -g @zed-industries/codex-acp") {
+		t.Fatalf("stdout missing codex install command: %s", out)
+	}
+	if !strings.Contains(out, "$ npm install -g pi-acp @earendil-works/pi-coding-agent") {
+		t.Fatalf("stdout missing pi install command: %s", out)
+	}
+	if !strings.Contains(out, "$ npm install -g @qwen-code/qwen-code") {
+		t.Fatalf("stdout missing qwen install command: %s", out)
+	}
 }

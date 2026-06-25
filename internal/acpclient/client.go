@@ -23,6 +23,13 @@ type SessionLister struct {
 	Timeout    time.Duration
 }
 
+// SessionPrompter sends a prompt to an existing ACP session.
+type SessionPrompter struct {
+	Command    []string
+	WorkingDir string
+	Timeout    time.Duration
+}
+
 type rpcMessage struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`
 	ID      int64           `json:"id,omitempty"`
@@ -85,8 +92,22 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start acp command: %w", err)
 	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdin.Close()
+			_ = stdout.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		case <-done:
+		}
+	}()
 	defer func() {
+		close(done)
 		_ = stdin.Close()
+		_ = stdout.Close()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
@@ -132,6 +153,97 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 	return sessions, nil
 }
 
+// Prompt starts the configured ACP command, initializes it, authenticates when
+// possible, then calls session/prompt for an existing session.
+func (p SessionPrompter) Prompt(ctx context.Context, sessionID string, prompt string) error {
+	if len(p.Command) == 0 {
+		return fmt.Errorf("acp command is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("session id is required")
+	}
+	timeout := p.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, p.Command[0], p.Command[1:]...)
+	cmd.Dir = p.WorkingDir
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start acp command: %w", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdin.Close()
+			_ = stdout.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		case <-done:
+		}
+	}()
+	defer func() {
+		close(done)
+		_ = stdin.Close()
+		_ = stdout.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	reader := bufio.NewReader(stdout)
+	nextID := int64(1)
+	initResult, err := call[initializeResult](ctx, stdin, reader, nextID, "initialize", map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": map[string]any{},
+		"clientInfo": map[string]any{
+			"name":    "paxctl-capsule-injector",
+			"version": "0.1.0",
+		},
+	})
+	if err != nil {
+		return withStderr("initialize", err, stderr.String())
+	}
+	nextID++
+
+	if methodID := firstNonTerminalAuthMethod(initResult.AuthMethods); methodID != "" {
+		if _, err := call[map[string]any](ctx, stdin, reader, nextID, "authenticate", map[string]any{
+			"methodId": methodID,
+		}); err != nil {
+			return withStderr("authenticate", err, stderr.String())
+		}
+		nextID++
+	}
+
+	_, err = call[map[string]any](ctx, stdin, reader, nextID, "session/prompt", map[string]any{
+		"sessionId": sessionID,
+		"prompt": []map[string]string{
+			{"type": "text", "text": prompt},
+		},
+	})
+	if err != nil {
+		return withStderr("session/prompt", err, stderr.String())
+	}
+	return nil
+}
+
 func call[T any](
 	ctx context.Context,
 	stdin io.Writer,
@@ -163,6 +275,9 @@ func call[T any](
 
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			if ctx.Err() != nil {
+				return zero, ctx.Err()
+			}
 			return zero, fmt.Errorf("read response: %w", err)
 		}
 		line = bytes.TrimSpace(line)
