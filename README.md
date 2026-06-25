@@ -47,6 +47,86 @@ https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=
 
 如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行上面的 `curl | bash` 命令。安装器会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
 
+## How to start
+
+### 1. Pair this machine
+
+安装器默认会在下载 binary 后运行 `paxd setup`。如果已经安装好 binary，也可以手动运行：
+
+```bash
+paxd setup
+```
+
+`setup` 会创建 `~/.paxd`，打开浏览器 pairing 页面，等待用户 approve，然后把 node API key 存成本机 owner-only secret，并安装/启动后台 service。
+
+如果要连非默认环境：
+
+```bash
+paxd setup --cloud-url https://api.example.com
+```
+
+也可以只做登录，不安装或启动后台 service：
+
+```bash
+paxd login --remote default --cloud-url https://api.example.com
+```
+
+### 2. Verify the daemon
+
+```bash
+paxd service status
+paxctl status
+paxctl remotes list
+```
+
+本机 daemon 的数据在：
+
+```text
+~/.paxd/paxd.db
+~/.paxd/secrets/remotes/<remote>/node_key
+```
+
+### 3. Connect a local agent
+
+`paxctl` 通过本机 control API 管理 daemon 的 desired state。常见路径：
+
+```bash
+paxctl harnesses discover --probe codex claude
+paxctl agents create --harness codex --name work
+paxctl agents list
+```
+
+多 remote 时显式指定 remote：
+
+```bash
+paxctl agents create --remote staging --harness codex --name review
+```
+
+常用 agent 操作：
+
+```bash
+paxctl agents restart work
+paxctl agents stop work
+paxctl agents remove work
+```
+
+### 4. Run in foreground for development
+
+开发或排障时可以不走 service，直接前台跑：
+
+```bash
+paxd service stop
+paxd run
+```
+
+如需本地 HTTP debug control API：
+
+```bash
+paxd run --debug-http 127.0.0.1:8765
+```
+
+默认生产入口是 `https://api.paxtech.net`。`paxd setup/login` 使用 browser approval flow；CLI 本身不需要用户手动提供 node secret。
+
 ## 架构
 
 ```
@@ -65,18 +145,17 @@ https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=
 
 ```
 cmd/paxd
-├── main.go              CLI: configure | register | run | install-service | --version
+├── main.go              CLI: setup | login | run | service | --version
 │
 internal/
 ├── config/config.go     YAML 配置 (~/.paxd/paxd.yaml)
-├── store/store.go       本地 SQLite (agent 身份 + orphaned messages)
+├── daemonstore/         本地 SQLite desired state + runtime status
 ├── state/state.go       生命周期状态机
 ├── cloud/client.go      Cloud HTTP API (register, status)
-├── cloud/ws.go          Cloud WebSocket (实时收消息)
-├── hermes/client.go     Hermes API (chat, sessions, streaming)
+├── runtime/             node-control / agent tunnel runtime
+├── control/             本机 control command/query model
 ├── collector/collector.go  定时上报 session + 系统状态
-├── poller/poller.go     消息分发 + orphan 对账
-└── executor/executor.go 消息执行 (chat/steer/command)
+└── executor/executor.go 本地命令执行 helper
 
 pkg/model/              共享数据结构
 ├── envelope.go          Envelope → SessionBase → TurnBase 层级
@@ -134,112 +213,7 @@ paxd 解析 Hermes SSE 流，产生结构化 `model.*` 事件，实时推送回 
 
 所有事件携带 `sessionId` 用于前端会话连续性。
 
-## 快速开始
-
-```bash
-# 前置条件：本地有 Hermes 在 localhost:8642 运行
-
-# 注册 node + agent 并写入配置
-paxd configure --cloud-url https://pax.example.com --registration-token token_xxx
-
-# 运行守护进程
-paxd run
-
-# macOS 安装为 LaunchAgent
-paxd install-service
-launchctl load ~/Library/LaunchAgents/com.toddzheng.paxd.plist
-```
-
-### 家用服务器 Bootstrap
-
-先探测这台机器已有的 harness 和 adapter：
-
-```bash
-paxd harnesses
-```
-
-如果 `paxd harnesses` 显示 Codex / Claude Code adapter 不可用，先按 adapter 项目文档安装；这一步不由 paxd 管理，也不配置 Codex/Claude 本体、订阅或登录态：
-
-```bash
-npm install -g @zed-industries/codex-acp
-npm install -g @agentclientprotocol/claude-agent-acp
-```
-
-写入 `~/.paxd/paxd.yaml`。新机器只需要 `registration_token`，`node_id`、node `api_key`、`agent_id` 都由 paxd 通过 pax-manager 创建并写回：
-
-```bash
-paxd configure \
-  --harness codex \
-  --cloud-url https://app.example.com \
-  --registration-token token_xxx
-```
-
-也可以一次注册多个 agent；同一个 harness 可以注册多个 agent：
-
-```bash
-paxd configure \
-  --cloud-url https://app.example.com \
-  --registration-token token_xxx \
-  --agent work:codex:work \
-  --agent review:claude-code:review
-```
-
-`paxd configure` 默认是 replace 语义：会把本地 `agents` 列表替换成本次命令注册出来的 agents。检测到已有 `~/.paxd/paxd.yaml` 且即将覆盖现有 agents 时，会要求确认；自动化脚本可以加 `-y` 或 `--yes` 跳过确认。
-
-如果只想给已配置好的 node 增加 agent，用 `--append`。这种情况下会复用现有 `cloud.api_key` 注册新 agent，并把新 agent 追加到本地 `agents` 列表；不会复用旧的 `agent_id`。
-
-```bash
-paxd configure \
-  --cloud-url https://app.example.com \
-  --append \
-  --agent review:claude-code:review
-```
-
-直接启动 forwarder，不写配置：
-
-```bash
-PAX_CLOUD_URL=https://app.example.com \
-PAX_API_KEY=pax_node_key_here \
-PAX_AGENT_ID=agent_xxx \
-PAX_ACP_HARNESS=codex \
-paxd acp-forward
-```
-
-如果 pax-manager 的机器侧 tunnel 也经过 Cloudflare Access，再加 `--cf-client-id` 和 `--cf-client-secret`。
-
-### ACP + Postman 快速路径
-
-如果只想启动 ACP forwarder 并用 Postman 连用户侧 WebSocket，可以直接用配置或环境变量：
-
-```bash
-export PAX_CLOUD_URL="https://app.example.com"
-export PAX_API_KEY="pax_node_key_here"
-export PAX_AGENT_ID="agent_xxx"
-export PAX_INSTANCE_ID="default"
-export PAX_CLOUD_CF_CLIENT_ID="cf_service_token_client_id_here"
-export PAX_CLOUD_CF_CLIENT_SECRET="cf_service_token_client_secret_here"
-export PAX_ACP_HARNESS="codex"
-
-paxd acp-forward
-```
-
-也可以不写环境变量，直接临时传参：
-
-```bash
-paxd acp-forward \
-  --cloud-url https://app.example.com \
-  --api-key pax_node_key_here \
-  --agent-id agent_xxx \
-  --harness codex \
-  --cf-client-id cf_service_token_client_id_here \
-  --cf-client-secret cf_service_token_client_secret_here
-```
-
-给 Postman 生成 WebSocket URL 和烟测消息：
-
-```bash
-paxd postman --cloud-url https://app.example.com --agent-id agent_xxx
-```
+## Harness presets
 
 ACP harness 预设：
 
