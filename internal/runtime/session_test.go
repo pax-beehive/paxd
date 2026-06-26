@@ -178,6 +178,7 @@ func TestAgentTunnelSessionRunDialsStartsProcessAndCleansUp(t *testing.T) {
 	exit := session.Run(context.Background())
 	assert.Equal(t, ExitTransient, exit.Class)
 	assert.Equal(t, "session_ended", exit.Code)
+	assert.True(t, exit.ResetBackoff)
 	assert.True(t, store.hasOp("AppendOutboundData"), "store ops = %+v", store.ops)
 	assert.True(t, store.hasOp("MarkSent"), "store ops = %+v", store.ops)
 	assert.True(t, proc.terminated)

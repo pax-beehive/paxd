@@ -26,10 +26,11 @@ func (c ExitClass) Valid() bool {
 }
 
 type Exit struct {
-	Class   ExitClass
-	Code    string
-	Message string
-	Details map[string]string
+	Class        ExitClass
+	Code         string
+	Message      string
+	Details      map[string]string
+	ResetBackoff bool
 }
 
 func (e Exit) WithDetail(key string, value string) Exit {
@@ -37,6 +38,11 @@ func (e Exit) WithDetail(key string, value string) Exit {
 		e.Details = make(map[string]string, 1)
 	}
 	e.Details[key] = value
+	return e
+}
+
+func (e Exit) WithBackoffReset() Exit {
+	e.ResetBackoff = true
 	return e
 }
 

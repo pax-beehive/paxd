@@ -527,6 +527,10 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 
 	switch exit.Class {
 	case runtimes.ExitTransient, "":
+		if exit.ResetBackoff {
+			log.Printf("[paxd] %s slot id=%s resetting backoff after successful connection", s.supervisorName, s.id)
+			s.reconnects = 0
+		}
 		s.reconnects++
 		delay := s.backoff.duration(s.reconnects)
 		next := s.clock.Now().Add(delay)

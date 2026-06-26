@@ -116,6 +116,13 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	defer stopWatch()
 	go closeOnContextDone(watchCtx, hbConn)
 
+	connectedExit := func(exit Exit) Exit {
+		if exit.Class == ExitTransient {
+			return exit.WithBackoffReset()
+		}
+		return exit
+	}
+
 	s.emit(PhaseConnected, nil)
 	s.emit(PhaseStarting, nil)
 	log.Printf("[paxd] agent tunnel id=%s starting local ACP command=%q working_dir=%q", s.spec.ConnectionID, strings.Join(s.spec.Command, " "), s.spec.WorkingDir)
@@ -127,7 +134,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	if err != nil {
 		_ = hbConn.Close()
 		log.Printf("[paxd] agent tunnel id=%s local ACP start failed: %v", s.spec.ConnectionID, err)
-		return classifyProcessStartExit(err)
+		return connectedExit(classifyProcessStartExit(err))
 	}
 	defer s.terminateProcess(proc)
 	go io.Copy(io.Discard, proc.Stderr())
@@ -135,11 +142,11 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	engine := s.newReliableEngine(hbConn, proc.Stdin())
 	if err := s.replayInbound(ctx, engine); err != nil {
 		log.Printf("[paxd] agent tunnel id=%s replay inbound failed: %v", s.spec.ConnectionID, err)
-		return TransientExit("replay_inbound_failed", err.Error())
+		return connectedExit(TransientExit("replay_inbound_failed", err.Error()))
 	}
 	if err := s.replayOutbound(ctx, engine); err != nil {
 		log.Printf("[paxd] agent tunnel id=%s replay outbound failed: %v", s.spec.ConnectionID, err)
-		return TransientExit("replay_outbound_failed", err.Error())
+		return connectedExit(TransientExit("replay_outbound_failed", err.Error()))
 	}
 
 	s.emit(PhaseRunning, nil)
@@ -167,15 +174,15 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 
 	if hbConn.TimedOut() {
 		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
-		return TransientExit("heartbeat_timeout", "websocket heartbeat timed out")
+		return connectedExit(TransientExit("heartbeat_timeout", "websocket heartbeat timed out"))
 	}
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
 		return CanceledExit(result)
 	}
 	if result == nil {
-		return TransientExit("session_ended", "agent tunnel session ended")
+		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
 	}
-	return TransientExit("session_error", result.Error())
+	return connectedExit(TransientExit("session_error", result.Error()))
 }
 
 func (s *AgentTunnelSession) validate() Exit {
