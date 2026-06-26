@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/cloud"
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/remotelogin"
 	"github.com/pax-beehive/paxd/internal/remotesecrets"
@@ -122,6 +125,11 @@ func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
 			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://app.paxtech.net"},
+			Auth: &control.RemoteAuthView{
+				Kind:            control.RemoteAuthCloudflareAccess,
+				ClientID:        "cf-client",
+				ClientSecretRef: "file:/tmp/cf-secret",
+			},
 		}}}},
 		harnesses: control.QueryResult{Harnesses: &control.ListHarnessesResult{Items: []control.HarnessView{{
 			Harness: "codex",
@@ -136,9 +144,13 @@ func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 		return "node-secret", nil
 	})
 	defer restoreNodeKey()
-	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.Remote, nodeKey string, name string, agentType string) (string, error) {
-		assert.Equal(t, "prod", remote.ID)
-		assert.Equal(t, "https://app.paxtech.net", remote.CloudAPIURL)
+	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
+		assert.Equal(t, "prod", remote.Remote.ID)
+		assert.Equal(t, "https://app.paxtech.net", remote.Remote.CloudAPIURL)
+		require.NotNil(t, remote.Auth)
+		assert.Equal(t, control.RemoteAuthCloudflareAccess, remote.Auth.Kind)
+		assert.Equal(t, "cf-client", remote.Auth.ClientID)
+		assert.Equal(t, "file:/tmp/cf-secret", remote.Auth.ClientSecretRef)
 		assert.Equal(t, "node-secret", nodeKey)
 		assert.Equal(t, "work", name)
 		assert.Equal(t, "codex", agentType)
@@ -163,6 +175,32 @@ func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 	assert.Contains(t, stdout.String(), "agent_cloud_123")
 }
 
+func TestRegisterCloudAgentUsesRemoteCloudflareAccessAuth(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "cf-secret")
+	require.NoError(t, os.WriteFile(secretPath, []byte("cf-secret\n"), 0o600))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/node/agents/register", r.URL.Path)
+		assert.Equal(t, "node-secret", r.Header.Get("X-Pax-Key"))
+		assert.Equal(t, "cf-client", r.Header.Get("CF-Access-Client-Id"))
+		assert.Equal(t, "cf-secret", r.Header.Get("CF-Access-Client-Secret"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"agent_id":"agent_cloud_123"}}`))
+	}))
+	defer server.Close()
+
+	agentID, err := registerCloudAgent(context.Background(), control.RemoteView{
+		Remote: control.Remote{ID: "prod", CloudAPIURL: server.URL},
+		Auth: &control.RemoteAuthView{
+			Kind:            control.RemoteAuthCloudflareAccess,
+			ClientID:        "cf-client",
+			ClientSecretRef: "file:" + secretPath,
+		},
+	}, "node-secret", "work", "codex")
+
+	require.NoError(t, err)
+	assert.Equal(t, "agent_cloud_123", agentID)
+}
+
 func TestPaxctlAgentsCreateDiscoversHarnessCommandWhenCacheMissing(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
@@ -183,7 +221,7 @@ func TestPaxctlAgentsCreateDiscoversHarnessCommandWhenCacheMissing(t *testing.T)
 		return "node-secret", nil
 	})
 	defer restoreNodeKey()
-	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.Remote, nodeKey string, name string, agentType string) (string, error) {
+	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
 		return "agent_cloud_hermes", nil
 	})
 	defer restoreRegister()
@@ -207,7 +245,7 @@ func TestPaxctlAgentsCreateRejectsUnknownHarnessBeforeRegistering(t *testing.T) 
 	}
 	restore := stubPaxctlControlClient(t, client)
 	defer restore()
-	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.Remote, nodeKey string, name string, agentType string) (string, error) {
+	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
 		t.Fatalf("registerCloudAgent should not be called for an unknown harness")
 		return "", nil
 	})
@@ -238,7 +276,7 @@ func TestPaxctlAgentsCreateDoesNotCreateLocalConnectionWhenCloudRegistrationFail
 		return "node-secret", nil
 	})
 	defer restoreNodeKey()
-	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.Remote, nodeKey string, name string, agentType string) (string, error) {
+	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
 		return "", errors.New("cloud unavailable")
 	})
 	defer restoreRegister()
@@ -378,6 +416,31 @@ func TestPaxctlRemotesLoginCommitsThroughLocalAPI(t *testing.T) {
 	assert.Contains(t, created.CloudAPIKeyRef, ".paxd/secrets/remotes/staging/node_key")
 	assert.NotContains(t, created.CloudAPIKeyRef, "node-secret")
 	assert.Contains(t, stdout.String(), "Remote staging login committed")
+}
+
+func TestPaxctlLoginCloudClientUsesCloudflareAccessEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PAX_CLOUD_CF_CLIENT_ID", "cf-client")
+	t.Setenv("PAX_CLOUD_CF_CLIENT_SECRET", "cf-secret")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/node/registration/start", r.URL.Path)
+		assert.Equal(t, "cf-client", r.Header.Get("CF-Access-Client-Id"))
+		assert.Equal(t, "cf-secret", r.Header.Get("CF-Access-Client-Secret"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"registration_id":"reg_1","pair_code":"CODE","poll_token":"poll","verification_uri":"https://example.test","expires_in":300,"interval":5}}`))
+	}))
+	defer server.Close()
+
+	client, err := paxctlLoginCloudClient(server.URL)
+	require.NoError(t, err)
+	resp, err := client.StartNodeRegistration(&cloud.StartNodeRegistrationRequest{
+		Hostname: "host",
+		OS:       "linux",
+		Arch:     "amd64",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "CODE", resp.PairCode)
 }
 
 func TestPaxctlRemotesLoginDoesNotCommitWhenLoginFails(t *testing.T) {
@@ -785,7 +848,7 @@ func stubPaxctlNodeKey(t *testing.T, fn func(context.Context, string) (string, e
 	}
 }
 
-func stubPaxctlAgentRegistration(t *testing.T, fn func(context.Context, control.Remote, string, string, string) (string, error)) func() {
+func stubPaxctlAgentRegistration(t *testing.T, fn func(context.Context, control.RemoteView, string, string, string) (string, error)) func() {
 	t.Helper()
 	previous := registerCloudAgent
 	registerCloudAgent = fn
