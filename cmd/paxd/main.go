@@ -24,7 +24,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -484,6 +483,7 @@ type serviceTarget struct {
 	GOOS     string
 	ExecPath string
 	Home     string
+	EnvPATH  string
 }
 
 func cmdServiceCommand() *cli.Command {
@@ -547,7 +547,12 @@ func serviceTargetFromRuntime() (serviceTarget, error) {
 	if err != nil {
 		return serviceTarget{}, fmt.Errorf("get home dir: %w", err)
 	}
-	return serviceTarget{GOOS: runtime.GOOS, ExecPath: execPath, Home: home}, nil
+	return serviceTarget{
+		GOOS:     runtime.GOOS,
+		ExecPath: execPath,
+		Home:     home,
+		EnvPATH:  strings.TrimSpace(os.Getenv("PATH")),
+	}, nil
 }
 
 func serviceInstall(opts serviceInstallOptions) error {
@@ -813,6 +818,8 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 		"",
 		"[Service]",
 		"Type=simple",
+		"Environment=HOME=" + escapeSystemdEnvironmentValue(target.Home),
+		"Environment=PATH=" + escapeSystemdEnvironmentValue(systemdServicePATH(target)),
 	}
 	if opts.System {
 		user := strings.TrimSpace(opts.RunAsUser)
@@ -825,7 +832,7 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 	}
 	lines = append(lines,
 		"ExecStart="+joinSystemdArgs(args),
-		"WorkingDirectory="+quoteSystemdArg(target.Home),
+		"WorkingDirectory="+escapeSystemdPath(target.Home),
 		"Restart=always",
 		"RestartSec=5",
 		"KillMode=mixed",
@@ -870,6 +877,13 @@ func servicePATH(home string) string {
 		"/sbin",
 	}
 	return strings.Join(parts, ":")
+}
+
+func systemdServicePATH(target serviceTarget) string {
+	if strings.TrimSpace(target.EnvPATH) != "" {
+		return strings.TrimSpace(target.EnvPATH)
+	}
+	return servicePATH(target.Home)
 }
 
 func systemctlArgs(action string, system bool, rest ...string) []string {
@@ -921,13 +935,55 @@ func launchdDomain() string {
 func joinSystemdArgs(args []string) string {
 	quoted := make([]string, 0, len(args))
 	for _, arg := range args {
-		quoted = append(quoted, quoteSystemdArg(arg))
+		quoted = append(quoted, escapeSystemdExecArg(arg))
 	}
 	return strings.Join(quoted, " ")
 }
 
-func quoteSystemdArg(arg string) string {
-	return strconv.Quote(arg)
+func escapeSystemdExecArg(arg string) string {
+	return escapeSystemdValue(arg, true)
+}
+
+func escapeSystemdPath(path string) string {
+	return escapeSystemdValue(path, false)
+}
+
+func escapeSystemdEnvironmentValue(value string) string {
+	return escapeSystemdValue(value, false)
+}
+
+func escapeSystemdValue(value string, escapeSemicolon bool) string {
+	if value == "" {
+		return `""`
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case ' ':
+			b.WriteString(`\s`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case ';':
+			if escapeSemicolon {
+				b.WriteString(`\;`)
+			} else {
+				b.WriteRune(r)
+			}
+		case '%':
+			b.WriteString(`%%`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func xmlEscape(value string) string {
