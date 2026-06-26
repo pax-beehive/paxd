@@ -108,6 +108,7 @@ func TestGenerateSystemdUserUnitRunsPaxdInForeground(t *testing.T) {
 		GOOS:     "linux",
 		ExecPath: "/home/dev/bin/paxd",
 		Home:     "/home/dev",
+		EnvPATH:  "/home/dev/.local/bin:/custom/bin:/usr/bin",
 	}
 
 	unit := generateSystemdUnit(target, serviceInstallOptions{
@@ -118,8 +119,7 @@ func TestGenerateSystemdUserUnitRunsPaxdInForeground(t *testing.T) {
 	assert.Contains(t, unit, `ExecStart=/home/dev/bin/paxd run --control-socket none`)
 	assert.Contains(t, unit, `WorkingDirectory=/home/dev`)
 	assert.Contains(t, unit, `Environment=HOME=/home/dev`)
-	assert.Contains(t, unit, `Environment=PATH=/home/dev/.local/bin`)
-	assert.Contains(t, unit, `/home/dev/bin`)
+	assert.Contains(t, unit, `Environment=PATH=/home/dev/.local/bin:/custom/bin:/usr/bin`)
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=5")
 	assert.Contains(t, unit, "KillMode=mixed")
@@ -149,6 +149,7 @@ func TestGenerateSystemdUnitEscapesPathsWithoutQuotingThem(t *testing.T) {
 		GOOS:     "linux",
 		ExecPath: "/home/dev/Pax Tools/paxd",
 		Home:     "/home/dev/Pax Home",
+		EnvPATH:  "/home/dev/Pax Home/.local/bin:/usr/bin",
 	}
 
 	unit := generateSystemdUnit(target, serviceInstallOptions{
@@ -160,6 +161,19 @@ func TestGenerateSystemdUnitEscapesPathsWithoutQuotingThem(t *testing.T) {
 	assert.Contains(t, unit, `Environment=HOME=/home/dev/Pax\sHome`)
 	assert.Contains(t, unit, `Environment=PATH=/home/dev/Pax\sHome/.local/bin`)
 	assert.NotContains(t, unit, `WorkingDirectory="/home/dev/Pax Home"`)
+}
+
+func TestGenerateSystemdUnitFallsBackToDefaultPathWhenInstallPathIsEmpty(t *testing.T) {
+	target := serviceTarget{
+		GOOS:     "linux",
+		ExecPath: "/home/dev/bin/paxd",
+		Home:     "/home/dev",
+	}
+
+	unit := generateSystemdUnit(target, serviceInstallOptions{})
+
+	assert.Contains(t, unit, `Environment=PATH=/home/dev/.local/bin`)
+	assert.Contains(t, unit, `/home/dev/bin`)
 }
 
 func TestServicePathsAndSystemctlArgs(t *testing.T) {

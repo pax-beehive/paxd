@@ -483,6 +483,7 @@ type serviceTarget struct {
 	GOOS     string
 	ExecPath string
 	Home     string
+	EnvPATH  string
 }
 
 func cmdServiceCommand() *cli.Command {
@@ -546,7 +547,12 @@ func serviceTargetFromRuntime() (serviceTarget, error) {
 	if err != nil {
 		return serviceTarget{}, fmt.Errorf("get home dir: %w", err)
 	}
-	return serviceTarget{GOOS: runtime.GOOS, ExecPath: execPath, Home: home}, nil
+	return serviceTarget{
+		GOOS:     runtime.GOOS,
+		ExecPath: execPath,
+		Home:     home,
+		EnvPATH:  strings.TrimSpace(os.Getenv("PATH")),
+	}, nil
 }
 
 func serviceInstall(opts serviceInstallOptions) error {
@@ -813,7 +819,7 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 		"[Service]",
 		"Type=simple",
 		"Environment=HOME=" + escapeSystemdEnvironmentValue(target.Home),
-		"Environment=PATH=" + escapeSystemdEnvironmentValue(servicePATH(target.Home)),
+		"Environment=PATH=" + escapeSystemdEnvironmentValue(systemdServicePATH(target)),
 	}
 	if opts.System {
 		user := strings.TrimSpace(opts.RunAsUser)
@@ -871,6 +877,13 @@ func servicePATH(home string) string {
 		"/sbin",
 	}
 	return strings.Join(parts, ":")
+}
+
+func systemdServicePATH(target serviceTarget) string {
+	if strings.TrimSpace(target.EnvPATH) != "" {
+		return strings.TrimSpace(target.EnvPATH)
+	}
+	return servicePATH(target.Home)
 }
 
 func systemctlArgs(action string, system bool, rest ...string) []string {
