@@ -117,6 +117,9 @@ func TestGenerateSystemdUserUnitRunsPaxdInForeground(t *testing.T) {
 	assert.Contains(t, unit, "Description=Pax Fleet Daemon")
 	assert.Contains(t, unit, `ExecStart=/home/dev/bin/paxd run --control-socket none`)
 	assert.Contains(t, unit, `WorkingDirectory=/home/dev`)
+	assert.Contains(t, unit, `Environment=HOME=/home/dev`)
+	assert.Contains(t, unit, `Environment=PATH=/home/dev/.local/bin`)
+	assert.Contains(t, unit, `/home/dev/bin`)
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=5")
 	assert.Contains(t, unit, "KillMode=mixed")
@@ -154,6 +157,8 @@ func TestGenerateSystemdUnitEscapesPathsWithoutQuotingThem(t *testing.T) {
 
 	assert.Contains(t, unit, `ExecStart=/home/dev/Pax\sTools/paxd run --debug-http 127.0.0.1:%%8765`)
 	assert.Contains(t, unit, `WorkingDirectory=/home/dev/Pax\sHome`)
+	assert.Contains(t, unit, `Environment=HOME=/home/dev/Pax\sHome`)
+	assert.Contains(t, unit, `Environment=PATH=/home/dev/Pax\sHome/.local/bin`)
 	assert.NotContains(t, unit, `WorkingDirectory="/home/dev/Pax Home"`)
 }
 

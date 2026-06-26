@@ -812,6 +812,8 @@ func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) strin
 		"",
 		"[Service]",
 		"Type=simple",
+		"Environment=HOME=" + escapeSystemdEnvironmentValue(target.Home),
+		"Environment=PATH=" + escapeSystemdEnvironmentValue(servicePATH(target.Home)),
 	}
 	if opts.System {
 		user := strings.TrimSpace(opts.RunAsUser)
@@ -931,6 +933,10 @@ func escapeSystemdExecArg(arg string) string {
 
 func escapeSystemdPath(path string) string {
 	return escapeSystemdValue(path, false)
+}
+
+func escapeSystemdEnvironmentValue(value string) string {
+	return escapeSystemdValue(value, false)
 }
 
 func escapeSystemdValue(value string, escapeSemicolon bool) string {
