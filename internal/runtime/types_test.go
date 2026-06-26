@@ -64,6 +64,13 @@ func TestExitWithDetailCopiesIntoMap(t *testing.T) {
 	assert.Equal(t, "remote_prod", exit.Details["remote_id"])
 }
 
+func TestExitWithBackoffResetMarksExit(t *testing.T) {
+	exit := TransientExit("network", "network error").WithBackoffReset()
+
+	assert.True(t, exit.ResetBackoff)
+	assert.Equal(t, ExitTransient, exit.Class)
+}
+
 func TestHeartbeatConfigDefaults(t *testing.T) {
 	got := (HeartbeatConfig{}).WithDefaults()
 	assert.Equal(t, 15*time.Second, got.PingInterval)

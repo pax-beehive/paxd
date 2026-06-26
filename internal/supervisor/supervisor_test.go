@@ -9,6 +9,8 @@ import (
 
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentConnectionSupervisorWakeStartsTunnelSession(t *testing.T) {
@@ -131,6 +133,54 @@ func TestTransientExitEntersInterruptibleBackoffAndTimerRestarts(t *testing.T) {
 	if status.ReconnectAttempt != 2 {
 		t.Fatalf("reconnect attempt after timer = %d, want 2", status.ReconnectAttempt)
 	}
+}
+
+func TestAgentConnectionBackoffResetsAfterConnectedTransientExit(t *testing.T) {
+	clock := newFakeClock()
+	store := newFakeAgentStore()
+	store.setDesired([]runtimes.AgentConnectionSpec{agentSpec("conn_1", 1, 0)})
+	exits := []runtimes.Exit{
+		runtimes.TransientExit("dial_failed", "temporary network failure"),
+		runtimes.TransientExit("dial_failed", "temporary network failure"),
+		runtimes.TransientExit("session_ended", "agent tunnel session ended").WithBackoffReset(),
+	}
+	factory := &fakeAgentFactory{
+		makeSession: func(spec runtimes.AgentConnectionSpec, index int) *scriptedSession {
+			return instantSession(exits[index])
+		},
+	}
+	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   clock,
+		Backoff: BackoffPolicy{Initial: time.Second, Max: 30 * time.Second},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	waitForAgentStatusMatch(t, store, "conn_1", func(status daemonstore.AgentConnectionStatusUpdate) bool {
+		return status.LastErrorCode == "dial_failed" && status.ReconnectAttempt == 1
+	})
+	first := store.latestStatus("conn_1")
+	require.NotNil(t, first.NextRetryAt)
+	assert.Equal(t, time.Second, first.NextRetryAt.Sub(clock.Now()))
+
+	clock.fireAll()
+	factory.waitSession(t, 1).waitStarted(t)
+	waitForAgentStatusMatch(t, store, "conn_1", func(status daemonstore.AgentConnectionStatusUpdate) bool {
+		return status.LastErrorCode == "dial_failed" && status.ReconnectAttempt == 2
+	})
+	second := store.latestStatus("conn_1")
+	require.NotNil(t, second.NextRetryAt)
+	assert.Equal(t, 2*time.Second, second.NextRetryAt.Sub(clock.Now()))
+
+	clock.fireAll()
+	factory.waitSession(t, 2).waitStarted(t)
+	waitForAgentStatusMatch(t, store, "conn_1", func(status daemonstore.AgentConnectionStatusUpdate) bool {
+		return status.LastErrorCode == "session_ended" && status.ReconnectAttempt == 1
+	})
+	reset := store.latestStatus("conn_1")
+	require.NotNil(t, reset.NextRetryAt)
+	assert.Equal(t, time.Second, reset.NextRetryAt.Sub(clock.Now()))
 }
 
 func TestDesiredUpdateInterruptsRunningSessionAndCoalescesLatestSpec(t *testing.T) {
@@ -795,6 +845,23 @@ func waitForAgentStatus(t *testing.T, store *fakeAgentStore, id string, phase st
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for agent status phase %q; latest=%+v", phase, store.latestStatus(id))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func waitForAgentStatusMatch(t *testing.T, store *fakeAgentStore, id string, match func(daemonstore.AgentConnectionStatusUpdate) bool) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		status := store.latestStatus(id)
+		if match(status) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for matching agent status; latest=%+v", status)
 		default:
 			time.Sleep(time.Millisecond)
 		}
