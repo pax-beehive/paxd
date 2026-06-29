@@ -20,6 +20,7 @@ import (
 type SessionLister struct {
 	Command    []string
 	WorkingDir string
+	Env        map[string]string
 	Timeout    time.Duration
 }
 
@@ -77,6 +78,7 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 
 	cmd := exec.CommandContext(ctx, l.Command[0], l.Command[1:]...)
 	cmd.Dir = l.WorkingDir
+	cmd.Env = mergedEnv(l.Env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -151,6 +153,17 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 		}
 	}
 	return sessions, nil
+}
+
+func mergedEnv(extra map[string]string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	env := os.Environ()
+	for key, value := range extra {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 // Prompt starts the configured ACP command, initializes it, authenticates when

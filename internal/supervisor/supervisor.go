@@ -30,6 +30,11 @@ type Snapshot struct {
 	Slots []SlotSnapshot
 }
 
+type ObservedAgentRuntime struct {
+	Spec  runtimes.AgentConnectionSpec
+	Phase string
+}
+
 type SlotSnapshot struct {
 	ID             string
 	Generation     int64
@@ -170,6 +175,30 @@ func (s *AgentConnectionSupervisor) Wake()                           { s.base.Wa
 func (s *AgentConnectionSupervisor) Snapshot() Snapshot              { return s.base.Snapshot() }
 func (s *AgentConnectionSupervisor) Reconcile(ctx context.Context) error {
 	return s.base.Reconcile(ctx)
+}
+func (s *AgentConnectionSupervisor) ObservedAgentRuntimes() []ObservedAgentRuntime {
+	if s == nil || s.base == nil {
+		return nil
+	}
+	s.base.mu.Lock()
+	slots := make([]*runtimeSlot[runtimes.AgentConnectionSpec], 0, len(s.base.slots))
+	for _, slot := range s.base.slots {
+		slots = append(slots, slot)
+	}
+	s.base.mu.Unlock()
+
+	out := make([]ObservedAgentRuntime, 0, len(slots))
+	for _, slot := range slots {
+		spec, phase, ok := slot.observedDesired()
+		if !ok {
+			continue
+		}
+		out = append(out, ObservedAgentRuntime{
+			Spec:  cloneAgentConnectionSpec(spec),
+			Phase: phase,
+		})
+	}
+	return out
 }
 
 type baseOptions struct {
@@ -456,6 +485,12 @@ func (s *runtimeSlot[S]) Snapshot() SlotSnapshot {
 	}
 }
 
+func (s *runtimeSlot[S]) observedDesired() (S, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.desired, s.phase, s.hasDesired
+}
+
 func (s *runtimeSlot[S]) startLocked() {
 	if !s.hasDesired || s.currentCancel != nil {
 		return
@@ -711,6 +746,18 @@ func cloneTimePtr(t *time.Time) *time.Time {
 	}
 	out := *t
 	return &out
+}
+
+func cloneAgentConnectionSpec(spec runtimes.AgentConnectionSpec) runtimes.AgentConnectionSpec {
+	spec.Command = append([]string(nil), spec.Command...)
+	if spec.Env != nil {
+		env := make(map[string]string, len(spec.Env))
+		for key, value := range spec.Env {
+			env[key] = value
+		}
+		spec.Env = env
+	}
+	return spec
 }
 
 type realClock struct{}

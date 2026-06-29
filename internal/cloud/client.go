@@ -3,6 +3,7 @@ package cloud
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,20 +52,32 @@ type AgentStatus struct {
 
 // SessionStatus describes one Hermes session.
 type SessionStatus struct {
-	SessionID     string `json:"session_id"`
-	AgentType     string `json:"agent_type,omitempty"`
-	NativeID      string `json:"native_id,omitempty"`
-	Name          string `json:"name,omitempty"`
-	ProjectID     string `json:"project_id,omitempty"`
-	Preview       string `json:"preview,omitempty"`
-	Status        string `json:"status,omitempty"`
-	CurrentTask   string `json:"current_task,omitempty"`
-	MessageCount  int    `json:"message_count,omitempty"`
-	TokenUsage    int64  `json:"token_usage,omitempty"`
-	Model         string `json:"model,omitempty"`
-	RunID         string `json:"run_id,omitempty"`
-	RunStatus     string `json:"run_status,omitempty"`
-	LastMessageAt string `json:"last_message_at,omitempty"`
+	SessionID      string     `json:"session_id"`
+	AgentType      string     `json:"agent_type,omitempty"`
+	NativeID       string     `json:"native_id,omitempty"`
+	Name           string     `json:"name,omitempty"`
+	ProjectID      string     `json:"project_id,omitempty"`
+	Preview        string     `json:"preview,omitempty"`
+	WorkspaceRoots []string   `json:"workspace_roots,omitempty"`
+	Source         string     `json:"source,omitempty"`
+	Status         string     `json:"status,omitempty"`
+	CurrentTask    string     `json:"current_task,omitempty"`
+	MessageCount   int        `json:"message_count,omitempty"`
+	TokenUsage     TokenUsage `json:"token_usage,omitempty"`
+	Model          string     `json:"model,omitempty"`
+	RunID          string     `json:"run_id,omitempty"`
+	RunStatus      string     `json:"run_status,omitempty"`
+	LastMessageAt  string     `json:"last_message_at,omitempty"`
+}
+
+type TokenUsage struct {
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	TotalTokens  int64 `json:"total_tokens,omitempty"`
+}
+
+type AgentSessionsReport struct {
+	Sessions []SessionStatus `json:"sessions"`
 }
 
 // SystemMetrics holds machine-level metrics.
@@ -256,6 +269,16 @@ func (c *Client) doWithHeaders(
 	body any,
 	headers map[string]string,
 ) (*http.Response, error) {
+	return c.doWithContextAndHeaders(context.Background(), method, path, body, headers)
+}
+
+func (c *Client) doWithContextAndHeaders(
+	ctx context.Context,
+	method string,
+	path string,
+	body any,
+	headers map[string]string,
+) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -265,7 +288,7 @@ func (c *Client) doWithHeaders(
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
@@ -379,6 +402,29 @@ func (c *Client) PostNodeStatus(report *NodeStatusReport) error {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("post node status: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (c *Client) PostAgentSessions(agentID string, report *AgentSessionsReport) error {
+	return c.PostAgentSessionsContext(context.Background(), agentID, report)
+}
+
+func (c *Client) PostAgentSessionsContext(
+	ctx context.Context,
+	agentID string,
+	report *AgentSessionsReport,
+) error {
+	path := "/api/v1/node/agents/" + url.PathEscape(agentID) + "/sessions"
+	resp, err := c.doWithContextAndHeaders(ctx, http.MethodPost, path, report, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("post agent sessions: status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
