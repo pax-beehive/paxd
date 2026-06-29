@@ -15,17 +15,18 @@ type SessionInfo struct {
 	LastActive     string   `json:"lastActive"` // ISO 8601
 	Preview        string   `json:"preview,omitempty"`
 	WorkspaceRoots []string `json:"workspaceRoots,omitempty"`
+	Source         string   `json:"source,omitempty"`
 
 	// Live status from Hermes API (not persisted, polled on demand)
-	Status      string `json:"status,omitempty"`       // "idle" | "running" | "completed"
-	CurrentTask string `json:"currentTask,omitempty"`  // description of current tool/task
-	TokenUsage  int64  `json:"tokenUsage,omitempty"`   // total tokens consumed
-	UpdatedAt   string `json:"updatedAt,omitempty"`    // last activity timestamp
+	Status      string `json:"status,omitempty"`      // "idle" | "running" | "completed"
+	CurrentTask string `json:"currentTask,omitempty"` // description of current tool/task
+	TokenUsage  int64  `json:"tokenUsage,omitempty"`  // total tokens consumed
+	UpdatedAt   string `json:"updatedAt,omitempty"`   // last activity timestamp
 }
 
 // HistoryMessage is a single turn in session history.
 type HistoryMessage struct {
-	Role    string `json:"role"`    // "user" | "assistant" | "tool" | "diff"
+	Role    string `json:"role"` // "user" | "assistant" | "tool" | "diff"
 	Content string `json:"content"`
 }
 

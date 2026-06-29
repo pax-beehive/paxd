@@ -38,6 +38,38 @@ func TestAgentConnectionSupervisorWakeStartsTunnelSession(t *testing.T) {
 	}
 }
 
+func TestAgentConnectionSupervisorObservedRuntimesReturnsCopiedSpecs(t *testing.T) {
+	store := newFakeAgentStore()
+	spec := agentSpec("conn_1", 1, 0)
+	spec.Command = []string{"codex", "--acp"}
+	spec.WorkingDir = "/workspace/paxd"
+	spec.Env = map[string]string{"PAX_TOKEN": "secret-ref"}
+	store.setDesired([]runtimes.AgentConnectionSpec{spec})
+	factory := &fakeAgentFactory{}
+	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	observed := sup.ObservedAgentRuntimes()
+	require.Len(t, observed, 1)
+	assert.Equal(t, "conn_1", observed[0].Spec.ConnectionID)
+	assert.Equal(t, string(runtimes.PhaseStarting), observed[0].Phase)
+	assert.Equal(t, []string{"codex", "--acp"}, observed[0].Spec.Command)
+	assert.Equal(t, map[string]string{"PAX_TOKEN": "secret-ref"}, observed[0].Spec.Env)
+
+	observed[0].Spec.Command[0] = "mutated"
+	observed[0].Spec.Env["PAX_TOKEN"] = "mutated"
+
+	again := sup.ObservedAgentRuntimes()
+	require.Len(t, again, 1)
+	assert.Equal(t, []string{"codex", "--acp"}, again[0].Spec.Command)
+	assert.Equal(t, "secret-ref", again[0].Spec.Env["PAX_TOKEN"])
+}
+
 func TestRemoteSupervisorWakeLoopReconcilesDesiredState(t *testing.T) {
 	store := newFakeRemoteStore()
 	factory := &fakeRemoteFactory{}

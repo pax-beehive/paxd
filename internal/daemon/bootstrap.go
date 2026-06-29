@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
@@ -18,6 +19,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
+	"github.com/pax-beehive/paxd/internal/sessionreporter"
 )
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
@@ -27,12 +29,13 @@ func DefaultControlSocketPath() string {
 }
 
 type Runtime struct {
-	Store        *daemonstore.Store
-	Control      control.Service
-	LocalHandler http.Handler
-	supervisors  *runtimeSupervisors
-	harnesses    control.HarnessRegistry
-	hostMetrics  interface{ Start(context.Context) }
+	Store          *daemonstore.Store
+	Control        control.Service
+	LocalHandler   http.Handler
+	supervisors    *runtimeSupervisors
+	harnesses      control.HarnessRegistry
+	hostMetrics    interface{ Start(context.Context) }
+	sessionReports interface{ Start(context.Context) }
 }
 
 type Options struct {
@@ -85,13 +88,22 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
 	}
+	var reports interface{ Start(context.Context) }
+	if supervisors.agentRuntimeSource != nil {
+		reports = sessionreporter.New(sessionreporter.Options{
+			RuntimeSource: supervisors.agentRuntimeSource,
+			Scanner:       sessionreporter.DefaultScanner{},
+			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+		})
+	}
 	return &Runtime{
-		Store:        store,
-		Control:      service,
-		LocalHandler: localapi.NewHandler(service),
-		supervisors:  supervisors,
-		harnesses:    harnesses,
-		hostMetrics:  metricsStarter,
+		Store:          store,
+		Control:        service,
+		LocalHandler:   localapi.NewHandler(service),
+		supervisors:    supervisors,
+		harnesses:      harnesses,
+		hostMetrics:    metricsStarter,
+		sessionReports: reports,
 	}, nil
 }
 

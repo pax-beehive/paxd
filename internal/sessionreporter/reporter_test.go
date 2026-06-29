@@ -1,0 +1,298 @@
+package sessionreporter
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pax-beehive/paxd/internal/cloud"
+	runtimes "github.com/pax-beehive/paxd/internal/runtime"
+	"github.com/pax-beehive/paxd/internal/supervisor"
+	"github.com/pax-beehive/paxd/pkg/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1",
+			RemoteID:     "remote_1",
+			CloudAPIURL:  "https://manager.example.com",
+			CloudAgentID: "agent_1",
+			InstanceID:   "inst_1",
+			AgentType:    "codex",
+			Harness:      "codex",
+			Command:      []string{"codex", "--acp"},
+			WorkingDir:   "/workspace/paxd",
+			Env:          map[string]string{"PAX_ENV": "test"},
+			Generation:   7,
+			RestartNonce: 2,
+		},
+		Phase: string(runtimes.PhaseStarting),
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{{
+		SessionID:      "codex:sess_1",
+		NativeID:       "sess_1",
+		AgentType:      "codex",
+		Name:           "Debug paxd",
+		ProjectID:      "/workspace/paxd",
+		Preview:        "working",
+		WorkspaceRoots: []string{"/workspace/paxd"},
+		Source:         "cli",
+		Status:         "running",
+		CurrentTask:    "tests",
+		UpdatedAt:      "2026-06-28T12:00:00Z",
+		TokenUsage:     42,
+	}}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		ScanTimeout:   time.Second,
+		ReportTimeout: time.Second,
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, scanner.calls, 1)
+	assert.Equal(t, "conn_1", scanner.calls[0].ConnectionID)
+	assert.Equal(t, []string{"codex", "--acp"}, scanner.calls[0].Command)
+	assert.Equal(t, "/workspace/paxd", scanner.calls[0].WorkingDir)
+	assert.Equal(t, map[string]string{"PAX_ENV": "test"}, scanner.calls[0].Env)
+	require.Len(t, reporter.calls, 1)
+	assert.Equal(t, "remote_1", reporter.calls[0].target.RemoteID)
+	assert.Equal(t, "https://manager.example.com", reporter.calls[0].target.CloudAPIURL)
+	assert.Equal(t, "agent_1", reporter.calls[0].agentID)
+	require.Len(t, reporter.calls[0].sessions, 1)
+	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "cli", reporter.calls[0].sessions[0].Source)
+	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
+}
+
+func TestRunOnceSkipsRuntimeWithoutCloudAgentID(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote_1"},
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{{SessionID: "sess_1"}}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	assert.Empty(t, scanner.calls)
+	assert.Empty(t, reporter.calls)
+}
+
+func TestRunOnceContinuesAfterScanFailure(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "bad", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_bad"}},
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "good", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_good"}},
+	}}
+	scanner := &fakeScanner{
+		errByConnection: map[string]error{"bad": errors.New("scan failed")},
+		sessionsByConnection: map[string][]model.SessionInfo{
+			"good": {{SessionID: "sess_good", NativeID: "sess_good"}},
+		},
+	}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, scanner.calls, 2)
+	require.Len(t, reporter.calls, 1)
+	assert.Equal(t, "agent_good", reporter.calls[0].agentID)
+}
+
+func TestRunOnceScanTimeoutCancelsScannerAndContinues(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "slow", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_slow"}},
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "fast", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_fast"}},
+	}}
+	scanner := &fakeScanner{
+		blockByConnection: map[string]bool{"slow": true},
+		sessionsByConnection: map[string][]model.SessionInfo{
+			"fast": {{SessionID: "sess_fast", NativeID: "sess_fast"}},
+		},
+	}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		ScanTimeout:   10 * time.Millisecond,
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, reporter.calls, 1)
+	assert.Equal(t, "agent_fast", reporter.calls[0].agentID)
+	assert.True(t, scanner.sawCanceled("slow"))
+}
+
+func TestStartReturnsImmediatelyAndRunsImmediatePass(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1",
+			RemoteID:     "remote_1",
+			CloudAPIURL:  "https://one.example",
+			CloudAgentID: "agent_1",
+		},
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{{SessionID: "sess_1", NativeID: "sess_1"}}}
+	reporter := &fakeCloudReporter{reported: make(chan struct{}, 1)}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		Interval:      time.Hour,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := time.Now()
+	service.Start(ctx)
+
+	assert.Less(t, time.Since(started), 50*time.Millisecond)
+	select {
+	case <-reporter.reported:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for immediate report")
+	}
+}
+
+func TestStartSkipsOverlappingRunsPerRemote(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "a", RemoteID: "remote_a", CloudAPIURL: "https://a.example", CloudAgentID: "agent_a"}},
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "b", RemoteID: "remote_b", CloudAPIURL: "https://b.example", CloudAgentID: "agent_b"}},
+	}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{{SessionID: "sess_1", NativeID: "sess_1"}}}
+	reporter := &fakeCloudReporter{
+		blockRemote: "remote_a",
+		blockCh:     make(chan struct{}),
+		reported:    make(chan struct{}, 10),
+	}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		Interval:      10 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	service.Start(ctx)
+	require.Eventually(t, func() bool {
+		return reporter.countForRemote("remote_b") >= 2
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, 1, reporter.countForRemote("remote_a"))
+	close(reporter.blockCh)
+}
+
+type fakeRuntimeSource struct {
+	runtimes []supervisor.ObservedAgentRuntime
+}
+
+func (s fakeRuntimeSource) ObservedAgentRuntimes() []supervisor.ObservedAgentRuntime {
+	return append([]supervisor.ObservedAgentRuntime(nil), s.runtimes...)
+}
+
+type fakeScanner struct {
+	sessions             []model.SessionInfo
+	sessionsByConnection map[string][]model.SessionInfo
+	errByConnection      map[string]error
+	blockByConnection    map[string]bool
+
+	mu       sync.Mutex
+	calls    []SessionScannerSpec
+	canceled map[string]bool
+}
+
+func (s *fakeScanner) ListSessions(ctx context.Context, spec SessionScannerSpec) ([]model.SessionInfo, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, spec)
+	s.mu.Unlock()
+	if s.blockByConnection[spec.ConnectionID] {
+		<-ctx.Done()
+		s.mu.Lock()
+		if s.canceled == nil {
+			s.canceled = make(map[string]bool)
+		}
+		s.canceled[spec.ConnectionID] = true
+		s.mu.Unlock()
+		return nil, ctx.Err()
+	}
+	if err := s.errByConnection[spec.ConnectionID]; err != nil {
+		return nil, err
+	}
+	if sessions, ok := s.sessionsByConnection[spec.ConnectionID]; ok {
+		return sessions, nil
+	}
+	return s.sessions, nil
+}
+
+func (s *fakeScanner) sawCanceled(connectionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.canceled[connectionID]
+}
+
+type fakeReportCall struct {
+	target   ReportTarget
+	agentID  string
+	sessions []cloud.SessionStatus
+}
+
+type fakeCloudReporter struct {
+	blockRemote string
+	blockCh     chan struct{}
+	reported    chan struct{}
+
+	mu    sync.Mutex
+	calls []fakeReportCall
+}
+
+func (r *fakeCloudReporter) ReportAgentSessions(
+	ctx context.Context,
+	target ReportTarget,
+	agentID string,
+	sessions []cloud.SessionStatus,
+) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, fakeReportCall{
+		target:   target,
+		agentID:  agentID,
+		sessions: append([]cloud.SessionStatus(nil), sessions...),
+	})
+	r.mu.Unlock()
+	if r.reported != nil {
+		select {
+		case r.reported <- struct{}{}:
+		default:
+		}
+	}
+	if target.RemoteID == r.blockRemote && r.blockCh != nil {
+		select {
+		case <-r.blockCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (r *fakeCloudReporter) countForRemote(remoteID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, call := range r.calls {
+		if call.target.RemoteID == remoteID {
+			count++
+		}
+	}
+	return count
+}

@@ -17,9 +17,10 @@ import (
 )
 
 type runtimeSupervisors struct {
-	remote    supervisor.Supervisor
-	agent     supervisor.Supervisor
-	statusHub *statusHub
+	remote             supervisor.Supervisor
+	agent              supervisor.Supervisor
+	agentRuntimeSource *supervisor.AgentConnectionSupervisor
+	statusHub          *statusHub
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -56,7 +57,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Factory:    remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner},
 		StatusPoke: s.statusHub,
 	})
-	s.agent = supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
+	agent := supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
 		Store:      store,
 		StatusPoke: s.statusHub,
 		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
@@ -65,6 +66,8 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 			ReliableEngineFactory: runtimes.ReliableEngineFromStore(mqStore),
 		}},
 	})
+	s.agent = agent
+	s.agentRuntimeSource = agent
 	return nil
 }
 
@@ -93,6 +96,9 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 		r.hostMetrics.Start(ctx)
 	}
 	startHarnessRefresh(ctx, r.harnesses)
+	if r.sessionReports != nil {
+		r.sessionReports.Start(ctx)
+	}
 	r.supervisors.Start(ctx)
 }
 

@@ -77,6 +77,7 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 						Name:          s.Name,
 						ProjectID:     s.ProjectID,
 						Preview:       s.Preview,
+						Source:        s.Source,
 						Status:        s.Status,
 						CurrentTask:   s.CurrentTask,
 						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
@@ -94,9 +95,10 @@ func (c *Collector) CollectAndReport(ctx context.Context) error {
 						Name:          s.Name,
 						ProjectID:     s.ProjectID,
 						Preview:       s.Preview,
+						Source:        s.Source,
 						Status:        s.Status,
 						CurrentTask:   s.CurrentTask,
-						TokenUsage:    s.TokenUsage,
+						TokenUsage:    cloud.TokenUsage{TotalTokens: s.TokenUsage},
 						LastMessageAt: firstNonEmpty(s.UpdatedAt, s.LastActive),
 					})
 				}

@@ -183,6 +183,9 @@ func DetectWithProbe(agent Agent, probe bool) Status {
 		}
 		return Status{Agent: agent, State: "missing", Reason: agent.InstallHint}
 	}
+	if agent.Name == "hermes" && hermesLocalAvailable(agent.Command) {
+		return Status{Agent: agent, Available: true, Command: agent.Command, State: "available", Capability: "local-log"}
+	}
 	if commandAvailable(agent.Command) {
 		return Status{Agent: agent, Available: true, Command: agent.Command, State: "available", Capability: "acp"}
 	}
@@ -266,6 +269,9 @@ func ListSessions(ctx context.Context, status Status, timeout time.Duration) ([]
 	}
 	if status.Agent.Kind == "gateway" && status.Agent.Name == "openclaw" {
 		return listOpenClawSessions(ctx, status, timeout)
+	}
+	if status.Agent.Name == "hermes" && status.Capability == "local-log" {
+		return ListHermesLocalSessions(ctx, status.Command, 0)
 	}
 	if status.Agent.Kind == "app" {
 		return nil, fmt.Errorf("%s is app-only: no ACP or local-log session adapter is available", status.Agent.Name)
