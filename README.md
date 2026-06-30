@@ -15,13 +15,14 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 
 ## How to install
 
-推荐使用 Pax 托管的 installer。它会自动检测当前机器平台，下载最新 `stable` paxd binary，校验 sha256，安装到 PATH，然后启动交互式 pairing：
+推荐先安装 `paxl`，再通过 `paxl setup --with-daemon` 安装和配置 `paxd`。`paxctl` 已退役，不再作为独立 binary 发布：
 
 ```bash
-curl -fsSL https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
+curl -fsSL https://api.paxtech.net/api/v1/public/paxl/install.sh | bash
+paxl setup --with-daemon
 ```
 
-installer 脚本由 pax-manager 的稳定 public API endpoint 托管：
+如果只需要直接安装 daemon runtime，`paxd` installer 仍然可用，但它只安装 `paxd` binary：
 
 ```text
 https://api.paxtech.net/api/v1/public/paxd/install.sh
@@ -33,7 +34,7 @@ https://api.paxtech.net/api/v1/public/paxd/install.sh
 gs://pax-tech-bucket/script/installer.sh
 ```
 
-支持的 stable binary 平台链接：
+支持的 stable `paxd` binary 平台链接：
 
 ```text
 https://api.paxtech.net/api/v1/public/paxd/download?platform=darwin/arm64&tags=stable
@@ -45,16 +46,16 @@ https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=
 
 安装器和 binary 下载接口走 `https://api.paxtech.net`。paxd 默认也使用 `https://api.paxtech.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://ws.paxtech.net`。
 
-如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行上面的 `curl | bash` 命令。安装器会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
+如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行 `paxl setup --with-daemon`。setup 会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
 
 ## How to start
 
 ### 1. Pair this machine
 
-安装器默认会在下载 binary 后运行 `paxd setup`。如果已经安装好 binary，也可以手动运行：
+`paxl setup --with-daemon` 会安装本地 agent hooks，确保 `paxd` 已安装，然后运行 daemon pairing/setup。也可以手动运行 daemon setup：
 
 ```bash
-paxd setup
+paxl daemon setup
 ```
 
 `setup` 会创建 `~/.paxd`，打开浏览器 pairing 页面，等待用户 approve，然后把 node API key 存成本机 owner-only secret，并安装/启动后台 service。
@@ -62,7 +63,7 @@ paxd setup
 如果要连非默认环境：
 
 ```bash
-paxd setup --cloud-url https://api.example.com
+paxl daemon setup --cloud-url https://api.example.com
 ```
 
 当前内测阶段，如果目标 Pax API 入口仍在 Cloudflare Access 后面，需要显式提供 Cloudflare Access service token，确保 `setup/login` 以及后续 daemon 连接都能通过访问层：
@@ -70,7 +71,7 @@ paxd setup --cloud-url https://api.example.com
 ```bash
 PAX_CLOUD_CF_CLIENT_ID="cf-service-token-client-id" \
 PAX_CLOUD_CF_CLIENT_SECRET="cf-service-token-client-secret" \
-paxd setup --cloud-url https://api.example.com
+paxl daemon setup --cloud-url https://api.example.com
 ```
 
 这两个值来自 Cloudflare Access service token，不是用户登录 token。`paxd setup` 会在 pairing 成功后把 secret 写成本机 owner-only file secret，并把 remote auth 写入本机 daemon DB；后续后台 service 重启后仍会继续使用它。
@@ -85,8 +86,18 @@ paxd login --remote default --cloud-url https://api.example.com
 
 ```bash
 paxd service status
-paxctl status
-paxctl remotes list
+paxl daemon status
+paxl daemon remote list
+```
+
+Update paths:
+
+```bash
+paxl update check
+paxl update
+paxl daemon update
+paxd update check
+paxd update
 ```
 
 本机 daemon 的数据在：
@@ -98,26 +109,26 @@ paxctl remotes list
 
 ### 3. Connect a local agent
 
-`paxctl` 通过本机 control API 管理 daemon 的 desired state。常见路径：
+`paxl daemon ...` 通过本机 control API 管理 daemon 的 desired state。常见路径：
 
 ```bash
-paxctl harnesses discover --probe codex claude
-paxctl agents create --harness codex --name work
-paxctl agents list
+paxl daemon harness discover --probe codex claude
+paxl daemon agent create --harness codex --name work
+paxl daemon agent list
 ```
 
 多 remote 时显式指定 remote：
 
 ```bash
-paxctl agents create --remote staging --harness codex --name review
+paxl daemon agent create --remote staging --harness codex --name review
 ```
 
 常用 agent 操作：
 
 ```bash
-paxctl agents restart work
-paxctl agents stop work
-paxctl agents remove work
+paxl daemon agent restart work
+paxl daemon agent stop work
+paxl daemon agent remove work
 ```
 
 ### 4. Run in foreground for development

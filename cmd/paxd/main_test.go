@@ -26,7 +26,7 @@ func TestAppExposesDaemonLoginSetupAndServiceCommands(t *testing.T) {
 		names = append(names, command.Name)
 	}
 
-	assert.ElementsMatch(t, []string{"setup", "login", "run", "service"}, names)
+	assert.ElementsMatch(t, []string{"setup", "login", "update", "run", "service"}, names)
 	assert.NotContains(t, names, "connect")
 	assert.NotContains(t, names, "configure")
 	assert.NotContains(t, names, "register")

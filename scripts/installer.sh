@@ -6,8 +6,9 @@ PAX_CLOUD_URL="${PAX_CLOUD_URL:-}"
 PAX_TAG="${PAX_TAG:-stable}"
 PAX_BINARY_NAME="${PAX_BINARY_NAME:-}"
 PAX_INSTALL_DIR="${PAX_INSTALL_DIR:-}"
-PAX_SETUP_AFTER_INSTALL="${PAX_SETUP_AFTER_INSTALL:-1}"
+PAX_SETUP_AFTER_INSTALL="${PAX_SETUP_AFTER_INSTALL:-0}"
 pax_installer_tmpdir=""
+installed_target=""
 
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
   bold="$(tput bold)"
@@ -154,13 +155,64 @@ checksum_file() {
   fi
 }
 
+artifact_api_for() {
+  local product="$1"
+  local encoded_platform="$2"
+
+  if [[ "$product" == "paxd" ]]; then
+    printf '%s' "${PAX_DOWNLOAD_URL%/}/api/v1/public/paxd/download?platform=${encoded_platform}&tags=${PAX_TAG}"
+    return
+  fi
+  printf '%s' "${PAX_DOWNLOAD_URL%/}/api/v1/public/artifacts/download?product=${product}&platform=${encoded_platform}&tags=${PAX_TAG}"
+}
+
+download_and_install_product() {
+  local product="$1"
+  local binary_name="$2"
+  local encoded_platform="$3"
+  local install_dir="$4"
+  local api response download_url sha256 size version binary_path target got_sha
+
+  api="$(artifact_api_for "$product" "$encoded_platform")"
+  log "Resolving latest ${bold}${PAX_TAG}${reset} ${product} artifact"
+  response="$(curl -fsSL "$api")" || fail "failed to resolve ${product} artifact from $api"
+  if [[ "$response" != \{* ]]; then
+    fail "expected JSON from $api; got a non-JSON response. Check whether the public artifact download endpoint is behind an auth/login redirect."
+  fi
+
+  download_url="$(printf '%s' "$response" | json_field data.url)"
+  sha256="$(printf '%s' "$response" | json_field data.sha256)"
+  size="$(printf '%s' "$response" | json_field data.size_bytes)"
+  version="$(printf '%s' "$response" | json_field data.version)"
+  binary_path="$pax_installer_tmpdir/$binary_name"
+
+  log "Downloading ${product} ${bold}${version}${reset} (${size} bytes)"
+  download_with_progress "$download_url" "$binary_path"
+
+  got_sha="$(checksum_file "$binary_path")"
+  [[ "$got_sha" == "$sha256" ]] || fail "${product} sha256 mismatch: got $got_sha expected $sha256"
+  chmod 0755 "$binary_path"
+
+  target="$install_dir/$binary_name"
+  log "Installing ${product} to ${bold}${target}${reset}"
+  if ! cp "$binary_path" "$target" 2>/dev/null; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo cp "$binary_path" "$target"
+      sudo chmod 0755 "$target"
+    else
+      fail "cannot write to $install_dir and sudo is unavailable"
+    fi
+  fi
+  chmod 0755 "$target" 2>/dev/null || true
+  installed_target="$target"
+}
+
 main() {
   print_banner
   require_cmd curl
   require_cmd python3
 
-  local platform binary_name encoded_platform api response tmpdir binary_path
-  local download_url sha256 size version install_dir target got_sha
+  local platform binary_name encoded_platform tmpdir install_dir target
   platform="$(detect_platform)"
   binary_name="$PAX_BINARY_NAME"
   if [[ -z "$binary_name" ]]; then
@@ -171,45 +223,18 @@ main() {
   fi
 
   encoded_platform="$(urlencode "$platform")"
-  api="${PAX_DOWNLOAD_URL%/}/api/v1/public/paxd/download?platform=${encoded_platform}&tags=${PAX_TAG}"
 
   log "Detected platform: ${bold}${platform}${reset}"
-  log "Resolving latest ${bold}${PAX_TAG}${reset} paxd artifact"
-  response="$(curl -fsSL "$api")" || fail "failed to resolve paxd artifact from $api"
-  if [[ "$response" != \{* ]]; then
-    fail "expected JSON from $api; got a non-JSON response. Check whether the public paxd download endpoint is behind an auth/login redirect."
-  fi
-
-  download_url="$(printf '%s' "$response" | json_field data.url)"
-  sha256="$(printf '%s' "$response" | json_field data.sha256)"
-  size="$(printf '%s' "$response" | json_field data.size_bytes)"
-  version="$(printf '%s' "$response" | json_field data.version)"
 
   tmpdir="$(mktemp -d)"
   pax_installer_tmpdir="$tmpdir"
   trap 'rm -rf "${pax_installer_tmpdir:-}"' EXIT
-  binary_path="$tmpdir/$binary_name"
-
-  log "Downloading paxd ${bold}${version}${reset} (${size} bytes)"
-  download_with_progress "$download_url" "$binary_path"
-
-  got_sha="$(checksum_file "$binary_path")"
-  [[ "$got_sha" == "$sha256" ]] || fail "sha256 mismatch: got $got_sha expected $sha256"
-  chmod 0755 "$binary_path"
 
   install_dir="$(choose_install_dir)"
   mkdir -p "$install_dir"
-  target="$install_dir/$binary_name"
-  log "Installing paxd to ${bold}${target}${reset}"
-  if ! cp "$binary_path" "$target" 2>/dev/null; then
-    if command -v sudo >/dev/null 2>&1; then
-      sudo cp "$binary_path" "$target"
-      sudo chmod 0755 "$target"
-    else
-      fail "cannot write to $install_dir and sudo is unavailable"
-    fi
-  fi
-  chmod 0755 "$target" 2>/dev/null || true
+
+  download_and_install_product "paxd" "$binary_name" "$encoded_platform" "$install_dir"
+  target="$installed_target"
 
   if ! path_has_dir "$install_dir"; then
     warn "$install_dir is not currently in PATH"
@@ -228,9 +253,9 @@ main() {
   fi
 
   if [[ -n "$PAX_CLOUD_URL" ]]; then
-    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxd setup --cloud-url ${PAX_CLOUD_URL%/}${reset}"
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxl setup --with-daemon --cloud-url ${PAX_CLOUD_URL%/}${reset}"
   else
-    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxd setup${reset}"
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxl setup --with-daemon${reset}"
   fi
 }
 
