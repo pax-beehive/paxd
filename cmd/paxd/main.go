@@ -63,6 +63,7 @@ func newApp() *cli.Command {
 		Commands: []*cli.Command{
 			cmdSetupCommand(),
 			cmdLoginCommand(),
+			cmdUpdateCommand(),
 			{
 				Name:            "run",
 				Usage:           "start the daemon",
