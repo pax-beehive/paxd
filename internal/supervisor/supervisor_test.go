@@ -517,17 +517,18 @@ func remoteSpec(id string, generation, restartNonce int64) runtimes.RemoteSpec {
 
 func agentSpec(id string, generation, restartNonce int64) runtimes.AgentConnectionSpec {
 	return runtimes.AgentConnectionSpec{
-		ConnectionID: id,
-		RemoteID:     "remote_1",
-		CloudAPIURL:  "https://manager.example.test",
-		CloudAgentID: "agent_1",
-		InstanceID:   "inst_1",
-		AgentType:    "codex",
-		Harness:      "codex",
-		Command:      []string{"codex", "serve"},
-		TunnelPath:   "/api/v1/agent/tunnel",
-		Generation:   generation,
-		RestartNonce: restartNonce,
+		ConnectionID:     id,
+		RemoteID:         "remote_1",
+		CloudAPIURL:      "https://manager.example.test",
+		CloudAgentID:     "agent_1",
+		TransportQueueID: "agent_1:queue_1",
+		InstanceID:       "inst_1",
+		AgentType:        "codex",
+		Harness:          "codex",
+		Command:          []string{"codex", "serve"},
+		TunnelPath:       "/api/v1/agent/tunnel",
+		Generation:       generation,
+		RestartNonce:     restartNonce,
 	}
 }
 

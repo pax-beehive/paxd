@@ -623,6 +623,17 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	if conns[0].CloudAgentID != "agent_runtime" || conns[0].Generation != 1 {
 		t.Fatalf("connection after runtime binding = %+v", conns[0])
 	}
+	connSpecs, err = store.ListDesiredAgentConnections(ctx)
+	require.NoError(t, err)
+	require.Len(t, connSpecs, 1)
+	require.Equal(t, "conn_codex", connSpecs[0].ConnectionID)
+	require.Equal(t, "agent_runtime", connSpecs[0].CloudAgentID)
+	require.True(t, strings.HasPrefix(connSpecs[0].TransportQueueID, "agent_runtime:"), "transport queue id = %q", connSpecs[0].TransportQueueID)
+	firstQueueID := connSpecs[0].TransportQueueID
+	connSpecs, err = store.ListDesiredAgentConnections(ctx)
+	require.NoError(t, err)
+	require.Len(t, connSpecs, 1)
+	require.Equal(t, firstQueueID, connSpecs[0].TransportQueueID)
 
 	workingDir := "/tmp/new"
 	if _, err := store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{

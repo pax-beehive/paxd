@@ -156,14 +156,15 @@ func TestAgentTunnelSessionRunDialsStartsProcessAndCleansUp(t *testing.T) {
 	proc := newFakeProcess(`{"jsonrpc":"2.0","id":1}` + "\n")
 	events := make([]SessionEvent, 0, 4)
 	session := NewAgentTunnelSession(AgentConnectionSpec{
-		ConnectionID: "conn_1",
-		RemoteID:     "remote_prod",
-		CloudAPIURL:  "https://fleet.example.com/base",
-		CloudAgentID: "agent_1",
-		InstanceID:   "inst_1",
-		Command:      []string{"codex", "acp"},
-		Generation:   2,
-		RestartNonce: 1,
+		ConnectionID:     "conn_1",
+		RemoteID:         "remote_prod",
+		CloudAPIURL:      "https://fleet.example.com/base",
+		CloudAgentID:     "agent_1",
+		TransportQueueID: "agent_1:queue_1",
+		InstanceID:       "inst_1",
+		Command:          []string{"codex", "acp"},
+		Generation:       2,
+		RestartNonce:     1,
 	}, AgentTunnelSessionDeps{
 		Headers:               fakeHeaderProvider{header: http.Header{"X-Pax-Key": []string{"pax_key"}}},
 		Dialer:                &fakeDialer{conn: conn},
@@ -205,7 +206,7 @@ func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
 	require.Len(t, writes, 1)
 	env, err := reliablemq.UnmarshalEnvelope(writes[0].payload)
 	require.NoError(t, err)
-	assert.Equal(t, "conn_1", env.QueueID)
+	assert.Equal(t, "agent_1:queue_1", env.QueueID)
 	assert.Equal(t, reliablemq.StreamACP, env.Stream)
 	assert.Equal(t, int64(1), env.Seq)
 	assert.Equal(t, "agent_1", env.Metadata["agent_id"])
@@ -213,7 +214,7 @@ func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
 
 func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 	store := newSpyStore()
-	inboundKey := reliablemq.FrameKey{QueueID: "conn_1", Stream: reliablemq.StreamACP, Seq: 4, Direction: reliablemq.DirectionInbound}
+	inboundKey := reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 4, Direction: reliablemq.DirectionInbound}
 	_, _, err := store.SaveInboundIfAbsent(context.Background(), reliablemq.Frame{
 		Key:     inboundKey,
 		Kind:    reliablemq.FrameKindData,
@@ -235,7 +236,7 @@ func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 func TestAgentTunnelReplayOutboundSendsPendingFrames(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	store := newSpyStore()
-	frame, err := store.AppendOutboundData(context.Background(), "conn_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":2}`), reliablemq.Metadata{"agent_id": "agent_1"})
+	frame, err := store.AppendOutboundData(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":2}`), reliablemq.Metadata{"agent_id": "agent_1"})
 	require.NoError(t, err)
 	session := testAgentTunnelSession(store, conn)
 	engine := session.newReliableEngine(conn, io.Discard)
@@ -250,10 +251,10 @@ func TestAgentTunnelReplayOutboundSendsPendingFrames(t *testing.T) {
 func TestAgentTunnelCopyWSToStdinHandlesAck(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	store := newSpyStore()
-	frame, err := store.AppendOutboundData(context.Background(), "conn_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":3}`), nil)
+	frame, err := store.AppendOutboundData(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":3}`), nil)
 	require.NoError(t, err)
 	require.NoError(t, store.MarkSent(context.Background(), frame.Key))
-	ack, err := reliablemq.MarshalEnvelope(reliablemq.AckEnvelope("conn_1", reliablemq.StreamACP, 3))
+	ack, err := reliablemq.MarshalEnvelope(reliablemq.AckEnvelope("agent_1:queue_1", reliablemq.StreamACP, 3))
 	require.NoError(t, err)
 	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: ack}
 	conn.Close()
@@ -272,7 +273,7 @@ func TestAgentTunnelCopyWSToStdinReceivesDataFrame(t *testing.T) {
 	store := newSpyStore()
 	payload, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
 		Type:    reliablemq.EnvelopeTypeData,
-		QueueID: "conn_1",
+		QueueID: "agent_1:queue_1",
 		Stream:  reliablemq.StreamACP,
 		Seq:     8,
 		Payload: []byte(`{"jsonrpc":"2.0","id":8}`),
@@ -311,7 +312,7 @@ func TestAgentTunnelSendOutboundMarksFailedOnWriteError(t *testing.T) {
 
 	err := session.sendOutbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":1}`), engine)
 	require.ErrorContains(t, err, "write failed")
-	frame, ok := store.Get(reliablemq.FrameKey{QueueID: "conn_1", Stream: reliablemq.StreamACP, Seq: 1, Direction: reliablemq.DirectionOutbound})
+	frame, ok := store.Get(reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 1, Direction: reliablemq.DirectionOutbound})
 	require.True(t, ok)
 	assert.Equal(t, "write failed", frame.ErrorMessage)
 }
@@ -327,7 +328,7 @@ func TestAgentTunnelDuplicateInboundIsAckedButNotDispatchedTwice(t *testing.T) {
 	})
 	env := reliablemq.Envelope{
 		Type:    reliablemq.EnvelopeTypeData,
-		QueueID: "conn_1",
+		QueueID: "agent_1:queue_1",
 		Stream:  reliablemq.StreamACP,
 		Seq:     7,
 		Payload: []byte(`{"jsonrpc":"2.0","id":1}`),
@@ -368,8 +369,9 @@ func TestAgentTunnelValidationHelpers(t *testing.T) {
 	}{
 		{name: "missing connection id", spec: AgentConnectionSpec{}, want: "missing_connection_id"},
 		{name: "missing remote id", spec: AgentConnectionSpec{ConnectionID: "conn_1"}, want: "missing_remote_id"},
-		{name: "missing url", spec: AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote", CloudAgentID: "agent", Command: []string{"cmd"}}, want: "missing_cloud_url"},
-		{name: "missing command", spec: AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote", CloudAgentID: "agent", CloudAPIURL: "https://fleet.example.com"}, want: "missing_command"},
+		{name: "missing transport queue id", spec: AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote", CloudAgentID: "agent", CloudAPIURL: "https://fleet.example.com", Command: []string{"cmd"}}, want: "missing_transport_queue_id"},
+		{name: "missing url", spec: AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote", CloudAgentID: "agent", TransportQueueID: "agent:queue", Command: []string{"cmd"}}, want: "missing_cloud_url"},
+		{name: "missing command", spec: AgentConnectionSpec{ConnectionID: "conn_1", RemoteID: "remote", CloudAgentID: "agent", TransportQueueID: "agent:queue", CloudAPIURL: "https://fleet.example.com"}, want: "missing_command"},
 		{
 			name: "missing auth provider",
 			spec: validAgentSpec(),
@@ -452,11 +454,12 @@ func TestAgentTunnelValidationHelpers(t *testing.T) {
 
 func validAgentSpec() AgentConnectionSpec {
 	return AgentConnectionSpec{
-		ConnectionID: "conn_1",
-		RemoteID:     "remote_prod",
-		CloudAPIURL:  "https://fleet.example.com",
-		CloudAgentID: "agent_1",
-		Command:      []string{"codex", "acp"},
+		ConnectionID:     "conn_1",
+		RemoteID:         "remote_prod",
+		CloudAPIURL:      "https://fleet.example.com",
+		CloudAgentID:     "agent_1",
+		TransportQueueID: "agent_1:queue_1",
+		Command:          []string{"codex", "acp"},
 	}
 }
 
