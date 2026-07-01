@@ -89,7 +89,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 		return ConfigExit("invalid_cloud_url", err.Error())
 	}
 	q := wsURL.Query()
-	q.Set("connection_id", s.spec.ConnectionID)
+	q.Set("connection_id", s.spec.TransportQueueID)
 	q.Set("agent_id", s.spec.CloudAgentID)
 	if s.spec.InstanceID != "" {
 		q.Set("instance_id", s.spec.InstanceID)
@@ -193,6 +193,8 @@ func (s *AgentTunnelSession) validate() Exit {
 		return ConfigExit("missing_remote_id", "remote id is required")
 	case s.spec.CloudAgentID == "":
 		return ConfigExit("missing_cloud_agent_id", "cloud agent id is required")
+	case s.spec.TransportQueueID == "":
+		return ConfigExit("missing_transport_queue_id", "transport queue id is required")
 	case s.spec.CloudAPIURL == "":
 		return ConfigExit("missing_cloud_url", "cloud api url is required")
 	case len(s.spec.Command) == 0:
@@ -219,11 +221,11 @@ func (s *AgentTunnelSession) validate() Exit {
 }
 
 func (s *AgentTunnelSession) replayInbound(ctx context.Context, engine ReliableEngine) error {
-	return engine.ReplayInbound(ctx, s.spec.ConnectionID, reliablemq.StreamACP, replayLimit)
+	return engine.ReplayInbound(ctx, s.spec.TransportQueueID, reliablemq.StreamACP, replayLimit)
 }
 
 func (s *AgentTunnelSession) replayOutbound(ctx context.Context, engine ReliableEngine) error {
-	return engine.ReplayOutbound(ctx, s.spec.ConnectionID, reliablemq.StreamACP, replayLimit)
+	return engine.ReplayOutbound(ctx, s.spec.TransportQueueID, reliablemq.StreamACP, replayLimit)
 }
 
 func (s *AgentTunnelSession) copyWSToStdin(ctx context.Context, conn WebSocketConn, engine ReliableEngine) error {
@@ -239,7 +241,7 @@ func (s *AgentTunnelSession) copyWSToStdin(ctx context.Context, conn WebSocketCo
 		if err != nil {
 			return err
 		}
-		if env.QueueID != s.spec.ConnectionID {
+		if env.QueueID != s.spec.TransportQueueID {
 			return fmt.Errorf("unexpected reliablemq queue_id %q", env.QueueID)
 		}
 		if err := engine.Receive(ctx, env); err != nil {
@@ -274,7 +276,7 @@ func (s *AgentTunnelSession) copyStdoutToWS(ctx context.Context, stdout io.Reade
 
 func (s *AgentTunnelSession) sendOutbound(ctx context.Context, payload []byte, engine ReliableEngine) error {
 	_, err := engine.Send(ctx, reliablemq.OutboundMessage{
-		QueueID: s.spec.ConnectionID,
+		QueueID: s.spec.TransportQueueID,
 		Stream:  reliablemq.StreamACP,
 		Payload: append([]byte(nil), payload...),
 		Metadata: reliablemq.Metadata{

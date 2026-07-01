@@ -48,23 +48,24 @@ type RemoteStatus struct {
 func (RemoteStatus) TableName() string { return "remote_status" }
 
 type AgentConnection struct {
-	ID           string     `gorm:"primaryKey;type:text"`
-	RemoteID     string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
-	Name         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name"`
-	CloudAgentID *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
-	InstanceID   string     `gorm:"type:text;not null"`
-	AgentType    string     `gorm:"type:text;not null"`
-	Harness      string     `gorm:"type:text;not null"`
-	CommandJSON  string     `gorm:"type:text;not null"`
-	WorkingDir   string     `gorm:"type:text;not null;default:''"`
-	EnvJSON      string     `gorm:"type:text;not null;default:'{}'"`
-	Enabled      bool       `gorm:"not null"`
-	DesiredState string     `gorm:"type:text;not null"`
-	Generation   int64      `gorm:"not null;default:1"`
-	RestartNonce int64      `gorm:"not null;default:0"`
-	CreatedAt    time.Time  `gorm:"column:created_at;not null"`
-	UpdatedAt    time.Time  `gorm:"column:updated_at;not null"`
-	DeletedAt    *time.Time `gorm:"column:deleted_at"`
+	ID               string     `gorm:"primaryKey;type:text"`
+	RemoteID         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
+	Name             string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name"`
+	CloudAgentID     *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
+	TransportQueueID string     `gorm:"type:text;not null;default:''"`
+	InstanceID       string     `gorm:"type:text;not null"`
+	AgentType        string     `gorm:"type:text;not null"`
+	Harness          string     `gorm:"type:text;not null"`
+	CommandJSON      string     `gorm:"type:text;not null"`
+	WorkingDir       string     `gorm:"type:text;not null;default:''"`
+	EnvJSON          string     `gorm:"type:text;not null;default:'{}'"`
+	Enabled          bool       `gorm:"not null"`
+	DesiredState     string     `gorm:"type:text;not null"`
+	Generation       int64      `gorm:"not null;default:1"`
+	RestartNonce     int64      `gorm:"not null;default:0"`
+	CreatedAt        time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at;not null"`
+	DeletedAt        *time.Time `gorm:"column:deleted_at"`
 }
 
 func (AgentConnection) TableName() string { return "agent_connection" }

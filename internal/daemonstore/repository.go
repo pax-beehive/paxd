@@ -2,6 +2,8 @@ package daemonstore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -657,23 +659,58 @@ func (s *Store) ListDesiredAgentConnections(ctx context.Context) ([]AgentConnect
 		if err != nil {
 			return nil, err
 		}
+		transportQueueID, err := s.ensureAgentTransportQueueID(ctx, &conn)
+		if err != nil {
+			return nil, err
+		}
 		specs = append(specs, AgentConnectionDesiredSpec{
-			ConnectionID: conn.ID,
-			RemoteID:     conn.RemoteID,
-			CloudAPIURL:  remote.CloudAPIURL,
-			CloudAgentID: stringValue(conn.CloudAgentID),
-			InstanceID:   conn.InstanceID,
-			AgentType:    conn.AgentType,
-			Harness:      conn.Harness,
-			Command:      command,
-			WorkingDir:   conn.WorkingDir,
-			TunnelPath:   stringDefault(remote.AgentTunnelPath, defaultAgentTunnelPath),
-			Env:          env,
-			Generation:   conn.Generation,
-			RestartNonce: conn.RestartNonce,
+			ConnectionID:     conn.ID,
+			RemoteID:         conn.RemoteID,
+			CloudAPIURL:      remote.CloudAPIURL,
+			CloudAgentID:     stringValue(conn.CloudAgentID),
+			TransportQueueID: transportQueueID,
+			InstanceID:       conn.InstanceID,
+			AgentType:        conn.AgentType,
+			Harness:          conn.Harness,
+			Command:          command,
+			WorkingDir:       conn.WorkingDir,
+			TunnelPath:       stringDefault(remote.AgentTunnelPath, defaultAgentTunnelPath),
+			Env:              env,
+			Generation:       conn.Generation,
+			RestartNonce:     conn.RestartNonce,
 		})
 	}
 	return specs, nil
+}
+
+func (s *Store) ensureAgentTransportQueueID(ctx context.Context, conn *AgentConnection) (string, error) {
+	cloudAgentID := stringValue(conn.CloudAgentID)
+	if cloudAgentID == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(conn.TransportQueueID, cloudAgentID+":") {
+		return conn.TransportQueueID, nil
+	}
+	queueID, err := newTransportQueueID(cloudAgentID)
+	if err != nil {
+		return "", err
+	}
+	res := s.db.WithContext(ctx).Model(&AgentConnection{}).
+		Where("id = ?", conn.ID).
+		Update("transport_queue_id", queueID)
+	if res.Error != nil {
+		return "", mapGormErr(res.Error)
+	}
+	conn.TransportQueueID = queueID
+	return queueID, nil
+}
+
+func newTransportQueueID(cloudAgentID string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return cloudAgentID + ":" + hex.EncodeToString(random[:]), nil
 }
 
 func (s *Store) UpsertAgentConnectionStatus(ctx context.Context, update AgentConnectionStatusUpdate) error {

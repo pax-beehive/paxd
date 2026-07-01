@@ -93,19 +93,20 @@ type RemoteSpec struct {
 }
 
 type AgentConnectionSpec struct {
-	ConnectionID string
-	RemoteID     string
-	CloudAPIURL  string
-	CloudAgentID string
-	InstanceID   string
-	AgentType    string
-	Harness      string
-	Command      []string
-	WorkingDir   string
-	TunnelPath   string
-	Env          map[string]string
-	Generation   int64
-	RestartNonce int64
+	ConnectionID     string
+	RemoteID         string
+	CloudAPIURL      string
+	CloudAgentID     string
+	TransportQueueID string
+	InstanceID       string
+	AgentType        string
+	Harness          string
+	Command          []string
+	WorkingDir       string
+	TunnelPath       string
+	Env              map[string]string
+	Generation       int64
+	RestartNonce     int64
 }
 
 type WebSocketDialer interface {
