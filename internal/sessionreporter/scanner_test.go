@@ -13,6 +13,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultScannerUsesGeminiLocalSessionsBeforeACP(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GEMINI_HOME", home)
+	sessionDir := filepath.Join(home, "tmp", "sample-project", "chats")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, "tmp", "sample-project", ".project_root"),
+		[]byte("/tmp/project"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "session-2026-06-20T05-31-gemini-local.jsonl"),
+		[]byte(
+			`{"sessionId":"gemini-local","projectHash":"sample-project","startTime":"2026-06-20T05:31:20.160Z","lastUpdated":"2026-06-20T05:31:20.160Z","kind":"main"}`+"\n"+
+				`{"$set":{"messages":[{"id":"u1","timestamp":"2026-06-20T05:31:30.160Z","type":"user","content":[{"text":"Use paxl Gemini history"}]}],"lastUpdated":"2026-06-20T05:32:20.160Z"}}`+"\n",
+		),
+		0o644,
+	))
+
+	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "gemini",
+		Command: []string{"definitely-missing-gemini-acp-test-binary", "--acp"},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "gemini:gemini-local", sessions[0].SessionID)
+	assert.Equal(t, "gemini-local", sessions[0].NativeID)
+	assert.Equal(t, "gemini", sessions[0].AgentType)
+	assert.Equal(t, "Use paxl Gemini history", sessions[0].Name)
+	assert.Equal(t, "/tmp/project", sessions[0].ProjectID)
+	assert.Equal(t, "2026-06-20T05:32:20.160Z", sessions[0].UpdatedAt)
+}
+
+func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testing.T) {
+	t.Setenv("GEMINI_HOME", filepath.Join(t.TempDir(), "missing"))
+	command := fakeACPCommand(t, `[{"sessionId":"gemini-acp","nativeId":"gemini-acp","title":"ACP Gemini"}]`)
+
+	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "gemini",
+		Command: command,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "gemini-acp", sessions[0].SessionID)
+	assert.Equal(t, "ACP Gemini", sessions[0].Name)
+}
+
 func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -123,6 +172,9 @@ func TestHermesSpecDetectionAndMergeKeys(t *testing.T) {
 	assert.True(t, isHermesSpec(SessionScannerSpec{Command: []string{"hermes", "-p", "ABC", "acp"}}))
 	assert.True(t, isHermesSpec(SessionScannerSpec{Command: []string{"/usr/local/bin/hermes", "--profile=ABC", "acp"}}))
 	assert.False(t, isHermesSpec(SessionScannerSpec{Harness: "codex"}))
+	assert.True(t, isGeminiSpec(SessionScannerSpec{Harness: "gemini"}))
+	assert.True(t, isGeminiSpec(SessionScannerSpec{Command: []string{"gemini", "--acp"}}))
+	assert.False(t, isGeminiSpec(SessionScannerSpec{Command: []string{"hermes", "acp"}}))
 	assert.Equal(t, "hermes:sess-1", sessionMergeKey(model.SessionInfo{SessionID: "hermes:sess-1"}))
 	assert.Empty(t, sessionMergeKey(model.SessionInfo{}))
 }
@@ -141,8 +193,12 @@ func TestMergeHermesLocalSessionsReturnsACPWhenSQLiteUnavailable(t *testing.T) {
 }
 
 func fakeHermesACPCommand(t *testing.T, sessionsJSON string) []string {
+	return fakeACPCommand(t, sessionsJSON)
+}
+
+func fakeACPCommand(t *testing.T, sessionsJSON string) []string {
 	t.Helper()
-	scriptPath := filepath.Join(t.TempDir(), "fake-hermes-acp.sh")
+	scriptPath := filepath.Join(t.TempDir(), "fake-acp.sh")
 	script := `#!/bin/sh
 read line
 printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}\n'
