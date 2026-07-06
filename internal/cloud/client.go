@@ -231,6 +231,39 @@ type WriteSecretVersionResponse struct {
 	Current       bool   `json:"current,omitempty"`
 }
 
+// ConversationDeliveryRequest is sent to POST /api/v1/node/conversation/deliver.
+type ConversationDeliveryRequest struct {
+	Source      *ConversationDeliverySource `json:"source,omitempty"`
+	Target      ConversationDeliveryTarget  `json:"target"`
+	Context     ConversationDeliveryContext `json:"context"`
+	Instruction string                      `json:"instruction,omitempty"`
+	Reason      string                      `json:"reason,omitempty"`
+}
+
+type ConversationDeliverySource struct {
+	AgentID               string `json:"agent_id,omitempty"`
+	RepresentativeAgentID string `json:"representative_agent_id,omitempty"`
+	SessionID             string `json:"session_id,omitempty"`
+}
+
+type ConversationDeliveryTarget struct {
+	Kind                  string `json:"kind"`
+	RepresentativeAgentID string `json:"representative_agent_id,omitempty"`
+	SessionID             string `json:"session_id,omitempty"`
+	InvocationID          string `json:"invocation_id,omitempty"`
+}
+
+type ConversationDeliveryContext struct {
+	LatestResponse bool `json:"latest_response"`
+}
+
+type ConversationDeliveryResponse struct {
+	ContractVersion  string          `json:"contract_version,omitempty"`
+	DeliveryEndpoint string          `json:"delivery_endpoint,omitempty"`
+	ReceiptToken     string          `json:"receipt_token,omitempty"`
+	Delivery         json.RawMessage `json:"delivery,omitempty"`
+}
+
 // UpgradeBinary is the response from GET /api/agent/upgrade.
 type UpgradeBinary struct {
 	Version string
@@ -548,6 +581,20 @@ func (c *Client) WriteSecretVersion(
 		return nil, fmt.Errorf("write secret version: status %d: %s", resp.StatusCode, string(body))
 	}
 	return decodeEnvelope[WriteSecretVersionResponse](resp.Body, "write secret version")
+}
+
+// PostConversationDelivery stores an agent-to-agent conversation delivery.
+func (c *Client) PostConversationDelivery(req *ConversationDeliveryRequest) (*ConversationDeliveryResponse, error) {
+	resp, err := c.do(http.MethodPost, "/api/v1/node/conversation/deliver", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("post conversation delivery: status %d: %s", resp.StatusCode, bodySnippet(body))
+	}
+	return decodeEnvelope[ConversationDeliveryResponse](resp.Body, "post conversation delivery")
 }
 
 // ReportCompleted marks a message as completed.

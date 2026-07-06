@@ -104,3 +104,42 @@ func TestPostAgentSessionsPostsSessionOnlyPayload(t *testing.T) {
 	assert.Equal(t, int64(20), gotBody.Sessions[0].TokenUsage.OutputTokens)
 	assert.Equal(t, int64(30), gotBody.Sessions[0].TokenUsage.TotalTokens)
 }
+
+func TestPostConversationDeliveryPostsNodeScopedRequest(t *testing.T) {
+	var gotBody ConversationDeliveryRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/node/conversation/deliver", r.URL.EscapedPath())
+		assert.Equal(t, "node-key", r.Header.Get("X-Pax-Key"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"data":{"contract_version":"conversation_delivery.v1","delivery_endpoint":"/api/v1/node/conversation/deliver","receipt_token":"rcpt_1","delivery":{"delivery_status":"stored"}}}`))
+	}))
+	defer server.Close()
+
+	resp, err := NewClient(server.URL, "node-key").PostConversationDelivery(&ConversationDeliveryRequest{
+		Source: &ConversationDeliverySource{
+			AgentID:               "agent_1",
+			RepresentativeAgentID: "rep_1",
+			SessionID:             "sess_1",
+		},
+		Target: ConversationDeliveryTarget{
+			Kind:                  "representative",
+			RepresentativeAgentID: "rep_2",
+		},
+		Context:     ConversationDeliveryContext{LatestResponse: true},
+		Instruction: "hello",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "conversation_delivery.v1", resp.ContractVersion)
+	assert.Equal(t, "rcpt_1", resp.ReceiptToken)
+	require.NotNil(t, gotBody.Source)
+	assert.Equal(t, "agent_1", gotBody.Source.AgentID)
+	assert.Equal(t, "rep_1", gotBody.Source.RepresentativeAgentID)
+	assert.Equal(t, "sess_1", gotBody.Source.SessionID)
+	assert.Equal(t, "representative", gotBody.Target.Kind)
+	assert.Equal(t, "rep_2", gotBody.Target.RepresentativeAgentID)
+	assert.True(t, gotBody.Context.LatestResponse)
+	assert.Equal(t, "hello", gotBody.Instruction)
+}
