@@ -43,6 +43,7 @@ const (
 )
 
 var steerSession = agentregistry.SteerSession
+var version = "0.1.0"
 
 type remoteLoginFunc func(context.Context, remotelogin.LoginSpec, remotelogin.Options) (remotelogin.LoginResult, error)
 
@@ -133,8 +134,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func newPaxCommand(stdout, stderr io.Writer) *cli.Command {
 	return &cli.Command{
-		Name:  "paxctl",
-		Usage: "Local-first agent session tools",
+		Name:    "paxctl",
+		Usage:   "Local-first agent session tools",
+		Version: version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "db", Usage: "SQLite database path"},
 		},

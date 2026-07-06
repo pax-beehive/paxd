@@ -25,6 +25,15 @@ func (s DefaultScanner) ListSessions(
 		timeout = defaultScanTimeout
 	}
 	var errs []error
+	if isGeminiSpec(spec) {
+		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, 0)
+		if err == nil && len(sessions) > 0 {
+			return sessions, nil
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if len(spec.Command) > 0 {
 		sessions, err := acpclient.SessionLister{
 			Command:    spec.Command,
@@ -79,6 +88,17 @@ func isHermesSpec(spec SessionScannerSpec) bool {
 		}
 	}
 	return false
+}
+
+func isGeminiSpec(spec SessionScannerSpec) bool {
+	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if name == "gemini" {
+		return true
+	}
+	if len(spec.Command) == 0 {
+		return false
+	}
+	return filepath.Base(spec.Command[0]) == "gemini"
 }
 
 func mergeHermesLocalSessions(
