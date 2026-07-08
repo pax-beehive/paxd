@@ -17,6 +17,8 @@ github.com/mattn/go-sqlite3 v1.14.22 h1:2gZY6PC6kBnID23Tichd1K+Z0oS6nE/XwU+Vz/5o
 github.com/mattn/go-sqlite3 v1.14.22/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/pax-beehive/paxkit v0.0.0-20260701212726-4cf7b380e25c h1:mzGB89qSHT5RS4Q98myiu50XMsIX2A0h9X46ZZwtjNE=
 github.com/pax-beehive/paxkit v0.0.0-20260701212726-4cf7b380e25c/go.mod h1:0QcXIKVBmmTsmN7jAdVpbC22BIADCp6Q/790mEz/csw=
+github.com/pax-beehive/paxkit v0.0.0-20260708061620-2ab374664664 h1:TyYtVuholVtICMqUxaGbeigglClzWZMx99oychwsxqM=
+github.com/pax-beehive/paxkit v0.0.0-20260708061620-2ab374664664/go.mod h1:0QcXIKVBmmTsmN7jAdVpbC22BIADCp6Q/790mEz/csw=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c h1:ncq/mPwQF4JjgDlrVEn3C11VoGHZN7m8qihwgMEtzYw=

@@ -101,6 +101,7 @@ type RemoteStore interface {
 type AgentConnectionStore interface {
 	ListDesiredAgentConnections(ctx context.Context) ([]runtimes.AgentConnectionSpec, error)
 	ConditionalAgentConnectionStatusUpdate(ctx context.Context, update daemonstore.AgentConnectionStatusUpdate) (bool, error)
+	RotateAgentTransportQueueID(ctx context.Context, connectionID string, expectedQueueID string) (string, error)
 }
 
 type RemoteSupervisorOptions struct {
@@ -119,6 +120,7 @@ type AgentConnectionSupervisorOptions struct {
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
+	ExitHandler       RuntimeExitHandler[runtimes.AgentConnectionSpec]
 }
 
 type RemoteSupervisor struct {
@@ -161,6 +163,7 @@ func NewAgentConnectionSupervisor(opts AgentConnectionSupervisorOptions) *AgentC
 		startingPhase: string(runtimes.PhaseStarting),
 		newSession:    opts.Factory.NewAgentTunnelSession,
 		writeStatus:   agentConnectionStatusWriter(opts.Store, opts.StatusPoke),
+		handleExit:    firstAgentConnectionExitHandler(opts.ExitHandler, rotateAgentConnectionQueueOnExit(opts.Store)),
 	}
 	return &AgentConnectionSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredAgentConnections, ops, baseOptions{
 		Name:              "agent_connection",
@@ -201,12 +204,52 @@ func (s *AgentConnectionSupervisor) ObservedAgentRuntimes() []ObservedAgentRunti
 	return out
 }
 
+func firstAgentConnectionExitHandler(
+	handlers ...RuntimeExitHandler[runtimes.AgentConnectionSpec],
+) RuntimeExitHandler[runtimes.AgentConnectionSpec] {
+	return func(ctx context.Context, spec runtimes.AgentConnectionSpec, exit runtimes.Exit) (runtimes.AgentConnectionSpec, bool, error) {
+		for _, handler := range handlers {
+			if handler == nil {
+				continue
+			}
+			next, handled, err := handler(ctx, spec, exit)
+			if err != nil || handled {
+				return next, handled, err
+			}
+		}
+		return spec, false, nil
+	}
+}
+
+func rotateAgentConnectionQueueOnExit(store AgentConnectionStore) RuntimeExitHandler[runtimes.AgentConnectionSpec] {
+	return func(ctx context.Context, spec runtimes.AgentConnectionSpec, exit runtimes.Exit) (runtimes.AgentConnectionSpec, bool, error) {
+		if exit.Code != "reconcile_rotate" {
+			return spec, false, nil
+		}
+		queueID, err := store.RotateAgentTransportQueueID(ctx, spec.ConnectionID, spec.TransportQueueID)
+		if err != nil {
+			return spec, false, err
+		}
+		next := cloneAgentConnectionSpec(spec)
+		next.TransportQueueID = queueID
+		log.Printf(
+			"[paxd] agent_connection slot id=%s rotated transport queue old_queue_id=%s new_queue_id=%s",
+			spec.ConnectionID,
+			spec.TransportQueueID,
+			queueID,
+		)
+		return next, true, nil
+	}
+}
+
 type baseOptions struct {
 	Name              string
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
 }
+
+type RuntimeExitHandler[S any] func(ctx context.Context, spec S, exit runtimes.Exit) (S, bool, error)
 
 type baseSupervisor[S any] struct {
 	mu          sync.Mutex
@@ -365,6 +408,7 @@ type slotOps[S any] struct {
 	startingPhase string
 	newSession    func(S) runtimes.Session
 	writeStatus   func(context.Context, S, statusWrite) error
+	handleExit    RuntimeExitHandler[S]
 }
 
 type statusWrite struct {
@@ -558,6 +602,25 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		s.reconnects = 0
 		s.startLocked()
 		return
+	}
+	if s.ops.handleExit != nil {
+		next, handled, err := s.ops.handleExit(context.Background(), spec, exit)
+		if err != nil {
+			log.Printf("[paxd] %s slot id=%s exit handler failed code=%s err=%v", s.supervisorName, s.id, exit.Code, err)
+			exit = runtimes.TransientExit("exit_handler_failed", err.Error())
+		} else if handled {
+			if s.ops.id(next) != s.id {
+				log.Printf("[paxd] %s slot id=%s exit handler returned different id", s.supervisorName, s.id)
+				exit = runtimes.TransientExit("exit_handler_failed", "exit handler returned different id")
+			} else {
+				s.desired = next
+				s.reconnects = 0
+				s.backoffUntil = nil
+				log.Printf("[paxd] %s slot id=%s restarting after handled exit code=%s", s.supervisorName, s.id, exit.Code)
+				s.startLocked()
+				return
+			}
+		}
 	}
 
 	switch exit.Class {

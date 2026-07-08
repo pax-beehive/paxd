@@ -3,17 +3,21 @@ package sessionreporter
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/agentregistry"
+	"github.com/pax-beehive/paxd/internal/paxlclient"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 type DefaultScanner struct {
-	Timeout time.Duration
+	Timeout     time.Duration
+	PaxlCommand []string
 }
 
 func (s DefaultScanner) ListSessions(
@@ -23,6 +27,9 @@ func (s DefaultScanner) ListSessions(
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = defaultScanTimeout
+	}
+	if sessions, err := s.listPaxlSessions(ctx, spec); err == nil {
+		return sessions, nil
 	}
 	var errs []error
 	if isGeminiSpec(spec) {
@@ -68,6 +75,53 @@ func (s DefaultScanner) ListSessions(
 	}
 	errs = append(errs, err)
 	return nil, joinErrors(errs)
+}
+
+func (s DefaultScanner) listPaxlSessions(
+	ctx context.Context,
+	spec SessionScannerSpec,
+) ([]model.SessionInfo, error) {
+	command, ok := resolvePaxlCommand(s.PaxlCommand)
+	if !ok {
+		return nil, fmt.Errorf("paxl command is unavailable")
+	}
+	client := paxlclient.Client{Command: command}
+	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	sessions, err := client.ListSessions(ctx, agent, 0)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		messages, err := client.GetSessionMessages(ctx, sessions[i].SessionID, sessions[i].AgentType)
+		if err != nil {
+			continue
+		}
+		sessions[i].Messages = messages
+	}
+	return sessions, nil
+}
+
+func resolvePaxlCommand(command []string) ([]string, bool) {
+	if len(command) == 0 {
+		if envCommand := strings.Fields(os.Getenv("PAXD_PAXL_COMMAND")); len(envCommand) > 0 {
+			return resolvePaxlCommand(envCommand)
+		}
+		if path, err := exec.LookPath("paxl"); err == nil {
+			return []string{path}, true
+		}
+		if executable, err := os.Executable(); err == nil {
+			candidate := filepath.Join(filepath.Dir(executable), "paxl")
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				return []string{candidate}, true
+			}
+		}
+		return nil, false
+	}
+	if path, err := exec.LookPath(command[0]); err == nil {
+		out := append([]string{path}, command[1:]...)
+		return out, true
+	}
+	return nil, false
 }
 
 func isHermesSpec(spec SessionScannerSpec) bool {

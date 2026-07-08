@@ -635,6 +635,18 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	require.Len(t, connSpecs, 1)
 	require.Equal(t, firstQueueID, connSpecs[0].TransportQueueID)
 
+	rotatedQueueID, err := store.RotateAgentTransportQueueID(ctx, "conn_codex", firstQueueID)
+	require.NoError(t, err)
+	require.NotEqual(t, firstQueueID, rotatedQueueID)
+	require.True(t, strings.HasPrefix(rotatedQueueID, "agent_runtime:"), "rotated queue id = %q", rotatedQueueID)
+	connSpecs, err = store.ListDesiredAgentConnections(ctx)
+	require.NoError(t, err)
+	require.Len(t, connSpecs, 1)
+	require.Equal(t, rotatedQueueID, connSpecs[0].TransportQueueID)
+	alreadyRotatedQueueID, err := store.RotateAgentTransportQueueID(ctx, "conn_codex", firstQueueID)
+	require.NoError(t, err)
+	require.Equal(t, rotatedQueueID, alreadyRotatedQueueID)
+
 	workingDir := "/tmp/new"
 	if _, err := store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{
 		ConnectionID: "conn_codex",
