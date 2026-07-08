@@ -33,7 +33,7 @@ func (s DefaultScanner) ListSessions(
 	}
 	var errs []error
 	if isGeminiSpec(spec) {
-		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, 0)
+		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, spec.Limit)
 		if err == nil && len(sessions) > 0 {
 			return sessions, nil
 		}
@@ -52,12 +52,12 @@ func (s DefaultScanner) ListSessions(
 			if isHermesSpec(spec) {
 				return mergeHermesLocalSessions(ctx, spec, sessions)
 			}
-			return sessions, nil
+			return limitSessions(sessions, spec.Limit), nil
 		}
 		errs = append(errs, err)
 	}
 	if isHermesSpec(spec) {
-		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 		if err == nil {
 			return sessions, nil
 		}
@@ -71,7 +71,7 @@ func (s DefaultScanner) ListSessions(
 	}
 	sessions, err := agentregistry.ListSessions(ctx, status, timeout)
 	if err == nil {
-		return sessions, nil
+		return limitSessions(sessions, spec.Limit), nil
 	}
 	errs = append(errs, err)
 	return nil, joinErrors(errs)
@@ -87,7 +87,7 @@ func (s DefaultScanner) listPaxlSessions(
 	}
 	client := paxlclient.Client{Command: command}
 	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
-	sessions, err := client.ListSessions(ctx, agent, 0)
+	sessions, err := client.ListSessions(ctx, agent, spec.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -160,11 +160,18 @@ func mergeHermesLocalSessions(
 	spec SessionScannerSpec,
 	acpSessions []model.SessionInfo,
 ) ([]model.SessionInfo, error) {
-	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 	if err != nil {
-		return normalizeHermesSessions(acpSessions), nil
+		return limitSessions(normalizeHermesSessions(acpSessions), spec.Limit), nil
 	}
-	return mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), nil
+	return limitSessions(mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), spec.Limit), nil
+}
+
+func limitSessions(sessions []model.SessionInfo, limit int) []model.SessionInfo {
+	if limit <= 0 || len(sessions) <= limit {
+		return sessions
+	}
+	return sessions[:limit]
 }
 
 func normalizeHermesSessions(sessions []model.SessionInfo) []model.SessionInfo {

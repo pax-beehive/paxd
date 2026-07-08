@@ -94,6 +94,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 			RuntimeSource: supervisors.agentRuntimeSource,
 			Scanner:       sessionreporter.DefaultScanner{},
 			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+			BatchSize:     cfg.Daemon.SessionBatchSize,
 		})
 	}
 	return &Runtime{

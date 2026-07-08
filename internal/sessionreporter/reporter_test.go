@@ -71,6 +71,7 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, []string{"codex", "--acp"}, scanner.calls[0].Command)
 	assert.Equal(t, "/workspace/paxd", scanner.calls[0].WorkingDir)
 	assert.Equal(t, map[string]string{"PAX_ENV": "test"}, scanner.calls[0].Env)
+	assert.Equal(t, defaultBatchSize, scanner.calls[0].Limit)
 	require.Len(t, reporter.calls, 1)
 	assert.Equal(t, "remote_1", reporter.calls[0].target.RemoteID)
 	assert.Equal(t, "https://manager.example.com", reporter.calls[0].target.CloudAPIURL)
@@ -81,6 +82,57 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
 	require.Len(t, reporter.calls[0].sessions[0].Messages, 1)
 	assert.Equal(t, "done", reporter.calls[0].sessions[0].Messages[0].Text)
+}
+
+func TestRunOnceBatchesDuplicateSessionsPerCloudAgent(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
+		{Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_a",
+			RemoteID:     "remote_1",
+			CloudAPIURL:  "https://one.example",
+			CloudAgentID: "agent_1",
+			AgentType:    "codex",
+		}},
+		{Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_b",
+			RemoteID:     "remote_1",
+			CloudAPIURL:  "https://one.example",
+			CloudAgentID: "agent_1",
+			AgentType:    "codex",
+		}},
+	}}
+	scanner := &fakeScanner{
+		sessionsByConnection: map[string][]model.SessionInfo{
+			"conn_a": {
+				{SessionID: "codex:sess_1", NativeID: "sess_1", Name: "First"},
+				{SessionID: "codex:sess_2", NativeID: "sess_2", Name: "Second"},
+			},
+			"conn_b": {
+				{SessionID: "codex:sess_2", NativeID: "sess_2", Name: "Duplicate"},
+				{SessionID: "codex:sess_3", NativeID: "sess_3", Name: "Third"},
+			},
+		},
+	}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		BatchSize:     2,
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, scanner.calls, 2)
+	assert.Equal(t, 2, scanner.calls[0].Limit)
+	assert.Equal(t, 2, scanner.calls[1].Limit)
+	require.Len(t, reporter.calls, 1)
+	assert.Equal(t, "agent_1", reporter.calls[0].agentID)
+	require.Len(t, reporter.calls[0].sessions, 2)
+	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "First", reporter.calls[0].sessions[0].Name)
+	assert.Equal(t, "codex:sess_2", reporter.calls[0].sessions[1].SessionID)
+	assert.Equal(t, "Second", reporter.calls[0].sessions[1].Name)
 }
 
 func TestRunOnceSkipsRuntimeWithoutCloudAgentID(t *testing.T) {
