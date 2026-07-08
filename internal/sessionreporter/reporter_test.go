@@ -46,6 +46,14 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 		CurrentTask:    "tests",
 		UpdatedAt:      "2026-06-28T12:00:00Z",
 		TokenUsage:     42,
+		Messages: []model.SessionMessage{{
+			SessionID:   "codex:sess_1",
+			Seq:         1,
+			Kind:        "message",
+			Role:        "assistant",
+			Text:        "done",
+			CompletedAt: "2026-06-28T12:00:01Z",
+		}},
 	}}}
 	reporter := &fakeCloudReporter{}
 	service := New(Options{
@@ -71,6 +79,8 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
 	assert.Equal(t, "cli", reporter.calls[0].sessions[0].Source)
 	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
+	require.Len(t, reporter.calls[0].sessions[0].Messages, 1)
+	assert.Equal(t, "done", reporter.calls[0].sessions[0].Messages[0].Text)
 }
 
 func TestRunOnceSkipsRuntimeWithoutCloudAgentID(t *testing.T) {
