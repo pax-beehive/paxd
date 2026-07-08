@@ -15,6 +15,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
+	"github.com/pax-beehive/paxkit/reliablemq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +44,7 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	require.NotNil(t, rt.supervisors)
 	assert.NotNil(t, rt.supervisors.remote)
 	assert.NotNil(t, rt.supervisors.agent)
+	assert.IsType(t, &reliablemq.ProducerWriteBehindStore{}, rt.supervisors.transportFlusher)
 	assertNoBusinessRows(t, store)
 }
 

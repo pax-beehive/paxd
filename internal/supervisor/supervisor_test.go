@@ -70,6 +70,33 @@ func TestAgentConnectionSupervisorObservedRuntimesReturnsCopiedSpecs(t *testing.
 	assert.Equal(t, "secret-ref", again[0].Spec.Env["PAX_TOKEN"])
 }
 
+func TestAgentConnectionSupervisorRotatesTransportQueueAfterReconcileRotate(t *testing.T) {
+	store := newFakeAgentStore()
+	store.setDesired([]runtimes.AgentConnectionSpec{agentSpec("conn_1", 1, 0)})
+	factory := &fakeAgentFactory{
+		makeSession: func(_ runtimes.AgentConnectionSpec, index int) *scriptedSession {
+			if index == 0 {
+				return instantSession(runtimes.TransientExit("reconcile_rotate", "manager requested queue rotation"))
+			}
+			return blockingSession()
+		},
+	}
+	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	factory.waitSession(t, 1).waitStarted(t)
+	specs := factory.specs()
+	require.Len(t, specs, 2)
+	assert.Equal(t, "agent_1:queue_1", specs[0].TransportQueueID)
+	assert.Equal(t, "agent_1:queue_rotated", specs[1].TransportQueueID)
+	assert.Equal(t, "agent_1:queue_rotated", store.desiredQueueID("conn_1"))
+}
+
 func TestRemoteSupervisorWakeLoopReconcilesDesiredState(t *testing.T) {
 	store := newFakeRemoteStore()
 	factory := &fakeRemoteFactory{}
@@ -616,6 +643,35 @@ func (s *fakeAgentStore) ConditionalAgentConnectionStatusUpdate(ctx context.Cont
 	s.latest[update.ConnectionID] = update
 	s.statuses = append(s.statuses, update)
 	return true, nil
+}
+
+func (s *fakeAgentStore) RotateAgentTransportQueueID(ctx context.Context, connectionID string, expectedQueueID string) (string, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, spec := range s.desired {
+		if spec.ConnectionID != connectionID {
+			continue
+		}
+		if expectedQueueID != "" && spec.TransportQueueID != expectedQueueID {
+			return spec.TransportQueueID, nil
+		}
+		queueID := spec.CloudAgentID + ":queue_rotated"
+		s.desired[i].TransportQueueID = queueID
+		return queueID, nil
+	}
+	return "", daemonstore.ErrNotFound
+}
+
+func (s *fakeAgentStore) desiredQueueID(connectionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, spec := range s.desired {
+		if spec.ConnectionID == connectionID {
+			return spec.TransportQueueID
+		}
+	}
+	return ""
 }
 
 func (s *fakeAgentStore) latestStatus(id string) daemonstore.AgentConnectionStatusUpdate {

@@ -473,6 +473,68 @@ func TestRuntimeURLAndEnvelopeHelpers(t *testing.T) {
 
 }
 
+func TestAgentTunnelReconcilePaxdProducerSendsCheckpointAndAdvancesCursor(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	response, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:                   reliablemq.EnvelopeTypeReconcileResponse,
+		QueueID:                "agent_1:queue_1",
+		Stream:                 reliablemq.StreamACP,
+		Action:                 reliablemq.ReconcileActionAdvanceProducer,
+		ConsumerAckedThrough:   8,
+		AdvanceProducerNextSeq: 9,
+	})
+	require.NoError(t, err)
+	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: response}
+	reconciler := &spyReconcileProducerStore{
+		checkpoint: reliablemq.ProducerReconcileCheckpoint{
+			QueueID:         "agent_1:queue_1",
+			Stream:          reliablemq.StreamACP,
+			ProducerNextSeq: 4,
+			ReplayFrom:      2,
+			ReplayThrough:   3,
+		},
+	}
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		ReliableEngineFactory: ReliableEngineFromStore(newSpyStore()),
+		TransportReconciler:   reconciler,
+	})
+
+	err = session.reconcilePaxdProducer(context.Background(), conn)
+	require.NoError(t, err)
+
+	writes := conn.writes()
+	require.Len(t, writes, 1)
+	request, err := reliablemq.UnmarshalEnvelope(writes[0].payload)
+	require.NoError(t, err)
+	assert.Equal(t, reliablemq.EnvelopeTypeReconcileRequest, request.Type)
+	assert.Equal(t, int64(4), request.ProducerNextSeq)
+	assert.Equal(t, int64(2), request.ReplayFrom)
+	assert.Equal(t, int64(3), request.ReplayThrough)
+	assert.Equal(t, int64(9), reconciler.advancedNextSeq)
+}
+
+func TestAgentTunnelReconcilePaxdProducerTreatsEarlyCloseAsRotate(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = io.ErrUnexpectedEOF
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		ReliableEngineFactory: ReliableEngineFromStore(newSpyStore()),
+		TransportReconciler: &spyReconcileProducerStore{
+			checkpoint: reliablemq.ProducerReconcileCheckpoint{
+				ProducerNextSeq: 4,
+			},
+		},
+	})
+
+	err := session.reconcilePaxdProducer(context.Background(), conn)
+
+	require.ErrorIs(t, err, ErrTransportQueueRotate)
+	require.Len(t, conn.writes(), 1)
+}
+
 func TestNodeControlRunnerFuncNilReturnsConfigExit(t *testing.T) {
 	exit := (NodeControlRunnerFunc(nil)).RunNodeControl(context.Background(), newFakeWebSocketConn(), RemoteSpec{})
 	assert.Equal(t, ExitConfig, exit.Class)
@@ -736,4 +798,33 @@ func (s *spyStore) RecordDispatchFailure(ctx context.Context, key reliablemq.Fra
 func (s *spyStore) UpdateMetadata(ctx context.Context, key reliablemq.FrameKey, metadata reliablemq.Metadata) error {
 	s.record("UpdateMetadata")
 	return s.Store.UpdateMetadata(ctx, key, metadata)
+}
+
+type spyReconcileProducerStore struct {
+	checkpoint      reliablemq.ProducerReconcileCheckpoint
+	advancedNextSeq int64
+}
+
+func (s *spyReconcileProducerStore) LoadProducerReconcileCheckpoint(
+	ctx context.Context,
+	queueID string,
+	stream reliablemq.Stream,
+) (reliablemq.ProducerReconcileCheckpoint, error) {
+	_ = ctx
+	s.checkpoint.QueueID = queueID
+	s.checkpoint.Stream = stream
+	return s.checkpoint, nil
+}
+
+func (s *spyReconcileProducerStore) AdvanceProducerNextSeq(
+	ctx context.Context,
+	queueID string,
+	stream reliablemq.Stream,
+	nextSeq int64,
+) error {
+	_ = ctx
+	_ = queueID
+	_ = stream
+	s.advancedNextSeq = nextSeq
+	return nil
 }
