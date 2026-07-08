@@ -15,6 +15,7 @@ const (
 	defaultInterval      = 30 * time.Second
 	defaultScanTimeout   = 5 * time.Second
 	defaultReportTimeout = 5 * time.Second
+	defaultBatchSize     = 100
 )
 
 type RuntimeSource interface {
@@ -41,6 +42,7 @@ type Options struct {
 	Interval      time.Duration
 	ScanTimeout   time.Duration
 	ReportTimeout time.Duration
+	BatchSize     int
 }
 
 type Service struct {
@@ -50,6 +52,7 @@ type Service struct {
 	interval      time.Duration
 	scanTimeout   time.Duration
 	reportTimeout time.Duration
+	batchSize     int
 
 	mu       sync.Mutex
 	inFlight map[string]bool
@@ -69,6 +72,7 @@ type SessionScannerSpec struct {
 	Generation    int64
 	RestartNonce  int64
 	ObservedPhase string
+	Limit         int
 }
 
 type ReportTarget struct {
@@ -89,6 +93,10 @@ func New(opts Options) *Service {
 	if reportTimeout <= 0 {
 		reportTimeout = defaultReportTimeout
 	}
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
 	return &Service{
 		source:        opts.RuntimeSource,
 		scanner:       opts.Scanner,
@@ -96,6 +104,7 @@ func New(opts Options) *Service {
 		interval:      interval,
 		scanTimeout:   scanTimeout,
 		reportTimeout: reportTimeout,
+		batchSize:     batchSize,
 		inFlight:      make(map[string]bool),
 	}
 }
@@ -147,11 +156,13 @@ func (s *Service) scheduleObserved(ctx context.Context) {
 }
 
 func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedAgentRuntime) {
+	reports := make(map[agentReportKey]*pendingAgentReport)
 	for _, runtime := range runtimes {
 		if ctx.Err() != nil {
 			return
 		}
 		spec := scannerSpec(runtime)
+		spec.Limit = s.batchSize
 		if spec.CloudAgentID == "" {
 			log.Printf("[sessionreporter] skipping connection %q because cloud agent id is empty", spec.ConnectionID)
 			continue
@@ -166,17 +177,42 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 		if len(sessions) == 0 {
 			continue
 		}
-		reportCtx, cancel := context.WithTimeout(ctx, s.reportTimeout)
-		err = s.reporter.ReportAgentSessions(
-			reportCtx,
-			ReportTarget{RemoteID: spec.RemoteID, CloudAPIURL: spec.CloudAPIURL},
-			spec.CloudAgentID,
-			sessionStatuses(sessions),
-		)
-		cancel()
-		if err != nil {
-			log.Printf("[sessionreporter] report failed remote=%q agent=%q: %v", spec.RemoteID, spec.CloudAgentID, err)
+		statuses := sessionStatuses(spec, sessions)
+		if len(statuses) == 0 {
+			continue
 		}
+		key := agentReportKey{
+			RemoteID:    spec.RemoteID,
+			CloudAPIURL: spec.CloudAPIURL,
+			AgentID:     spec.CloudAgentID,
+		}
+		report := reports[key]
+		if report == nil {
+			report = newPendingAgentReport(key)
+			reports[key] = report
+		}
+		report.add(statuses)
+	}
+	for _, report := range reports {
+		s.reportAgentBatch(ctx, report)
+	}
+}
+
+func (s *Service) reportAgentBatch(ctx context.Context, report *pendingAgentReport) {
+	sessions := firstSessionBatch(report.sessions, s.batchSize)
+	if len(sessions) == 0 {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(ctx, s.reportTimeout)
+	err := s.reporter.ReportAgentSessions(
+		reportCtx,
+		ReportTarget{RemoteID: report.key.RemoteID, CloudAPIURL: report.key.CloudAPIURL},
+		report.key.AgentID,
+		sessions,
+	)
+	cancel()
+	if err != nil {
+		log.Printf("[sessionreporter] report failed remote=%q agent=%q: %v", report.key.RemoteID, report.key.AgentID, err)
 	}
 }
 
@@ -227,17 +263,18 @@ func scannerSpec(observed supervisor.ObservedAgentRuntime) SessionScannerSpec {
 	}
 }
 
-func sessionStatuses(sessions []model.SessionInfo) []cloud.SessionStatus {
+func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cloud.SessionStatus {
 	out := make([]cloud.SessionStatus, 0, len(sessions))
 	for _, session := range sessions {
 		if session.SessionID == "" {
 			continue
 		}
+		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
 		out = append(out, cloud.SessionStatus{
 			SessionID:      session.SessionID,
-			AgentType:      session.AgentType,
-			NativeID:       session.NativeID,
-			Name:           session.Name,
+			AgentType:      agentType,
+			NativeID:       firstNonEmpty(session.NativeID, session.SessionID),
+			Name:           sessionDisplayName(session),
 			ProjectID:      session.ProjectID,
 			Preview:        session.Preview,
 			WorkspaceRoots: append([]string(nil), session.WorkspaceRoots...),
@@ -250,6 +287,63 @@ func sessionStatuses(sessions []model.SessionInfo) []cloud.SessionStatus {
 		})
 	}
 	return out
+}
+
+type agentReportKey struct {
+	RemoteID    string
+	CloudAPIURL string
+	AgentID     string
+}
+
+type pendingAgentReport struct {
+	key      agentReportKey
+	seen     map[string]bool
+	sessions []cloud.SessionStatus
+}
+
+func newPendingAgentReport(key agentReportKey) *pendingAgentReport {
+	return &pendingAgentReport{key: key, seen: make(map[string]bool)}
+}
+
+func (r *pendingAgentReport) add(sessions []cloud.SessionStatus) {
+	for _, session := range sessions {
+		key := statusMergeKey(session)
+		if key == "" || r.seen[key] {
+			continue
+		}
+		r.seen[key] = true
+		r.sessions = append(r.sessions, session)
+	}
+}
+
+func statusMergeKey(session cloud.SessionStatus) string {
+	if session.SessionID != "" {
+		return session.SessionID
+	}
+	if session.AgentType != "" && session.NativeID != "" {
+		return session.AgentType + ":" + session.NativeID
+	}
+	return ""
+}
+
+func firstSessionBatch(sessions []cloud.SessionStatus, batchSize int) []cloud.SessionStatus {
+	if batchSize <= 0 || len(sessions) <= batchSize {
+		return sessions
+	}
+	return sessions[:batchSize]
+}
+
+func sessionDisplayName(session model.SessionInfo) string {
+	if session.Name != "" {
+		return session.Name
+	}
+	if session.ProjectID != "" {
+		return session.ProjectID
+	}
+	if session.NativeID != "" {
+		return session.NativeID
+	}
+	return session.SessionID
 }
 
 func sessionMessages(messages []model.SessionMessage) []cloud.SessionMessage {

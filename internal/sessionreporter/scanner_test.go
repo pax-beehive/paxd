@@ -33,6 +33,19 @@ func TestDefaultScannerUsesPaxlBinaryWhenAvailable(t *testing.T) {
 	assert.Equal(t, "hello from paxl", sessions[0].Messages[0].Text)
 }
 
+func TestDefaultScannerPassesLimitToPaxl(t *testing.T) {
+	command := fakePaxlCommandRequiringLimit(t, "2")
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{command},
+	}.ListSessions(context.Background(), SessionScannerSpec{Harness: "codex", Limit: 2})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess_limited", sessions[0].SessionID)
+}
+
 func TestResolvePaxlCommandReadsEnvironmentOverride(t *testing.T) {
 	command := fakePaxlCommand(t)
 	t.Setenv("PAXD_PAXL_COMMAND", command+" --profile local")
@@ -302,6 +315,28 @@ if [ "$1" = "session" ] && [ "$2" = "list" ]; then
 fi
 if [ "$1" = "session" ] && [ "$2" = "get" ]; then
   printf '{"schemaVersion":"paxl.session.element.v1","sessionId":"codex:sess_paxl","seq":1,"type":"message","role":"assistant","completedAt":"2026-07-07T01:02:04Z","contentText":"hello from paxl"}\n'
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 2
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	return scriptPath
+}
+
+func fakePaxlCommandRequiringLimit(t *testing.T, limit string) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+  if [ "$7" != "--limit" ] || [ "$8" != "` + limit + `" ]; then
+    echo missing expected limit "$@" >&2
+    exit 3
+  fi
+  printf '{"schemaVersion":"paxl.session.metadata.v1","id":"codex:sess_limited","agent":"codex","nativeId":"sess_limited","title":"Limited","status":"available","updatedAt":"2026-07-07T01:02:03Z"}\n'
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "get" ]; then
   exit 0
 fi
 echo unexpected "$@" >&2
