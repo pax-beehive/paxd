@@ -32,6 +32,11 @@ func (s DefaultScanner) ListSessions(
 		return sessions, nil
 	}
 	var errs []error
+	if isCodexSpec(spec) {
+		// Codex sessions are local rollout logs. Starting codex-acp from the
+		// daemon can trigger browser OAuth with a short-lived localhost callback.
+		return listCodexLocalSessions(ctx, timeout)
+	}
 	if isGeminiSpec(spec) {
 		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, spec.Limit)
 		if err == nil && len(sessions) > 0 {
@@ -75,6 +80,29 @@ func (s DefaultScanner) ListSessions(
 	}
 	errs = append(errs, err)
 	return nil, joinErrors(errs)
+}
+
+func isCodexSpec(spec SessionScannerSpec) bool {
+	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if name == "codex" {
+		return true
+	}
+	if len(spec.Command) == 0 {
+		return false
+	}
+	commandName := filepath.Base(spec.Command[0])
+	if commandName == "codex" || commandName == "codex-acp" {
+		return true
+	}
+	return strings.Contains(strings.Join(spec.Command, " "), "@zed-industries/codex-acp")
+}
+
+func listCodexLocalSessions(ctx context.Context, timeout time.Duration) ([]model.SessionInfo, error) {
+	status, err := fallbackStatus(SessionScannerSpec{Harness: "codex"})
+	if err != nil {
+		return nil, err
+	}
+	return agentregistry.ListSessions(ctx, status, timeout)
 }
 
 func (s DefaultScanner) listPaxlSessions(
