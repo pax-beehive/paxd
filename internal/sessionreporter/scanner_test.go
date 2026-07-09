@@ -62,6 +62,38 @@ func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testin
 	assert.Equal(t, "ACP Gemini", sessions[0].Name)
 }
 
+func TestDefaultScannerUsesCodexLocalSessionsWithoutStartingACP(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(codexHome, "session_index.jsonl"),
+		[]byte(`{"id":"sess-local","thread_name":"Local Codex","updated_at":"2026-06-20T05:32:20Z"}`+"\n"),
+		0o644,
+	))
+	markerPath := filepath.Join(t.TempDir(), "started")
+	scriptPath := filepath.Join(t.TempDir(), "fake-codex-acp.sh")
+	script := `#!/bin/sh
+printf started > "$1"
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"sessions":[]}}\n'
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+
+	sessions, err := DefaultScanner{Timeout: time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "codex",
+		Command: []string{scriptPath, markerPath},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("codex ACP command was started; marker stat error = %v", err)
+	}
+}
+
 func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

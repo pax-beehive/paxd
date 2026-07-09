@@ -25,6 +25,42 @@ func TestSessionListerTimesOutWhenACPDoesNotRespond(t *testing.T) {
 	}
 }
 
+func TestSessionListerDoesNotAuthenticateOpenAIBrowserLogin(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-acp.sh")
+	script := `#!/bin/sh
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[{"id":"chatgpt","name":"ChatGPT","type":"external"}]}}\n'
+read line
+case "$line" in
+  *'"method":"authenticate"'*)
+    printf '{"jsonrpc":"2.0","id":2,"error":{"code":400,"message":"unexpected authenticate"}}\n'
+    ;;
+  *'"method":"session/list"'*)
+    printf '{"jsonrpc":"2.0","id":2,"result":{"sessions":[{"sessionId":"codex:sess-1","nativeId":"sess-1","title":"Local session"}]}}\n'
+    ;;
+  *)
+    printf '{"jsonrpc":"2.0","id":2,"error":{"code":400,"message":"unexpected method"}}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	sessions, err := SessionLister{
+		Command: []string{scriptPath},
+		Timeout: time.Second,
+	}.List(context.Background())
+
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "codex:sess-1" {
+		t.Fatalf("sessions = %+v, want codex:sess-1", sessions)
+	}
+}
+
 func TestSessionPrompterSendsSessionPrompt(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "prompt.json")
