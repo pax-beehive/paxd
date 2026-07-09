@@ -3,17 +3,21 @@ package sessionreporter
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/agentregistry"
+	"github.com/pax-beehive/paxd/internal/paxlclient"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 type DefaultScanner struct {
-	Timeout time.Duration
+	Timeout     time.Duration
+	PaxlCommand []string
 }
 
 func (s DefaultScanner) ListSessions(
@@ -24,6 +28,9 @@ func (s DefaultScanner) ListSessions(
 	if timeout <= 0 {
 		timeout = defaultScanTimeout
 	}
+	if sessions, err := s.listPaxlSessions(ctx, spec); err == nil {
+		return sessions, nil
+	}
 	var errs []error
 	if isCodexSpec(spec) {
 		// Codex sessions are local rollout logs. Starting codex-acp from the
@@ -31,7 +38,7 @@ func (s DefaultScanner) ListSessions(
 		return listCodexLocalSessions(ctx, timeout)
 	}
 	if isGeminiSpec(spec) {
-		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, 0)
+		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, spec.Limit)
 		if err == nil && len(sessions) > 0 {
 			return sessions, nil
 		}
@@ -50,12 +57,12 @@ func (s DefaultScanner) ListSessions(
 			if isHermesSpec(spec) {
 				return mergeHermesLocalSessions(ctx, spec, sessions)
 			}
-			return sessions, nil
+			return limitSessions(sessions, spec.Limit), nil
 		}
 		errs = append(errs, err)
 	}
 	if isHermesSpec(spec) {
-		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 		if err == nil {
 			return sessions, nil
 		}
@@ -69,7 +76,7 @@ func (s DefaultScanner) ListSessions(
 	}
 	sessions, err := agentregistry.ListSessions(ctx, status, timeout)
 	if err == nil {
-		return sessions, nil
+		return limitSessions(sessions, spec.Limit), nil
 	}
 	errs = append(errs, err)
 	return nil, joinErrors(errs)
@@ -96,6 +103,53 @@ func listCodexLocalSessions(ctx context.Context, timeout time.Duration) ([]model
 		return nil, err
 	}
 	return agentregistry.ListSessions(ctx, status, timeout)
+}
+
+func (s DefaultScanner) listPaxlSessions(
+	ctx context.Context,
+	spec SessionScannerSpec,
+) ([]model.SessionInfo, error) {
+	command, ok := resolvePaxlCommand(s.PaxlCommand)
+	if !ok {
+		return nil, fmt.Errorf("paxl command is unavailable")
+	}
+	client := paxlclient.Client{Command: command}
+	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	sessions, err := client.ListSessions(ctx, agent, spec.Limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		messages, err := client.GetSessionMessages(ctx, sessions[i].SessionID, sessions[i].AgentType)
+		if err != nil {
+			continue
+		}
+		sessions[i].Messages = messages
+	}
+	return sessions, nil
+}
+
+func resolvePaxlCommand(command []string) ([]string, bool) {
+	if len(command) == 0 {
+		if envCommand := strings.Fields(os.Getenv("PAXD_PAXL_COMMAND")); len(envCommand) > 0 {
+			return resolvePaxlCommand(envCommand)
+		}
+		if path, err := exec.LookPath("paxl"); err == nil {
+			return []string{path}, true
+		}
+		if executable, err := os.Executable(); err == nil {
+			candidate := filepath.Join(filepath.Dir(executable), "paxl")
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				return []string{candidate}, true
+			}
+		}
+		return nil, false
+	}
+	if path, err := exec.LookPath(command[0]); err == nil {
+		out := append([]string{path}, command[1:]...)
+		return out, true
+	}
+	return nil, false
 }
 
 func isHermesSpec(spec SessionScannerSpec) bool {
@@ -134,11 +188,18 @@ func mergeHermesLocalSessions(
 	spec SessionScannerSpec,
 	acpSessions []model.SessionInfo,
 ) ([]model.SessionInfo, error) {
-	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 	if err != nil {
-		return normalizeHermesSessions(acpSessions), nil
+		return limitSessions(normalizeHermesSessions(acpSessions), spec.Limit), nil
 	}
-	return mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), nil
+	return limitSessions(mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), spec.Limit), nil
+}
+
+func limitSessions(sessions []model.SessionInfo, limit int) []model.SessionInfo {
+	if limit <= 0 || len(sessions) <= limit {
+		return sessions
+	}
+	return sessions[:limit]
 }
 
 func normalizeHermesSessions(sessions []model.SessionInfo) []model.SessionInfo {

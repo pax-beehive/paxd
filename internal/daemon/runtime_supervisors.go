@@ -13,6 +13,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
+	"github.com/pax-beehive/paxkit/reliablemq"
 	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 )
 
@@ -21,6 +22,10 @@ type runtimeSupervisors struct {
 	agent              supervisor.Supervisor
 	agentRuntimeSource *supervisor.AgentConnectionSupervisor
 	statusHub          *statusHub
+	transportFlusher   interface {
+		Close(context.Context) error
+		Stats() reliablemq.ProducerWriteBehindStats
+	}
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -38,6 +43,22 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if err != nil {
 		return fmt.Errorf("open reliable transport journal: %w", err)
 	}
+	transportStore := reliablemq.NewProducerWriteBehindStore(
+		mqStore,
+		reliablemq.WithProducerWriteBehindRequireBatchStore(),
+		reliablemq.WithProducerWriteBehindFlushFailureHandler(func(err error, stats reliablemq.ProducerWriteBehindStats) {
+			log.Printf(
+				"[paxd] acp transport producer write-behind flush failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d consecutive_failures=%d last_error=%q",
+				err,
+				stats.DirtyFrames,
+				stats.DirtyPatches,
+				stats.DirtyBytes,
+				stats.ConsecutiveFlushFailures,
+				stats.LastFlushError,
+			)
+		}),
+	)
+	s.transportFlusher = transportStore
 
 	headers := auth.NewProvider(store, nil)
 	dialer := runtimes.GorillaWebSocketDialer{}
@@ -63,7 +84,8 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
 			Headers:               headers,
 			Dialer:                dialer,
-			ReliableEngineFactory: runtimes.ReliableEngineFromStore(mqStore),
+			ReliableEngineFactory: runtimes.ReliableEngineFromStore(transportStore),
+			TransportReconciler:   transportStore,
 		}},
 	})
 	s.agent = agent
@@ -130,6 +152,23 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 	if s == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
+	}
+	if s.transportFlusher != nil {
+		go func() {
+			<-ctx.Done()
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.transportFlusher.Close(closeCtx); err != nil {
+				stats := s.transportFlusher.Stats()
+				log.Printf(
+					"[paxd] acp transport producer write-behind close failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d",
+					err,
+					stats.DirtyFrames,
+					stats.DirtyPatches,
+					stats.DirtyBytes,
+				)
+			}
+		}()
 	}
 	startSupervisor(ctx, "remote", s.remote)
 	startSupervisor(ctx, "agent_connection", s.agent)

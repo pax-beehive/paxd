@@ -705,6 +705,49 @@ func (s *Store) ensureAgentTransportQueueID(ctx context.Context, conn *AgentConn
 	return queueID, nil
 }
 
+func (s *Store) RotateAgentTransportQueueID(
+	ctx context.Context,
+	connectionID string,
+	expectedQueueID string,
+) (string, error) {
+	var conn AgentConnection
+	if err := s.db.WithContext(ctx).
+		Where("id = ?", connectionID).
+		First(&conn).Error; err != nil {
+		return "", mapGormErr(err)
+	}
+	cloudAgentID := stringValue(conn.CloudAgentID)
+	if cloudAgentID == "" {
+		return "", ErrNotFound
+	}
+	if expectedQueueID != "" && conn.TransportQueueID != expectedQueueID {
+		return conn.TransportQueueID, nil
+	}
+	queueID, err := newTransportQueueID(cloudAgentID)
+	if err != nil {
+		return "", err
+	}
+	res := s.db.WithContext(ctx).Model(&AgentConnection{}).
+		Where("id = ? AND transport_queue_id = ?", conn.ID, conn.TransportQueueID).
+		Updates(map[string]any{
+			"transport_queue_id": queueID,
+			"updated_at":         s.currentTime(),
+		})
+	if res.Error != nil {
+		return "", mapGormErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		var current AgentConnection
+		if err := s.db.WithContext(ctx).
+			Where("id = ?", connectionID).
+			First(&current).Error; err != nil {
+			return "", mapGormErr(err)
+		}
+		return current.TransportQueueID, nil
+	}
+	return queueID, nil
+}
+
 func newTransportQueueID(cloudAgentID string) (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {

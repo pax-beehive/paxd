@@ -13,6 +13,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultScannerUsesPaxlBinaryWhenAvailable(t *testing.T) {
+	command := fakePaxlCommand(t)
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{command},
+	}.ListSessions(context.Background(), SessionScannerSpec{Harness: "codex"})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess_paxl", sessions[0].SessionID)
+	assert.Equal(t, "codex", sessions[0].AgentType)
+	assert.Equal(t, "sess_paxl", sessions[0].NativeID)
+	assert.Equal(t, "From paxl", sessions[0].Name)
+	assert.Equal(t, "paxl", sessions[0].Source)
+	require.Len(t, sessions[0].Messages, 1)
+	assert.Equal(t, "assistant", sessions[0].Messages[0].Role)
+	assert.Equal(t, "hello from paxl", sessions[0].Messages[0].Text)
+}
+
+func TestDefaultScannerPassesLimitToPaxl(t *testing.T) {
+	command := fakePaxlCommandRequiringLimit(t, "2")
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{command},
+	}.ListSessions(context.Background(), SessionScannerSpec{Harness: "codex", Limit: 2})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess_limited", sessions[0].SessionID)
+}
+
+func TestResolvePaxlCommandReadsEnvironmentOverride(t *testing.T) {
+	command := fakePaxlCommand(t)
+	t.Setenv("PAXD_PAXL_COMMAND", command+" --profile local")
+
+	resolved, ok := resolvePaxlCommand(nil)
+
+	require.True(t, ok)
+	assert.Equal(t, []string{command, "--profile", "local"}, resolved)
+}
+
 func TestDefaultScannerUsesGeminiLocalSessionsBeforeACP(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GEMINI_HOME", home)
@@ -32,7 +75,7 @@ func TestDefaultScannerUsesGeminiLocalSessionsBeforeACP(t *testing.T) {
 		0o644,
 	))
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "gemini",
 		Command: []string{"definitely-missing-gemini-acp-test-binary", "--acp"},
 	})
@@ -51,7 +94,7 @@ func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testin
 	t.Setenv("GEMINI_HOME", filepath.Join(t.TempDir(), "missing"))
 	command := fakeACPCommand(t, `[{"sessionId":"gemini-acp","nativeId":"gemini-acp","title":"ACP Gemini"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "gemini",
 		Command: command,
 	})
@@ -81,7 +124,7 @@ printf '{"jsonrpc":"2.0","id":2,"result":{"sessions":[]}}\n'
 `
 	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
 
-	sessions, err := DefaultScanner{Timeout: time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(time.Second).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "codex",
 		Command: []string{scriptPath, markerPath},
 	})
@@ -101,7 +144,7 @@ func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
 	insertReporterHermesSession(t, filepath.Join(home, ".hermes", "state.db"), "sess-local", "SQLite only", 1_780_000_010)
 	command := fakeHermesACPCommand(t, `[{"sessionId":"sess-acp","nativeId":"sess-acp","title":"ACP only","updatedAt":"2026-06-01T20:26:40Z"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "hermes",
 		Command: command,
 	})
@@ -124,7 +167,7 @@ func TestDefaultScannerReadsHermesProfileStateDBFromCommand(t *testing.T) {
 	insertReporterHermesSession(t, filepath.Join(root, "state.db"), "sess-default", "Default profile", 1_780_000_010)
 	insertReporterHermesSession(t, profileDB, "sess-profile", "ABC profile", 1_780_000_020)
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Command: []string{filepath.Join(t.TempDir(), "hermes"), "--profile", "ABC", "acp"},
 	})
 
@@ -140,7 +183,7 @@ func TestDefaultScannerUsesHermesSQLiteWhenACPFail(t *testing.T) {
 	createReporterHermesStateDB(t, filepath.Join(home, ".hermes", "state.db"))
 	insertReporterHermesSession(t, filepath.Join(home, ".hermes", "state.db"), "sess-local", "SQLite fallback", 1_780_000_010)
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "hermes",
 		Command: []string{"definitely-missing-hermes-acp-test-binary"},
 	})
@@ -285,4 +328,52 @@ func insertReporterHermesSession(t *testing.T, path string, id string, title str
 		VALUES (?, 'cli', ?, ?)
 	`, id, title, startedAt)
 	require.NoError(t, err)
+}
+
+func legacyDefaultScanner(timeout time.Duration) DefaultScanner {
+	return DefaultScanner{
+		Timeout:     timeout,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}
+}
+
+func fakePaxlCommand(t *testing.T) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+  printf '{"schemaVersion":"paxl.session.metadata.v1","id":"codex:sess_paxl","agent":"codex","nativeId":"sess_paxl","title":"From paxl","status":"available","updatedAt":"2026-07-07T01:02:03Z"}\n'
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "get" ]; then
+  printf '{"schemaVersion":"paxl.session.element.v1","sessionId":"codex:sess_paxl","seq":1,"type":"message","role":"assistant","completedAt":"2026-07-07T01:02:04Z","contentText":"hello from paxl"}\n'
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 2
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	return scriptPath
+}
+
+func fakePaxlCommandRequiringLimit(t *testing.T, limit string) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+  if [ "$7" != "--limit" ] || [ "$8" != "` + limit + `" ]; then
+    echo missing expected limit "$@" >&2
+    exit 3
+  fi
+  printf '{"schemaVersion":"paxl.session.metadata.v1","id":"codex:sess_limited","agent":"codex","nativeId":"sess_limited","title":"Limited","status":"available","updatedAt":"2026-07-07T01:02:03Z"}\n'
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "get" ]; then
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 2
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	return scriptPath
 }

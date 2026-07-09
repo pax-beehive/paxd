@@ -20,6 +20,8 @@ import (
 
 const replayLimit = 1000
 
+var ErrTransportQueueRotate = errors.New("manager requested queue rotation")
+
 // AgentTunnelSessionDeps are process-wide dependencies used to run one ACP
 // tunnel attempt. The desired connection data lives in AgentConnectionSpec.
 type AgentTunnelSessionDeps struct {
@@ -27,6 +29,7 @@ type AgentTunnelSessionDeps struct {
 	Dialer                WebSocketDialer
 	LocalACPProcessRunner LocalACPProcessRunner
 	ReliableEngineFactory ReliableEngineFactory
+	TransportReconciler   reliablemq.ReconcileProducerStore
 	Heartbeat             HeartbeatConfig
 	SessionEventSink      SessionEventSink
 }
@@ -125,7 +128,13 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 
 	s.emit(PhaseConnected, nil)
 	s.emit(PhaseStarting, nil)
-	log.Printf("[paxd] agent tunnel id=%s starting local ACP command=%q working_dir=%q", s.spec.ConnectionID, strings.Join(s.spec.Command, " "), s.spec.WorkingDir)
+	log.Printf(
+		"[paxd] agent tunnel id=%s starting local ACP command=%q working_dir=%q transport_queue_id=%s",
+		s.spec.ConnectionID,
+		strings.Join(s.spec.Command, " "),
+		s.spec.WorkingDir,
+		s.spec.TransportQueueID,
+	)
 	proc, err := s.deps.LocalACPProcessRunner.Start(ctx, LocalACPProcessSpec{
 		Command:    s.spec.Command,
 		WorkingDir: s.spec.WorkingDir,
@@ -140,6 +149,24 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	go io.Copy(io.Discard, proc.Stderr())
 
 	engine := s.newReliableEngine(hbConn, proc.Stdin())
+	if err := s.reconcilePaxdProducer(ctx, hbConn); err != nil {
+		if errors.Is(err, ErrTransportQueueRotate) {
+			log.Printf(
+				"[paxd] agent tunnel id=%s reconcile requested queue rotation transport_queue_id=%s: %v",
+				s.spec.ConnectionID,
+				s.spec.TransportQueueID,
+				err,
+			)
+			return connectedExit(TransientExit("reconcile_rotate", err.Error()))
+		}
+		log.Printf(
+			"[paxd] agent tunnel id=%s reconcile failed transport_queue_id=%s: %v",
+			s.spec.ConnectionID,
+			s.spec.TransportQueueID,
+			err,
+		)
+		return connectedExit(TransientExit("reconcile_failed", err.Error()))
+	}
 	if err := s.replayInbound(ctx, engine); err != nil {
 		log.Printf("[paxd] agent tunnel id=%s replay inbound failed: %v", s.spec.ConnectionID, err)
 		return connectedExit(TransientExit("replay_inbound_failed", err.Error()))
@@ -226,6 +253,91 @@ func (s *AgentTunnelSession) replayInbound(ctx context.Context, engine ReliableE
 
 func (s *AgentTunnelSession) replayOutbound(ctx context.Context, engine ReliableEngine) error {
 	return engine.ReplayOutbound(ctx, s.spec.TransportQueueID, reliablemq.StreamACP, replayLimit)
+}
+
+func (s *AgentTunnelSession) reconcilePaxdProducer(ctx context.Context, conn WebSocketConn) error {
+	if s.deps.TransportReconciler == nil {
+		return nil
+	}
+	checkpoint, err := s.deps.TransportReconciler.LoadProducerReconcileCheckpoint(
+		ctx,
+		s.spec.TransportQueueID,
+		reliablemq.StreamACP,
+	)
+	if err != nil {
+		return fmt.Errorf("load producer checkpoint: %w", err)
+	}
+	request, err := reliablemq.MarshalEnvelope(reliablemq.ReconcileRequestEnvelope(checkpoint))
+	if err != nil {
+		return err
+	}
+	if err := conn.WriteMessage(websocketTextMessage, request); err != nil {
+		return fmt.Errorf("write reconcile request: %w", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		if isReconcileResponseClose(err) {
+			return ErrTransportQueueRotate
+		}
+		return fmt.Errorf("read reconcile response: %w", err)
+	}
+	if messageType != websocketTextMessage && messageType != websocketBinaryMessage {
+		return fmt.Errorf("unexpected reconcile message type %d", messageType)
+	}
+	response, err := reliablemq.UnmarshalEnvelope(payload)
+	if err != nil {
+		return fmt.Errorf("decode reconcile response: %w", err)
+	}
+	if response.Type != reliablemq.EnvelopeTypeReconcileResponse {
+		return fmt.Errorf("expected reconcile_response, got %q", response.Type)
+	}
+	if response.QueueID != s.spec.TransportQueueID {
+		return fmt.Errorf("unexpected reconcile queue_id %q", response.QueueID)
+	}
+	if response.Stream != reliablemq.StreamACP {
+		return fmt.Errorf("unexpected reconcile stream %q", response.Stream)
+	}
+	log.Printf(
+		"[paxd] agent tunnel id=%s reconciled queue_id=%s action=%s producer_next_seq=%d producer_replay_from=%d producer_replay_through=%d consumer_acked_through=%d replay_from=%d replay_through=%d advance_producer_next_seq=%d",
+		s.spec.ConnectionID,
+		s.spec.TransportQueueID,
+		response.Action,
+		checkpoint.ProducerNextSeq,
+		checkpoint.ReplayFrom,
+		checkpoint.ReplayThrough,
+		response.ConsumerAckedThrough,
+		response.From,
+		response.Through,
+		response.AdvanceProducerNextSeq,
+	)
+	switch response.Action {
+	case reliablemq.ReconcileActionAligned, reliablemq.ReconcileActionReplay:
+		return nil
+	case reliablemq.ReconcileActionAdvanceProducer:
+		return s.deps.TransportReconciler.AdvanceProducerNextSeq(
+			ctx,
+			s.spec.TransportQueueID,
+			reliablemq.StreamACP,
+			response.AdvanceProducerNextSeq,
+		)
+	case reliablemq.ReconcileActionRotate:
+		return ErrTransportQueueRotate
+	default:
+		return fmt.Errorf("unsupported reconcile action %q", response.Action)
+	}
+}
+
+func isReconcileResponseClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "unexpected EOF") ||
+		strings.Contains(message, "websocket: close") ||
+		message == "closed"
 }
 
 func (s *AgentTunnelSession) copyWSToStdin(ctx context.Context, conn WebSocketConn, engine ReliableEngine) error {

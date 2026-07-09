@@ -99,6 +99,7 @@ func TestPostAgentSessionsPostsSessionOnlyPayload(t *testing.T) {
 	assert.Equal(t, "/api/v1/node/agents/agent%2Fone/sessions", gotPath)
 	require.Len(t, gotBody.Sessions, 1)
 	assert.Equal(t, "codex:sess_1", gotBody.Sessions[0].SessionID)
+	assert.Equal(t, "sess_1", gotBody.Sessions[0].NativeID)
 	assert.Equal(t, "cli", gotBody.Sessions[0].Source)
 	assert.Equal(t, int64(10), gotBody.Sessions[0].TokenUsage.InputTokens)
 	assert.Equal(t, int64(20), gotBody.Sessions[0].TokenUsage.OutputTokens)

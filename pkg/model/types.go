@@ -22,6 +22,18 @@ type SessionInfo struct {
 	CurrentTask string `json:"currentTask,omitempty"` // description of current tool/task
 	TokenUsage  int64  `json:"tokenUsage,omitempty"`  // total tokens consumed
 	UpdatedAt   string `json:"updatedAt,omitempty"`   // last activity timestamp
+
+	Messages []SessionMessage `json:"messages,omitempty"`
+}
+
+type SessionMessage struct {
+	SessionID   string `json:"sessionId"`
+	Seq         int64  `json:"seq"`
+	Kind        string `json:"kind"`
+	Role        string `json:"role,omitempty"`
+	Text        string `json:"text,omitempty"`
+	StartedAt   string `json:"startedAt,omitempty"`
+	CompletedAt string `json:"completedAt,omitempty"`
 }
 
 // HistoryMessage is a single turn in session history.
