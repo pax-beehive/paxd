@@ -72,6 +72,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
 	}
+	agentProcessPool := runtimes.NewPersistentACPProcessPool(runtimes.ExecLocalACPProcessRunner{}, transportStore)
 
 	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
 		Store:      store,
@@ -84,9 +85,13 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
 			Headers:               headers,
 			Dialer:                dialer,
+			ACPProcessPool:        agentProcessPool,
 			ReliableEngineFactory: runtimes.ReliableEngineFromStore(transportStore),
 			TransportReconciler:   transportStore,
 		}},
+		StopHandler: func(ctx context.Context, spec runtimes.AgentConnectionSpec) {
+			agentProcessPool.Stop(spec)
+		},
 	})
 	s.agent = agent
 	s.agentRuntimeSource = agent

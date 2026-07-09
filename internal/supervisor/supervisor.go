@@ -121,6 +121,7 @@ type AgentConnectionSupervisorOptions struct {
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
 	ExitHandler       RuntimeExitHandler[runtimes.AgentConnectionSpec]
+	StopHandler       RuntimeStopHandler[runtimes.AgentConnectionSpec]
 }
 
 type RemoteSupervisor struct {
@@ -164,6 +165,7 @@ func NewAgentConnectionSupervisor(opts AgentConnectionSupervisorOptions) *AgentC
 		newSession:    opts.Factory.NewAgentTunnelSession,
 		writeStatus:   agentConnectionStatusWriter(opts.Store, opts.StatusPoke),
 		handleExit:    firstAgentConnectionExitHandler(opts.ExitHandler, rotateAgentConnectionQueueOnExit(opts.Store)),
+		handleStop:    opts.StopHandler,
 	}
 	return &AgentConnectionSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredAgentConnections, ops, baseOptions{
 		Name:              "agent_connection",
@@ -250,6 +252,7 @@ type baseOptions struct {
 }
 
 type RuntimeExitHandler[S any] func(ctx context.Context, spec S, exit runtimes.Exit) (S, bool, error)
+type RuntimeStopHandler[S any] func(ctx context.Context, spec S)
 
 type baseSupervisor[S any] struct {
 	mu          sync.Mutex
@@ -409,6 +412,7 @@ type slotOps[S any] struct {
 	newSession    func(S) runtimes.Session
 	writeStatus   func(context.Context, S, statusWrite) error
 	handleExit    RuntimeExitHandler[S]
+	handleStop    RuntimeStopHandler[S]
 }
 
 type statusWrite struct {
@@ -496,6 +500,9 @@ func (s *runtimeSlot[S]) Stop(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	log.Printf("[paxd] %s slot id=%s stop requested reason=%s", s.supervisorName, s.id, reason)
+	if s.hasDesired && s.ops.handleStop != nil {
+		s.ops.handleStop(context.Background(), s.desired)
+	}
 	s.hasDesired = false
 	s.pending = false
 	if s.timer != nil {

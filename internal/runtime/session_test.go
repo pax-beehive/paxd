@@ -212,6 +212,51 @@ func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
 	assert.Equal(t, "agent_1", env.Metadata["agent_id"])
 }
 
+func TestAgentTunnelPersistentProcessJournalsStdoutAfterTunnelDisconnect(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = errors.New("network down")
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdoutWriter.Close()
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ACPProcessPool:        pool,
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+
+	exit := session.Run(context.Background())
+
+	assert.Equal(t, ExitTransient, exit.Class)
+	assert.Equal(t, "session_error", exit.Code)
+	assert.False(t, proc.terminated)
+
+	_, err := stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":9}` + "\n"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		frame, ok := store.Get(reliablemq.FrameKey{
+			QueueID:   "agent_1:queue_1",
+			Stream:    reliablemq.StreamACP,
+			Seq:       1,
+			Direction: reliablemq.DirectionOutbound,
+		})
+		return ok && assert.ObjectsAreEqual([]byte(`{"jsonrpc":"2.0","id":9}`), []byte(frame.Payload))
+	}, time.Second, 10*time.Millisecond)
+	assert.False(t, proc.terminated)
+
+	pool.Stop(validAgentSpec())
+	assert.True(t, proc.terminated)
+}
+
 func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 	store := newSpyStore()
 	inboundKey := reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 4, Direction: reliablemq.DirectionInbound}

@@ -28,6 +28,7 @@ type AgentTunnelSessionDeps struct {
 	Headers               auth.HeaderProvider
 	Dialer                WebSocketDialer
 	LocalACPProcessRunner LocalACPProcessRunner
+	ACPProcessPool        *PersistentACPProcessPool
 	ReliableEngineFactory ReliableEngineFactory
 	TransportReconciler   reliablemq.ReconcileProducerStore
 	Heartbeat             HeartbeatConfig
@@ -127,6 +128,9 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	}
 
 	s.emit(PhaseConnected, nil)
+	if s.deps.ACPProcessPool != nil {
+		return s.runWithPersistentProcess(ctx, hbConn, connectedExit)
+	}
 	s.emit(PhaseStarting, nil)
 	log.Printf(
 		"[paxd] agent tunnel id=%s starting local ACP command=%q working_dir=%q transport_queue_id=%s",
@@ -205,6 +209,102 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	}
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
 		return CanceledExit(result)
+	}
+	if result == nil {
+		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
+	}
+	return connectedExit(TransientExit("session_error", result.Error()))
+}
+
+func (s *AgentTunnelSession) runWithPersistentProcess(
+	ctx context.Context,
+	conn *heartbeatConn,
+	connectedExit func(Exit) Exit,
+) Exit {
+	s.emit(PhaseStarting, nil)
+	log.Printf(
+		"[paxd] agent tunnel id=%s acquiring persistent local ACP command=%q working_dir=%q transport_queue_id=%s",
+		s.spec.ConnectionID,
+		strings.Join(s.spec.Command, " "),
+		s.spec.WorkingDir,
+		s.spec.TransportQueueID,
+	)
+	proc, err := s.deps.ACPProcessPool.Acquire(ctx, s.spec)
+	if err != nil {
+		_ = conn.Close()
+		log.Printf("[paxd] agent tunnel id=%s persistent local ACP acquire failed: %v", s.spec.ConnectionID, err)
+		return connectedExit(classifyProcessStartExit(err))
+	}
+	detachSender := proc.AttachSender(s.reliableSender(conn))
+	defer detachSender()
+
+	engine := s.newReliableEngine(conn, proc.Stdin())
+	if err := s.reconcilePaxdProducer(ctx, conn); err != nil {
+		if errors.Is(err, ErrTransportQueueRotate) {
+			log.Printf(
+				"[paxd] agent tunnel id=%s reconcile requested queue rotation transport_queue_id=%s: %v",
+				s.spec.ConnectionID,
+				s.spec.TransportQueueID,
+				err,
+			)
+			return connectedExit(TransientExit("reconcile_rotate", err.Error()))
+		}
+		log.Printf(
+			"[paxd] agent tunnel id=%s reconcile failed transport_queue_id=%s: %v",
+			s.spec.ConnectionID,
+			s.spec.TransportQueueID,
+			err,
+		)
+		return connectedExit(TransientExit("reconcile_failed", err.Error()))
+	}
+	if err := s.replayInbound(ctx, engine); err != nil {
+		log.Printf("[paxd] agent tunnel id=%s replay inbound failed: %v", s.spec.ConnectionID, err)
+		return connectedExit(TransientExit("replay_inbound_failed", err.Error()))
+	}
+	if err := s.replayOutbound(ctx, engine); err != nil {
+		log.Printf("[paxd] agent tunnel id=%s replay outbound failed: %v", s.spec.ConnectionID, err)
+		return connectedExit(TransientExit("replay_outbound_failed", err.Error()))
+	}
+
+	s.emit(PhaseRunning, nil)
+	log.Printf("[paxd] agent tunnel id=%s running with persistent ACP process", s.spec.ConnectionID)
+	errCh := make(chan error, 1)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { errCh <- s.copyWSToStdin(runCtx, conn, engine) }()
+
+	var result error
+	processExited := false
+	select {
+	case result = <-errCh:
+		cancel()
+	case <-proc.Done():
+		cancel()
+		processExited = true
+		result = proc.Err()
+	case <-ctx.Done():
+		cancel()
+		result = ctx.Err()
+	}
+
+	s.emit(PhaseStopping, nil)
+	_ = conn.Close()
+
+	if conn.TimedOut() {
+		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
+		return connectedExit(TransientExit("heartbeat_timeout", "websocket heartbeat timed out"))
+	}
+	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+		s.deps.ACPProcessPool.Stop(s.spec)
+		return CanceledExit(result)
+	}
+	if processExited {
+		msg := "persistent ACP process exited"
+		if result != nil {
+			msg = result.Error()
+		}
+		s.deps.ACPProcessPool.Forget(s.spec, proc)
+		return connectedExit(TransientExit("process_ended", msg))
 	}
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
@@ -399,7 +499,14 @@ func (s *AgentTunnelSession) sendOutbound(ctx context.Context, payload []byte, e
 }
 
 func (s *AgentTunnelSession) newReliableEngine(conn WebSocketConn, stdin io.Writer) ReliableEngine {
-	sender := reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
+	return s.deps.ReliableEngineFactory.NewReliableEngine(s.reliableSender(conn), reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		_ = ctx
+		return writeACPStdin(stdin, frame.Payload)
+	}))
+}
+
+func (s *AgentTunnelSession) reliableSender(conn WebSocketConn) reliablemq.Sender {
+	return reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
 		_ = ctx
 		data, err := reliablemq.MarshalEnvelope(env)
 		if err != nil {
@@ -407,11 +514,6 @@ func (s *AgentTunnelSession) newReliableEngine(conn WebSocketConn, stdin io.Writ
 		}
 		return conn.WriteMessage(websocketTextMessage, data)
 	})
-	dispatcher := reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
-		_ = ctx
-		return writeACPStdin(stdin, frame.Payload)
-	})
-	return s.deps.ReliableEngineFactory.NewReliableEngine(sender, dispatcher)
 }
 
 func (s *AgentTunnelSession) terminateProcess(proc LocalACPProcess) {
