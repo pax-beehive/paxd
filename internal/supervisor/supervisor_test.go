@@ -319,6 +319,37 @@ func TestDesiredRemovalCancelsBackoffAndWritesStopped(t *testing.T) {
 	}
 }
 
+func TestAgentConnectionStopHandlerRunsWhenDesiredRemovedDuringBackoff(t *testing.T) {
+	clock := newFakeClock()
+	store := newFakeAgentStore()
+	spec := agentSpec("conn_1", 1, 0)
+	store.setDesired([]runtimes.AgentConnectionSpec{spec})
+	factory := &fakeAgentFactory{
+		makeSession: func(spec runtimes.AgentConnectionSpec, index int) *scriptedSession {
+			return instantSession(runtimes.TransientExit("disconnect", "peer closed"))
+		},
+	}
+	var stopped []runtimes.AgentConnectionSpec
+	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   clock,
+		Backoff: BackoffPolicy{Initial: time.Hour},
+		StopHandler: func(ctx context.Context, spec runtimes.AgentConnectionSpec) {
+			stopped = append(stopped, spec)
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	waitForAgentStatus(t, store, "conn_1", PhaseBackoff)
+
+	store.setDesired(nil)
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	require.Len(t, stopped, 1)
+	assert.Equal(t, "conn_1", stopped[0].ConnectionID)
+}
+
 func TestAuthFailureEntersFailedStateAndRedactsMessage(t *testing.T) {
 	store := newFakeRemoteStore()
 	store.setDesired([]runtimes.RemoteSpec{remoteSpec("remote_1", 1, 0)})

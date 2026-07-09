@@ -1,0 +1,313 @@
+package runtime
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/pax-beehive/paxkit/reliablemq"
+)
+
+// PersistentACPProcessPool keeps the local ACP stdio process alive across
+// transient tunnel reconnects. The supervisor still owns the process lifetime:
+// canceled supervisor contexts, config changes, and explicit restarts stop the
+// cached process.
+type PersistentACPProcessPool struct {
+	runner LocalACPProcessRunner
+	store  reliablemq.DurableStore
+
+	mu        sync.Mutex
+	processes map[string]*persistentACPProcess
+}
+
+func NewPersistentACPProcessPool(
+	runner LocalACPProcessRunner,
+	store reliablemq.DurableStore,
+) *PersistentACPProcessPool {
+	if runner == nil {
+		runner = ExecLocalACPProcessRunner{}
+	}
+	return &PersistentACPProcessPool{
+		runner:    runner,
+		store:     store,
+		processes: make(map[string]*persistentACPProcess),
+	}
+}
+
+func (p *PersistentACPProcessPool) Acquire(
+	ctx context.Context,
+	spec AgentConnectionSpec,
+) (*persistentACPProcess, error) {
+	if p == nil {
+		return nil, fmt.Errorf("persistent ACP process pool is required")
+	}
+	if p.store == nil {
+		return nil, fmt.Errorf("transport store is required")
+	}
+	key := persistentACPProcessKey(spec)
+	if key == "" {
+		return nil, fmt.Errorf("connection id is required")
+	}
+	fingerprint := persistentACPProcessFingerprint(spec)
+
+	p.mu.Lock()
+	if current := p.processes[key]; current != nil {
+		if current.fingerprint == fingerprint && !current.Exited() {
+			p.mu.Unlock()
+			return current, nil
+		}
+		delete(p.processes, key)
+		p.mu.Unlock()
+		current.Terminate(context.Background())
+	} else {
+		p.mu.Unlock()
+	}
+
+	proc, err := newPersistentACPProcess(ctx, p.runner, p.store, spec, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	if current := p.processes[key]; current != nil {
+		if current.fingerprint == fingerprint && !current.Exited() {
+			p.mu.Unlock()
+			proc.Terminate(context.Background())
+			return current, nil
+		}
+		delete(p.processes, key)
+		p.mu.Unlock()
+		current.Terminate(context.Background())
+	} else {
+		p.mu.Unlock()
+	}
+
+	p.mu.Lock()
+	p.processes[key] = proc
+	p.mu.Unlock()
+	return proc, nil
+}
+
+func (p *PersistentACPProcessPool) Stop(spec AgentConnectionSpec) {
+	if p == nil {
+		return
+	}
+	key := persistentACPProcessKey(spec)
+	p.mu.Lock()
+	proc := p.processes[key]
+	delete(p.processes, key)
+	p.mu.Unlock()
+	if proc != nil {
+		proc.Terminate(context.Background())
+	}
+}
+
+func (p *PersistentACPProcessPool) Forget(
+	spec AgentConnectionSpec,
+	proc *persistentACPProcess,
+) {
+	if p == nil || proc == nil {
+		return
+	}
+	key := persistentACPProcessKey(spec)
+	p.mu.Lock()
+	if p.processes[key] == proc {
+		delete(p.processes, key)
+	}
+	p.mu.Unlock()
+}
+
+type persistentACPProcess struct {
+	spec        AgentConnectionSpec
+	fingerprint string
+	proc        LocalACPProcess
+	store       reliablemq.DurableStore
+
+	mu          sync.Mutex
+	sender      reliablemq.Sender
+	senderToken int64
+	err         error
+
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func newPersistentACPProcess(
+	ctx context.Context,
+	runner LocalACPProcessRunner,
+	store reliablemq.DurableStore,
+	spec AgentConnectionSpec,
+	fingerprint string,
+) (*persistentACPProcess, error) {
+	proc, err := runner.Start(ctx, LocalACPProcessSpec{
+		Command:    spec.Command,
+		WorkingDir: spec.WorkingDir,
+		Env:        spec.Env,
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := &persistentACPProcess{
+		spec:        spec,
+		fingerprint: fingerprint,
+		proc:        proc,
+		store:       store,
+		done:        make(chan struct{}),
+	}
+	go io.Copy(io.Discard, proc.Stderr())
+	go p.copyStdout()
+	go p.wait()
+	return p, nil
+}
+
+func (p *persistentACPProcess) Stdin() io.Writer {
+	return p.proc.Stdin()
+}
+
+func (p *persistentACPProcess) Done() <-chan struct{} {
+	return p.done
+}
+
+func (p *persistentACPProcess) Err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
+}
+
+func (p *persistentACPProcess) Exited() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *persistentACPProcess) AttachSender(sender reliablemq.Sender) func() {
+	p.mu.Lock()
+	p.senderToken++
+	token := p.senderToken
+	p.sender = sender
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		if p.senderToken == token {
+			p.sender = nil
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (p *persistentACPProcess) Terminate(ctx context.Context) {
+	p.stopOnce.Do(func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = p.proc.Terminate(stopCtx)
+	})
+}
+
+func (p *persistentACPProcess) wait() {
+	err := p.proc.Wait()
+	p.mu.Lock()
+	p.err = err
+	p.sender = nil
+	p.mu.Unlock()
+	close(p.done)
+}
+
+func (p *persistentACPProcess) copyStdout() {
+	reader := bufio.NewReader(p.proc.Stdout())
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			line = trimLineDelimiter(line)
+			if len(line) > 0 {
+				if !json.Valid(line) {
+					log.Printf(
+						"[paxd] persistent ACP process id=%s invalid stdout payload; terminating process",
+						p.spec.ConnectionID,
+					)
+					p.Terminate(context.Background())
+					return
+				}
+				if sendErr := p.sendOutbound(context.Background(), line); sendErr != nil {
+					log.Printf(
+						"[paxd] persistent ACP process id=%s outbound journal failed: %v",
+						p.spec.ConnectionID,
+						sendErr,
+					)
+					p.Terminate(context.Background())
+					return
+				}
+			}
+		}
+		if err != nil {
+			if err != io.EOF && !p.Exited() {
+				log.Printf(
+					"[paxd] persistent ACP process id=%s stdout read failed: %v",
+					p.spec.ConnectionID,
+					err,
+				)
+				p.Terminate(context.Background())
+			}
+			return
+		}
+	}
+}
+
+func (p *persistentACPProcess) sendOutbound(ctx context.Context, payload []byte) error {
+	frame, err := p.store.AppendOutboundData(ctx, p.spec.TransportQueueID, reliablemq.StreamACP, append([]byte(nil), payload...), reliablemq.Metadata{
+		"agent_id": p.spec.CloudAgentID,
+	})
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	sender := p.sender
+	p.mu.Unlock()
+	if sender == nil {
+		return nil
+	}
+	if err := sender.Send(ctx, reliablemq.EnvelopeFromFrame(frame)); err != nil {
+		_ = p.store.RecordSendFailure(ctx, frame.Key, err.Error())
+		return nil
+	}
+	return p.store.MarkSent(ctx, frame.Key)
+}
+
+func persistentACPProcessKey(spec AgentConnectionSpec) string {
+	return firstNonEmpty(spec.ConnectionID, spec.TransportQueueID, spec.CloudAgentID)
+}
+
+func persistentACPProcessFingerprint(spec AgentConnectionSpec) string {
+	envKeys := make([]string, 0, len(spec.Env))
+	for key := range spec.Env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	env := make([]string, 0, len(envKeys))
+	for _, key := range envKeys {
+		env = append(env, key+"="+spec.Env[key])
+	}
+	value := strings.Join([]string{
+		spec.TransportQueueID,
+		spec.CloudAgentID,
+		spec.AgentType,
+		spec.Harness,
+		spec.WorkingDir,
+		strings.Join(spec.Command, "\x00"),
+		strings.Join(env, "\x00"),
+	}, "\x01")
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}

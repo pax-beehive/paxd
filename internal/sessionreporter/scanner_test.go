@@ -46,6 +46,37 @@ func TestDefaultScannerPassesLimitToPaxl(t *testing.T) {
 	assert.Equal(t, "codex:sess_limited", sessions[0].SessionID)
 }
 
+func TestDefaultScannerUsesCodexLocalIndexBeforeACP(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(codexHome, "session_index.jsonl"),
+		[]byte(`{"id":"sess-local","thread_name":"Correct Codex thread","updated_at":"2026-07-08T23:01:50Z"}`+"\n"),
+		0o644,
+	))
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "08")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(rolloutDir, "rollout-2026-07-08T23-01-50-sess-local.jsonl"),
+		[]byte(`{"type":"session_meta","payload":{"id":"sess-local","timestamp":"2026-07-08T23:01:50Z","cwd":"/tmp/project"}}`+"\n"),
+		0o644,
+	))
+	command := fakeACPCommand(
+		t,
+		`[{"sessionId":"codex:sess-local","nativeId":"sess-local","title":"# AGENTS.md instructions <INSTRUCTIONS> system prompt"}]`,
+	)
+
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "codex",
+		Command: command,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
+	assert.Equal(t, "Correct Codex thread", sessions[0].Name)
+}
+
 func TestResolvePaxlCommandReadsEnvironmentOverride(t *testing.T) {
 	command := fakePaxlCommand(t)
 	t.Setenv("PAXD_PAXL_COMMAND", command+" --profile local")

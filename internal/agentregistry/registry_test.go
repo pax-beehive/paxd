@@ -236,6 +236,43 @@ func TestListCodexLocalSessions(t *testing.T) {
 	}
 }
 
+func TestListCodexLocalSubagentSessionUsesParentThreadName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "sessions", "2026", "06", "19"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session_index.jsonl"), []byte(
+		`{"id":"parent-thread","thread_name":"Fix session titles","updated_at":"2026-06-19T01:02:03Z"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile(index) error = %v", err)
+	}
+	rollout := filepath.Join(dir, "sessions", "2026", "06", "19", "rollout-2026-06-19T01-02-03-child-thread.jsonl")
+	if err := os.WriteFile(rollout, []byte(
+		`{"type":"session_meta","payload":{"id":"child-thread","session_id":"parent-thread","parent_thread_id":"parent-thread","timestamp":"2026-06-19T01:03:03Z","cwd":"/tmp/project","source":{"subagent":{"other":"guardian"}},"thread_source":"subagent"}}`+"\n"+
+			`{"timestamp":"2026-06-19T01:03:04Z","type":"event_msg","payload":{"type":"user_message","message":"# AGENTS.md instructions\nPrefer testify style assert.","images":[],"local_images":[],"text_elements":[]}}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile(rollout) error = %v", err)
+	}
+
+	sessions, err := listCodexLocalSessions()
+	if err != nil {
+		t.Fatalf("listCodexLocalSessions() error = %v", err)
+	}
+	var childName string
+	for _, session := range sessions {
+		if session.NativeID == "child-thread" {
+			childName = session.Name
+		}
+	}
+	if childName == "" {
+		t.Fatalf("child thread not found in sessions: %+v", sessions)
+	}
+	if childName != "Fix session titles" {
+		t.Fatalf("child session name = %q, want parent thread name", childName)
+	}
+}
+
 func TestDecodeOpenClawSession(t *testing.T) {
 	got := decodeOpenClawSession([]byte(`{
 		"agentId":"work",
