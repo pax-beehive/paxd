@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -20,6 +21,7 @@ import (
 type runtimeSupervisors struct {
 	remote               supervisor.Supervisor
 	agent                supervisor.Supervisor
+	acpSlots             supervisor.Supervisor
 	agentRuntimeSource   *supervisor.AgentConnectionSupervisor
 	statusHub            *statusHub
 	paxdVersion          string
@@ -74,12 +76,9 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
 	}
-	agentProcessPool := runtimes.NewPersistentACPProcessPool(
-		runtimes.ExecLocalACPProcessRunner{},
-		transportStore,
-		runtimes.WithPaxdVersionProvider(runtimes.StaticPaxdVersionProvider(s.paxdVersion)),
-		runtimes.WithACPPoolCapabilityReporter(s.acpCapabilityReports),
-	)
+	acpPoolRegistry := runtimes.NewACPPoolRegistry(runtimes.ACPRouteStoreFactoryFunc(func(connectionID string) runtimes.ACPRouteStore {
+		return acpRouteStoreAdapter{store: store}
+	}))
 
 	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
 		Store:      store,
@@ -92,16 +91,29 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
 			Headers:               headers,
 			Dialer:                dialer,
-			ACPProcessPool:        agentProcessPool,
+			ACPPoolRegistry:       acpPoolRegistry,
 			ReliableEngineFactory: runtimes.ReliableEngineFromStore(transportStore),
 			TransportReconciler:   transportStore,
 		}},
-		StopHandler: func(ctx context.Context, spec runtimes.AgentConnectionSpec) {
-			agentProcessPool.Stop(spec)
-		},
 	})
 	s.agent = agent
 	s.agentRuntimeSource = agent
+	s.acpSlots = supervisor.NewACPSlotSupervisor(supervisor.ACPSlotSupervisorOptions{
+		Store: store,
+		Factory: acpSlotSessionFactory{
+			runner:      runtimes.ExecLocalACPProcessRunner{},
+			registry:    acpPoolRegistry,
+			paxdVersion: s.paxdVersion,
+		},
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			pool, err := acpPoolRegistry.Get(spec.ConnectionID)
+			if err != nil {
+				log.Printf("[paxd] acp slot stop connection_id=%s slot_id=%s pool lookup failed: %v", spec.ConnectionID, spec.SlotID, err)
+				return
+			}
+			pool.RemoveSlot(ctx, spec.SlotID, spec.ProcessEpoch)
+		},
+	})
 	return nil
 }
 
@@ -184,6 +196,7 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 	}
 	startSupervisor(ctx, "remote", s.remote)
 	startSupervisor(ctx, "agent_connection", s.agent)
+	startSupervisor(ctx, "acp_slot", s.acpSlots)
 }
 
 func startSupervisor(ctx context.Context, name string, sup supervisor.Supervisor) {
@@ -221,4 +234,86 @@ type agentTunnelSessionFactory struct {
 
 func (f agentTunnelSessionFactory) NewAgentTunnelSession(spec runtimes.AgentConnectionSpec) runtimes.Session {
 	return runtimes.NewAgentTunnelSession(spec, f.deps)
+}
+
+type acpSlotSessionFactory struct {
+	runner      runtimes.LocalACPProcessRunner
+	registry    *runtimes.ACPPoolRegistry
+	paxdVersion string
+}
+
+func (f acpSlotSessionFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
+	spec.PaxdVersion = sFirstNonEmpty(spec.PaxdVersion, f.paxdVersion)
+	return runtimes.NewACPSlotSession(runtimes.ACPSlotSessionConfig{
+		Spec:     spec,
+		Runner:   f.runner,
+		Registry: f.registry,
+	})
+}
+
+type acpRouteStoreAdapter struct {
+	store *daemonstore.Store
+}
+
+func (a acpRouteStoreAdapter) GetACPSessionRoute(ctx context.Context, connectionID string, nativeSessionID string) (runtimes.ACPRoute, bool, error) {
+	route, err := a.store.GetACPSessionRoute(ctx, connectionID, nativeSessionID)
+	if err != nil {
+		if errors.Is(err, daemonstore.ErrNotFound) {
+			return runtimes.ACPRoute{}, false, nil
+		}
+		return runtimes.ACPRoute{}, false, err
+	}
+	return runtimeACPRoute(route), true, nil
+}
+
+func (a acpRouteStoreAdapter) UpsertACPSessionRoute(ctx context.Context, connectionID string, nativeSessionID string, resumeParams json.RawMessage) (runtimes.ACPRoute, error) {
+	route, err := a.store.UpsertACPSessionRoute(ctx, daemonstore.ACPSessionRouteUpsert{
+		ConnectionID:     connectionID,
+		NativeSessionID:  nativeSessionID,
+		ResumeParamsJSON: string(resumeParams),
+	})
+	if err != nil {
+		return runtimes.ACPRoute{}, err
+	}
+	return runtimeACPRoute(route), nil
+}
+
+func (a acpRouteStoreAdapter) BindACPSessionRoute(ctx context.Context, update runtimes.ACPRouteBindingUpdate) (runtimes.ACPRoute, bool, error) {
+	route, ok, err := a.store.BindACPSessionRoute(ctx, daemonstore.ACPSessionRouteBindingUpdate{
+		ConnectionID:     update.ConnectionID,
+		NativeSessionID:  update.NativeSessionID,
+		SlotID:           update.SlotID,
+		ProcessEpoch:     update.ProcessEpoch,
+		ExpectedVersion:  update.ExpectedVersion,
+		ResumeParamsJSON: string(update.ResumeParams),
+	})
+	if err != nil || !ok {
+		return runtimes.ACPRoute{}, ok, err
+	}
+	return runtimeACPRoute(route), true, nil
+}
+
+func (a acpRouteStoreAdapter) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {
+	return a.store.ClearACPSessionRoutesForProcess(ctx, connectionID, slotID, processEpoch)
+}
+
+func runtimeACPRoute(route daemonstore.ACPSessionRouteView) runtimes.ACPRoute {
+	return runtimes.ACPRoute{
+		ConnectionID:      route.ConnectionID,
+		NativeSessionID:   route.NativeSessionID,
+		BoundSlotID:       route.BoundSlotID,
+		BoundProcessEpoch: route.BoundProcessEpoch,
+		LastSlotID:        route.LastSlotID,
+		ResumeParams:      json.RawMessage(route.ResumeParamsJSON),
+		Version:           route.Version,
+	}
+}
+
+func sFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

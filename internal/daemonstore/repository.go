@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +122,8 @@ type ACPSessionRouteView struct {
 type RemoteDesiredSpec = runtimes.RemoteSpec
 
 type AgentConnectionDesiredSpec = runtimes.AgentConnectionSpec
+
+type ACPSlotDesiredSpec = runtimes.ACPSlotSpec
 
 type RemoteAuthMaterial = control.RemoteAuthMaterial
 
@@ -757,6 +760,55 @@ func (s *Store) ListDesiredAgentConnections(ctx context.Context) ([]AgentConnect
 	return specs, nil
 }
 
+func (s *Store) ListDesiredACPSlots(ctx context.Context) ([]ACPSlotDesiredSpec, error) {
+	var conns []AgentConnection
+	if err := s.db.WithContext(ctx).
+		Where("enabled = ?", true).
+		Where("desired_state = ?", string(control.DesiredStateRunning)).
+		Find(&conns).Error; err != nil {
+		return nil, err
+	}
+	specs := make([]ACPSlotDesiredSpec, 0, len(conns))
+	for _, conn := range conns {
+		remote, err := s.getRemote(ctx, conn.RemoteID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if !remote.Enabled || conn.DesiredACPSlots <= 0 {
+			continue
+		}
+		command, err := decodeStringSlice(conn.CommandJSON)
+		if err != nil {
+			return nil, err
+		}
+		env, err := decodeStringMap(conn.EnvJSON)
+		if err != nil {
+			return nil, err
+		}
+		transportQueueID, err := s.ensureAgentTransportQueueID(ctx, &conn)
+		if err != nil {
+			return nil, err
+		}
+		specs = append(specs, ACPSlotDesiredSpec{
+			ConnectionID:       conn.ID,
+			CloudAgentID:       stringValue(conn.CloudAgentID),
+			TransportQueueID:   transportQueueID,
+			SlotID:             ACPSlotID(conn.ID, 0),
+			Ordinal:            0,
+			Command:            command,
+			WorkingDir:         conn.WorkingDir,
+			Env:                env,
+			CommandFingerprint: acpSlotCommandFingerprint(conn, command, env, transportQueueID),
+			Generation:         conn.Generation,
+			RestartNonce:       conn.RestartNonce,
+		})
+	}
+	return specs, nil
+}
+
 func (s *Store) ensureAgentTransportQueueID(ctx context.Context, conn *AgentConnection) (string, error) {
 	cloudAgentID := stringValue(conn.CloudAgentID)
 	if cloudAgentID == "" {
@@ -834,6 +886,29 @@ func ACPSlotID(connectionID string, ordinal int) string {
 	sum := sha256.Sum256([]byte(connectionID + "\x00" + strconv.Itoa(ordinal)))
 	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
 	return "slot_" + strings.ToLower(encoded[:26])
+}
+
+func acpSlotCommandFingerprint(conn AgentConnection, command []string, env map[string]string, transportQueueID string) string {
+	envKeys := make([]string, 0, len(env))
+	for key := range env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	envPairs := make([]string, 0, len(envKeys))
+	for _, key := range envKeys {
+		envPairs = append(envPairs, key+"="+env[key])
+	}
+	value := strings.Join([]string{
+		transportQueueID,
+		stringValue(conn.CloudAgentID),
+		conn.AgentType,
+		conn.Harness,
+		conn.WorkingDir,
+		strings.Join(command, "\x00"),
+		strings.Join(envPairs, "\x00"),
+	}, "\x01")
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) UpsertACPSlotStatus(ctx context.Context, update ACPSlotStatusUpdate) error {

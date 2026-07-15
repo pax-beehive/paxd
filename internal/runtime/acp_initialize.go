@@ -68,6 +68,14 @@ func buildInternalACPInitializeRequest(profile acpClientInitProfile) ([]byte, er
 	})
 }
 
+func buildInternalACPInitializedNotification() ([]byte, error) {
+	return json.Marshal(acpRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "notifications/initialized",
+		Params:  json.RawMessage(`{}`),
+	})
+}
+
 func parseACPRPCMessage(payload []byte) (acpRPCMessage, bool) {
 	var msg acpRPCMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {

@@ -48,6 +48,38 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	assertNoBusinessRows(t, store)
 }
 
+func TestBootstrapClearsStaleACPSessionBindingsAndPreservesResumeDescriptor(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	route, err := store.UpsertACPSessionRoute(ctx, daemonstore.ACPSessionRouteUpsert{
+		ConnectionID:     "conn_codex",
+		NativeSessionID:  "session_1",
+		ResumeParamsJSON: `{"cwd":"/work","mcpServers":[]}`,
+	})
+	require.NoError(t, err)
+	_, bound, err := store.BindACPSessionRoute(ctx, daemonstore.ACPSessionRouteBindingUpdate{
+		ConnectionID:    "conn_codex",
+		NativeSessionID: "session_1",
+		SlotID:          "slot_a",
+		ProcessEpoch:    "epoch_stale",
+		ExpectedVersion: route.Version,
+	})
+	require.NoError(t, err)
+	require.True(t, bound)
+
+	cfg := config.DefaultConfig()
+	runtime, err := Bootstrap(ctx, Options{Config: &cfg, Store: store})
+
+	require.NoError(t, err)
+	require.NotNil(t, runtime)
+	route, err = store.GetACPSessionRoute(ctx, "conn_codex", "session_1")
+	require.NoError(t, err)
+	assert.Empty(t, route.BoundSlotID)
+	assert.Empty(t, route.BoundProcessEpoch)
+	assert.Equal(t, "slot_a", route.LastSlotID)
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[]}`, route.ResumeParamsJSON)
+}
+
 func TestBootstrapRequiresConfig(t *testing.T) {
 	rt, err := Bootstrap(context.Background(), Options{})
 

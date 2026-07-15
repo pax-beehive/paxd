@@ -38,6 +38,68 @@ func TestAgentConnectionSupervisorWakeStartsTunnelSession(t *testing.T) {
 	}
 }
 
+func TestACPSlotSupervisorRestartsWithNewProcessEpochOnDesiredChange(t *testing.T) {
+	store := newFakeACPSlotStore()
+	store.setDesired([]runtimes.ACPSlotSpec{acpSlotSpec("slot_1", "conn_1", 1, 0)})
+	factory := &fakeACPSlotFactory{}
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	first := factory.waitSession(t, 0)
+	first.waitStarted(t)
+	firstEpoch := factory.specs()[0].ProcessEpoch
+	require.NotEmpty(t, firstEpoch)
+
+	store.setDesired([]runtimes.ACPSlotSpec{acpSlotSpec("slot_1", "conn_1", 2, 0)})
+	require.NoError(t, sup.Reconcile(context.Background()))
+	first.waitDone(t)
+	second := factory.waitSession(t, 1)
+	second.waitStarted(t)
+	secondEpoch := factory.specs()[1].ProcessEpoch
+
+	require.NotEmpty(t, secondEpoch)
+	assert.NotEqual(t, firstEpoch, secondEpoch)
+	assert.Equal(t, secondEpoch, store.latestStatus("slot_1").ProcessEpoch)
+}
+
+func TestACPSlotSupervisorStopsActiveSlotWhenDesiredRemoved(t *testing.T) {
+	store := newFakeACPSlotStore()
+	store.setDesired([]runtimes.ACPSlotSpec{acpSlotSpec("slot_1", "conn_1", 1, 0)})
+	factory := &fakeACPSlotFactory{}
+	stopped := make(chan runtimes.ACPSlotSpec, 1)
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			_ = ctx
+			stopped <- spec
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	session := factory.waitSession(t, 0)
+	session.waitStarted(t)
+	store.setDesired(nil)
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	session.waitDone(t)
+	select {
+	case spec := <-stopped:
+		assert.Equal(t, "slot_1", spec.SlotID)
+		assert.Equal(t, "conn_1", spec.ConnectionID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for active slot stop handler")
+	}
+	require.Eventually(t, func() bool {
+		return store.latestStatus("slot_1").Phase == PhaseStopped
+	}, 2*time.Second, time.Millisecond)
+}
+
 func TestAgentConnectionSupervisorObservedRuntimesReturnsCopiedSpecs(t *testing.T) {
 	store := newFakeAgentStore()
 	spec := agentSpec("conn_1", 1, 0)
@@ -590,6 +652,19 @@ func agentSpec(id string, generation, restartNonce int64) runtimes.AgentConnecti
 	}
 }
 
+func acpSlotSpec(slotID string, connectionID string, generation, restartNonce int64) runtimes.ACPSlotSpec {
+	return runtimes.ACPSlotSpec{
+		ConnectionID:     connectionID,
+		CloudAgentID:     "agent_1",
+		TransportQueueID: "agent_1:queue_1",
+		SlotID:           slotID,
+		Ordinal:          0,
+		Command:          []string{"codex", "serve"},
+		Generation:       generation,
+		RestartNonce:     restartNonce,
+	}
+}
+
 type fakeRemoteStore struct {
 	mu       sync.Mutex
 	desired  []runtimes.RemoteSpec
@@ -706,6 +781,45 @@ func (s *fakeAgentStore) desiredQueueID(connectionID string) string {
 }
 
 func (s *fakeAgentStore) latestStatus(id string) daemonstore.AgentConnectionStatusUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latest[id]
+}
+
+type fakeACPSlotStore struct {
+	mu       sync.Mutex
+	desired  []runtimes.ACPSlotSpec
+	statuses []daemonstore.ACPSlotStatusUpdate
+	latest   map[string]daemonstore.ACPSlotStatusUpdate
+}
+
+func newFakeACPSlotStore() *fakeACPSlotStore {
+	return &fakeACPSlotStore{latest: make(map[string]daemonstore.ACPSlotStatusUpdate)}
+}
+
+func (s *fakeACPSlotStore) setDesired(specs []runtimes.ACPSlotSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.desired = append([]runtimes.ACPSlotSpec(nil), specs...)
+}
+
+func (s *fakeACPSlotStore) ListDesiredACPSlots(ctx context.Context) ([]runtimes.ACPSlotSpec, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]runtimes.ACPSlotSpec(nil), s.desired...), nil
+}
+
+func (s *fakeACPSlotStore) UpsertACPSlotStatus(ctx context.Context, update daemonstore.ACPSlotStatusUpdate) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latest[update.SlotID] = update
+	s.statuses = append(s.statuses, update)
+	return nil
+}
+
+func (s *fakeACPSlotStore) latestStatus(id string) daemonstore.ACPSlotStatusUpdate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.latest[id]
@@ -830,6 +944,55 @@ func (f *fakeAgentFactory) specs() []runtimes.AgentConnectionSpec {
 	return append([]runtimes.AgentConnectionSpec(nil), f.gotSpecs...)
 }
 
+type fakeACPSlotFactory struct {
+	mu          sync.Mutex
+	makeSession func(runtimes.ACPSlotSpec, int) *scriptedSession
+	gotSpecs    []runtimes.ACPSlotSpec
+	sessions    []*scriptedSession
+}
+
+func (f *fakeACPSlotFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	index := len(f.sessions)
+	session := blockingSession()
+	if f.makeSession != nil {
+		session = f.makeSession(spec, index)
+	}
+	f.gotSpecs = append(f.gotSpecs, spec)
+	if session != nil {
+		f.sessions = append(f.sessions, session)
+		return session
+	}
+	return nil
+}
+
+func (f *fakeACPSlotFactory) waitSession(t *testing.T, index int) *scriptedSession {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		f.mu.Lock()
+		if len(f.sessions) > index {
+			session := f.sessions[index]
+			f.mu.Unlock()
+			return session
+		}
+		f.mu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for acp slot session %d", index)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func (f *fakeACPSlotFactory) specs() []runtimes.ACPSlotSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtimes.ACPSlotSpec(nil), f.gotSpecs...)
+}
+
 type scriptedSession struct {
 	started chan struct{}
 	done    chan struct{}
@@ -868,6 +1031,15 @@ func (s *scriptedSession) waitStarted(t *testing.T) {
 	case <-s.started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for session start")
+	}
+}
+
+func (s *scriptedSession) waitDone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for session done")
 	}
 }
 

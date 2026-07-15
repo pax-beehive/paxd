@@ -273,6 +273,11 @@ func TestPersistentACPProcessInitializesOnceAndSuppressesInternalResponse(t *tes
 	require.NotNil(t, acquired)
 	assert.Contains(t, proc.stdin.String(), `"method":"initialize"`)
 	assert.Contains(t, proc.stdin.String(), `"id":"paxd.initialize"`)
+	assert.Contains(t, proc.stdin.String(), `"method":"notifications/initialized"`)
+	assert.Less(t,
+		strings.Index(proc.stdin.String(), `"method":"initialize"`),
+		strings.Index(proc.stdin.String(), `"method":"notifications/initialized"`),
+	)
 	require.Eventually(t, func() bool {
 		_, ok := store.Get(reliablemq.FrameKey{
 			QueueID:   "agent_1:queue_1",

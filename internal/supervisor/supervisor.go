@@ -104,6 +104,11 @@ type AgentConnectionStore interface {
 	RotateAgentTransportQueueID(ctx context.Context, connectionID string, expectedQueueID string) (string, error)
 }
 
+type ACPSlotStore interface {
+	ListDesiredACPSlots(ctx context.Context) ([]runtimes.ACPSlotSpec, error)
+	UpsertACPSlotStatus(ctx context.Context, update daemonstore.ACPSlotStatusUpdate) error
+}
+
 type RemoteSupervisorOptions struct {
 	Store             RemoteStore
 	Factory           runtimes.RemoteControlSessionFactory
@@ -122,6 +127,15 @@ type AgentConnectionSupervisorOptions struct {
 	Backoff           BackoffPolicy
 	ExitHandler       RuntimeExitHandler[runtimes.AgentConnectionSpec]
 	StopHandler       RuntimeStopHandler[runtimes.AgentConnectionSpec]
+}
+
+type ACPSlotSupervisorOptions struct {
+	Store             ACPSlotStore
+	Factory           ACPSlotSessionFactory
+	Clock             Clock
+	ReconcileInterval time.Duration
+	Backoff           BackoffPolicy
+	StopHandler       RuntimeStopHandler[runtimes.ACPSlotSpec]
 }
 
 type RemoteSupervisor struct {
@@ -206,6 +220,48 @@ func (s *AgentConnectionSupervisor) ObservedAgentRuntimes() []ObservedAgentRunti
 	return out
 }
 
+type ACPSlotSessionFactory interface {
+	NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session
+}
+
+type ACPSlotSupervisor struct {
+	base *baseSupervisor[runtimes.ACPSlotSpec]
+}
+
+func NewACPSlotSupervisor(opts ACPSlotSupervisorOptions) *ACPSlotSupervisor {
+	ops := slotOps[runtimes.ACPSlotSpec]{
+		id:            func(spec runtimes.ACPSlotSpec) string { return spec.SlotID },
+		generation:    func(spec runtimes.ACPSlotSpec) int64 { return spec.Generation },
+		restartNonce:  func(spec runtimes.ACPSlotSpec) int64 { return spec.RestartNonce },
+		startingPhase: string(runtimes.PhaseStarting),
+		prepareStart: func(spec runtimes.ACPSlotSpec) runtimes.ACPSlotSpec {
+			epoch, err := runtimes.NewACPProcessEpoch()
+			if err != nil {
+				log.Printf("[paxd] acp_slot slot id=%s process epoch generation failed: %v", spec.SlotID, err)
+				return spec
+			}
+			spec.ProcessEpoch = epoch
+			return spec
+		},
+		newSession:  opts.Factory.NewACPSlotSession,
+		writeStatus: acpSlotStatusWriter(opts.Store),
+		handleStop:  opts.StopHandler,
+	}
+	return &ACPSlotSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredACPSlots, ops, baseOptions{
+		Name:              "acp_slot",
+		Clock:             opts.Clock,
+		ReconcileInterval: opts.ReconcileInterval,
+		Backoff:           opts.Backoff,
+	})}
+}
+
+func (s *ACPSlotSupervisor) Start(ctx context.Context) error { return s.base.Start(ctx) }
+func (s *ACPSlotSupervisor) Wake()                           { s.base.Wake() }
+func (s *ACPSlotSupervisor) Snapshot() Snapshot              { return s.base.Snapshot() }
+func (s *ACPSlotSupervisor) Reconcile(ctx context.Context) error {
+	return s.base.Reconcile(ctx)
+}
+
 func firstAgentConnectionExitHandler(
 	handlers ...RuntimeExitHandler[runtimes.AgentConnectionSpec],
 ) RuntimeExitHandler[runtimes.AgentConnectionSpec] {
@@ -256,6 +312,7 @@ type RuntimeStopHandler[S any] func(ctx context.Context, spec S)
 
 type baseSupervisor[S any] struct {
 	mu          sync.Mutex
+	reconcileMu sync.Mutex
 	name        string
 	listDesired func(context.Context) ([]S, error)
 	ops         slotOps[S]
@@ -331,6 +388,9 @@ func (s *baseSupervisor[S]) Wake() {
 }
 
 func (s *baseSupervisor[S]) Reconcile(ctx context.Context) error {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+
 	desired, err := s.listDesired(ctx)
 	if err != nil {
 		log.Printf("[paxd] %s supervisor list desired failed: %v", s.name, err)
@@ -409,6 +469,7 @@ type slotOps[S any] struct {
 	generation    func(S) int64
 	restartNonce  func(S) int64
 	startingPhase string
+	prepareStart  func(S) S
 	newSession    func(S) runtimes.Session
 	writeStatus   func(context.Context, S, statusWrite) error
 	handleExit    RuntimeExitHandler[S]
@@ -547,6 +608,9 @@ func (s *runtimeSlot[S]) startLocked() {
 		return
 	}
 	spec := s.desired
+	if s.ops.prepareStart != nil {
+		spec = s.ops.prepareStart(spec)
+	}
 	session := s.ops.newSession(spec)
 	if session == nil {
 		session = runtimes.Session(sessionFunc(func(context.Context) runtimes.Exit {
@@ -594,7 +658,6 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 	)
 	if attemptID != s.currentAttempt {
 		log.Printf("[paxd] %s slot id=%s ignoring stale session exit attempt=%d current_attempt=%d", s.supervisorName, s.id, attemptID, s.currentAttempt)
-		s.writeStatusLoggedLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
 		return
 	}
 	s.currentCancel = nil
@@ -772,6 +835,27 @@ func agentConnectionStatusWriter(store AgentConnectionStore, poke StatusPoke) fu
 			poke.Poke(spec.RemoteID)
 		}
 		return err
+	}
+}
+
+func acpSlotStatusWriter(store ACPSlotStore) func(context.Context, runtimes.ACPSlotSpec, statusWrite) error {
+	return func(ctx context.Context, spec runtimes.ACPSlotSpec, write statusWrite) error {
+		if store == nil {
+			return nil
+		}
+		return store.UpsertACPSlotStatus(ctx, daemonstore.ACPSlotStatusUpdate{
+			SlotID:           spec.SlotID,
+			ConnectionID:     spec.ConnectionID,
+			Ordinal:          spec.Ordinal,
+			ProcessEpoch:     spec.ProcessEpoch,
+			Phase:            write.Phase,
+			LastErrorCode:    write.Exit.Code,
+			LastErrorMessage: safeExitMessage(write.Exit),
+			FailureClass:     string(write.Exit.Class),
+			StartedAt:        startedAt(write.Phase, write.At),
+			ReadyAt:          connectedAt(write.Phase, write.At),
+			StoppedAt:        stoppedAt(write.Phase, write.At),
+		})
 	}
 }
 

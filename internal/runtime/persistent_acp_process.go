@@ -306,6 +306,10 @@ func (p *persistentACPProcess) initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build acp initialize request: %w", err)
 	}
+	initializedNotification, err := buildInternalACPInitializedNotification()
+	if err != nil {
+		return fmt.Errorf("build acp initialized notification: %w", err)
+	}
 	p.mu.Lock()
 	p.initProfile = profile
 	p.mu.Unlock()
@@ -318,6 +322,10 @@ func (p *persistentACPProcess) initialize(ctx context.Context) error {
 		if capture.err != nil {
 			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialize_failed", capture.err.Error())
 			return capture.err
+		}
+		if err := writeACPStdin(p.proc.Stdin(), initializedNotification); err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialized_notification_failed", err.Error())
+			return fmt.Errorf("send acp initialized notification: %w", err)
 		}
 		_ = p.reportCapability(ctx, ACPPoolInitPhaseReady, "", "")
 		return nil

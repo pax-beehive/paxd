@@ -63,6 +63,9 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := store.Migrate(ctx); err != nil {
 		return nil, fmt.Errorf("migrate daemonstore: %w", err)
 	}
+	if _, err := store.ClearAllACPSessionRouteBindings(ctx); err != nil {
+		return nil, fmt.Errorf("clear stale ACP session route bindings: %w", err)
+	}
 	harnesses := opts.Harnesses
 	if harnesses == nil {
 		harnesses = harnessregistry.New(store, harnessregistry.DefaultDetectors()...)
