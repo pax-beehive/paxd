@@ -125,6 +125,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&RemoteStatus{},
 		&AgentConnection{},
 		&AgentConnectionStatus{},
+		&ACPSlotStatus{},
+		&ACPSessionRoute{},
 		&ControlCommand{},
 		&HarnessInventory{},
 		&LocalSession{},

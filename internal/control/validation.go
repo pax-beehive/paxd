@@ -210,7 +210,7 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 	if strings.TrimSpace(cmd.ConnectionID) == "" {
 		return invalid("update_agent_connection.connection_id", "connection id is required")
 	}
-	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil {
+	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil && cmd.DesiredSlots == nil {
 		return invalid("update_agent_connection", "at least one update field is required")
 	}
 	if cmd.Command != nil {
@@ -223,6 +223,14 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 	}
 	if cmd.DesiredState != nil {
 		return validateDesiredState("update_agent_connection.desired_state", *cmd.DesiredState)
+	}
+	if cmd.DesiredSlots != nil {
+		if *cmd.DesiredSlots < 1 {
+			return invalid("update_agent_connection.desired_slots", "desired slots must be at least 1")
+		}
+		if *cmd.DesiredSlots > 1 {
+			return invalid("update_agent_connection.desired_slots", "desired slots above 1 are not enabled")
+		}
 	}
 	return nil
 }

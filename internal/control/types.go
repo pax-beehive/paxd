@@ -202,6 +202,7 @@ type UpdateAgentConnectionCommand struct {
 	Env          *map[string]string `json:"env,omitempty"`
 	Enabled      *bool              `json:"enabled,omitempty"`
 	DesiredState *DesiredState      `json:"desired_state,omitempty"`
+	DesiredSlots *int               `json:"desired_slots,omitempty"`
 }
 
 type DeleteAgentConnectionCommand struct {
@@ -457,21 +458,22 @@ type RemoteStatusView struct {
 }
 
 type AgentConnectionView struct {
-	ID           string            `json:"id"`
-	RemoteID     string            `json:"remote_id"`
-	Name         string            `json:"name"`
-	CloudAgentID string            `json:"cloud_agent_id,omitempty"`
-	InstanceID   string            `json:"instance_id"`
-	AgentType    string            `json:"agent_type"`
-	Harness      string            `json:"harness"`
-	Command      []string          `json:"command"`
-	WorkingDir   string            `json:"working_dir,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Enabled      bool              `json:"enabled"`
-	DesiredState DesiredState      `json:"desired_state"`
-	Generation   int64             `json:"generation"`
-	RestartNonce int64             `json:"restart_nonce"`
-	Status       *AgentStatusView  `json:"status,omitempty"`
+	ID              string            `json:"id"`
+	RemoteID        string            `json:"remote_id"`
+	Name            string            `json:"name"`
+	CloudAgentID    string            `json:"cloud_agent_id,omitempty"`
+	InstanceID      string            `json:"instance_id"`
+	AgentType       string            `json:"agent_type"`
+	Harness         string            `json:"harness"`
+	Command         []string          `json:"command"`
+	WorkingDir      string            `json:"working_dir,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	Enabled         bool              `json:"enabled"`
+	DesiredState    DesiredState      `json:"desired_state"`
+	DesiredACPSlots int               `json:"desired_acp_slots"`
+	Generation      int64             `json:"generation"`
+	RestartNonce    int64             `json:"restart_nonce"`
+	Status          *AgentStatusView  `json:"status,omitempty"`
 }
 
 type AgentStatusView struct {
