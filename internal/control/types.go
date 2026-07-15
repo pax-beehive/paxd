@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 type SourceKind string
@@ -28,6 +29,10 @@ type ReportService interface {
 
 type HostMetricsProvider interface {
 	CurrentHostMetrics(ctx context.Context) (*HostMetricsReport, error)
+}
+
+type ACPPoolCapabilitySource interface {
+	ACPPoolCapabilityReport(ctx context.Context, connectionID string) (*ACPPoolCapabilityReport, bool)
 }
 
 type ControlError struct {
@@ -263,20 +268,38 @@ type HostMetricsReport struct {
 }
 
 type AgentRuntimeReport struct {
-	ConnectionID         string       `json:"connection_id"`
-	CloudAgentID         string       `json:"cloud_agent_id,omitempty"`
-	RemoteID             string       `json:"remote_id"`
-	NodeID               string       `json:"node_id,omitempty"`
-	Name                 string       `json:"name,omitempty"`
-	AgentType            string       `json:"agent_type,omitempty"`
-	DesiredState         DesiredState `json:"desired_state,omitempty"`
-	RuntimePhase         string       `json:"runtime_phase,omitempty"`
-	ObservedGeneration   int64        `json:"observed_generation,omitempty"`
-	ObservedRestartNonce int64        `json:"observed_restart_nonce,omitempty"`
-	StatusUpdatedAt      string       `json:"status_updated_at,omitempty"`
-	FailureClass         string       `json:"failure_class,omitempty"`
-	LastErrorCode        string       `json:"last_error_code,omitempty"`
-	LastErrorMessage     string       `json:"last_error_message,omitempty"`
+	ConnectionID            string                   `json:"connection_id"`
+	CloudAgentID            string                   `json:"cloud_agent_id,omitempty"`
+	RemoteID                string                   `json:"remote_id"`
+	NodeID                  string                   `json:"node_id,omitempty"`
+	Name                    string                   `json:"name,omitempty"`
+	AgentType               string                   `json:"agent_type,omitempty"`
+	DesiredState            DesiredState             `json:"desired_state,omitempty"`
+	RuntimePhase            string                   `json:"runtime_phase,omitempty"`
+	ObservedGeneration      int64                    `json:"observed_generation,omitempty"`
+	ObservedRestartNonce    int64                    `json:"observed_restart_nonce,omitempty"`
+	StatusUpdatedAt         string                   `json:"status_updated_at,omitempty"`
+	FailureClass            string                   `json:"failure_class,omitempty"`
+	LastErrorCode           string                   `json:"last_error_code,omitempty"`
+	LastErrorMessage        string                   `json:"last_error_message,omitempty"`
+	ACPPoolCapabilityReport *ACPPoolCapabilityReport `json:"acp_pool_capability_report,omitempty"`
+}
+
+type ACPPoolCapabilityReport struct {
+	SchemaVersion        int       `json:"schema_version"`
+	ConnectionID         string    `json:"connection_id"`
+	ReportGeneration     int64     `json:"report_generation"`
+	PaxdVersion          string    `json:"paxd_version"`
+	CommandFingerprint   string    `json:"command_fingerprint"`
+	ClientProfileHash    string    `json:"client_profile_hash"`
+	WorkerResultHash     string    `json:"worker_result_hash"`
+	ProtocolVersion      int       `json:"protocol_version,omitempty"`
+	ClientCapabilityKeys []string  `json:"client_capability_keys,omitempty"`
+	WorkerCapabilityKeys []string  `json:"worker_capability_keys,omitempty"`
+	InitPhase            string    `json:"init_phase"`
+	InitializedAt        time.Time `json:"initialized_at,omitempty"`
+	LastErrorCode        string    `json:"last_error_code,omitempty"`
+	LastErrorMessage     string    `json:"last_error_message,omitempty"`
 }
 
 type QueryType string

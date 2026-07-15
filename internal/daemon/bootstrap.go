@@ -79,15 +79,17 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		metricsStarter = sampler
 	}
 	supervisors := &runtimeSupervisors{
-		statusHub:   newStatusHub(),
-		paxdVersion: opts.PaxdVersion,
+		statusHub:            newStatusHub(),
+		paxdVersion:          opts.PaxdVersion,
+		acpCapabilityReports: newACPCapabilityReports(),
 	}
 	service := control.NewService(control.ServiceOptions{
-		Store:         store,
-		Supervisors:   supervisors,
-		Harnesses:     harnesses,
-		LocalSessions: localSessions,
-		HostMetrics:   metrics,
+		Store:               store,
+		Supervisors:         supervisors,
+		Harnesses:           harnesses,
+		LocalSessions:       localSessions,
+		HostMetrics:         metrics,
+		ACPPoolCapabilities: supervisors.acpCapabilityReports,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)

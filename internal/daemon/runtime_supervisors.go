@@ -18,12 +18,13 @@ import (
 )
 
 type runtimeSupervisors struct {
-	remote             supervisor.Supervisor
-	agent              supervisor.Supervisor
-	agentRuntimeSource *supervisor.AgentConnectionSupervisor
-	statusHub          *statusHub
-	paxdVersion        string
-	transportFlusher   interface {
+	remote               supervisor.Supervisor
+	agent                supervisor.Supervisor
+	agentRuntimeSource   *supervisor.AgentConnectionSupervisor
+	statusHub            *statusHub
+	paxdVersion          string
+	acpCapabilityReports *acpCapabilityReports
+	transportFlusher     interface {
 		Close(context.Context) error
 		Stats() reliablemq.ProducerWriteBehindStats
 	}
@@ -77,6 +78,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		runtimes.ExecLocalACPProcessRunner{},
 		transportStore,
 		runtimes.WithPaxdVersionProvider(runtimes.StaticPaxdVersionProvider(s.paxdVersion)),
+		runtimes.WithACPPoolCapabilityReporter(s.acpCapabilityReports),
 	)
 
 	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{

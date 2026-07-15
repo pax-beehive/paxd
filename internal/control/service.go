@@ -85,28 +85,31 @@ type LocalSessions interface {
 }
 
 type ServiceOptions struct {
-	Store         Store
-	Supervisors   Supervisors
-	Harnesses     HarnessRegistry
-	LocalSessions LocalSessions
-	HostMetrics   HostMetricsProvider
+	Store               Store
+	Supervisors         Supervisors
+	Harnesses           HarnessRegistry
+	LocalSessions       LocalSessions
+	HostMetrics         HostMetricsProvider
+	ACPPoolCapabilities ACPPoolCapabilitySource
 }
 
 type ControlService struct {
-	store         Store
-	supervisors   Supervisors
-	harnesses     HarnessRegistry
-	localSessions LocalSessions
-	hostMetrics   HostMetricsProvider
+	store               Store
+	supervisors         Supervisors
+	harnesses           HarnessRegistry
+	localSessions       LocalSessions
+	hostMetrics         HostMetricsProvider
+	acpPoolCapabilities ACPPoolCapabilitySource
 }
 
 func NewService(opts ServiceOptions) *ControlService {
 	return &ControlService{
-		store:         opts.Store,
-		supervisors:   opts.Supervisors,
-		harnesses:     opts.Harnesses,
-		localSessions: opts.LocalSessions,
-		hostMetrics:   opts.HostMetrics,
+		store:               opts.Store,
+		supervisors:         opts.Supervisors,
+		harnesses:           opts.Harnesses,
+		localSessions:       opts.LocalSessions,
+		hostMetrics:         opts.HostMetrics,
+		acpPoolCapabilities: opts.ACPPoolCapabilities,
 	}
 }
 
@@ -325,6 +328,12 @@ func (s *ControlService) BuildRuntimeSnapshot(ctx context.Context, remoteID stri
 			report.FailureClass = conn.Status.FailureClass
 			report.LastErrorCode = conn.Status.LastErrorCode
 			report.LastErrorMessage = conn.Status.LastErrorMessage
+		}
+		if s.acpPoolCapabilities != nil {
+			if capabilityReport, ok := s.acpPoolCapabilities.ACPPoolCapabilityReport(ctx, conn.ID); ok && capabilityReport != nil {
+				reportCopy := *capabilityReport
+				report.ACPPoolCapabilityReport = &reportCopy
+			}
 		}
 		snapshot.Agents = append(snapshot.Agents, report)
 	}
