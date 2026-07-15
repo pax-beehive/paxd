@@ -238,7 +238,7 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 	detachSender := proc.AttachSender(s.reliableSender(conn))
 	defer detachSender()
 
-	engine := s.newReliableEngine(conn, proc.Stdin())
+	engine := s.newReliableEngineWithInitialize(conn, proc.Stdin(), proc.InitializeResult())
 	if err := s.reconcilePaxdProducer(ctx, conn); err != nil {
 		if errors.Is(err, ErrTransportQueueRotate) {
 			log.Printf(
@@ -499,10 +499,33 @@ func (s *AgentTunnelSession) sendOutbound(ctx context.Context, payload []byte, e
 }
 
 func (s *AgentTunnelSession) newReliableEngine(conn WebSocketConn, stdin io.Writer) ReliableEngine {
-	return s.deps.ReliableEngineFactory.NewReliableEngine(s.reliableSender(conn), reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
-		_ = ctx
+	return s.newReliableEngineWithInitialize(conn, stdin, nil)
+}
+
+func (s *AgentTunnelSession) newReliableEngineWithInitialize(conn WebSocketConn, stdin io.Writer, initializeResult json.RawMessage) ReliableEngine {
+	var engine ReliableEngine
+	engine = s.deps.ReliableEngineFactory.NewReliableEngine(s.reliableSender(conn), reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		if len(initializeResult) > 0 {
+			if handled, err := s.handleManagerInitialize(ctx, frame.Payload, initializeResult, engine); handled || err != nil {
+				return err
+			}
+		}
 		return writeACPStdin(stdin, frame.Payload)
 	}))
+	return engine
+}
+
+func (s *AgentTunnelSession) handleManagerInitialize(
+	ctx context.Context,
+	payload []byte,
+	initializeResult json.RawMessage,
+	engine ReliableEngine,
+) (bool, error) {
+	response, handled, err := acpInitializeResponsePayload(payload, initializeResult)
+	if err != nil || !handled || len(response) == 0 {
+		return handled, err
+	}
+	return true, s.sendOutbound(ctx, response, engine)
 }
 
 func (s *AgentTunnelSession) reliableSender(conn WebSocketConn) reliablemq.Sender {

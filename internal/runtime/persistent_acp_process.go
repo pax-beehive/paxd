@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -136,7 +137,10 @@ type persistentACPProcess struct {
 	sender      reliablemq.Sender
 	senderToken int64
 	err         error
+	initProfile acpClientInitProfile
+	initResult  acpWorkerInitResult
 
+	initCh   chan acpInitCapture
 	done     chan struct{}
 	stopOnce sync.Once
 }
@@ -161,11 +165,16 @@ func newPersistentACPProcess(
 		fingerprint: fingerprint,
 		proc:        proc,
 		store:       store,
+		initCh:      make(chan acpInitCapture, 1),
 		done:        make(chan struct{}),
 	}
 	go io.Copy(io.Discard, proc.Stderr())
 	go p.copyStdout()
 	go p.wait()
+	if err := p.initialize(ctx); err != nil {
+		p.Terminate(context.Background())
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -215,6 +224,47 @@ func (p *persistentACPProcess) Terminate(ctx context.Context) {
 	})
 }
 
+func (p *persistentACPProcess) InitializeResult() json.RawMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.initResult.Result) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), p.initResult.Result...)
+}
+
+func (p *persistentACPProcess) initialize(ctx context.Context) error {
+	profile, err := buildACPClientInitProfile()
+	if err != nil {
+		return fmt.Errorf("build acp initialize profile: %w", err)
+	}
+	request, err := buildInternalACPInitializeRequest(profile)
+	if err != nil {
+		return fmt.Errorf("build acp initialize request: %w", err)
+	}
+	p.mu.Lock()
+	p.initProfile = profile
+	p.mu.Unlock()
+	if err := writeACPStdin(p.proc.Stdin(), request); err != nil {
+		return fmt.Errorf("send acp initialize: %w", err)
+	}
+
+	select {
+	case capture := <-p.initCh:
+		if capture.err != nil {
+			return capture.err
+		}
+		return nil
+	case <-p.done:
+		if err := p.Err(); err != nil {
+			return fmt.Errorf("acp process exited before initialize completed: %w", err)
+		}
+		return fmt.Errorf("acp process exited before initialize completed")
+	case <-ctx.Done():
+		return fmt.Errorf("acp initialize: %w", ctx.Err())
+	}
+}
+
 func (p *persistentACPProcess) wait() {
 	err := p.proc.Wait()
 	p.mu.Lock()
@@ -239,6 +289,9 @@ func (p *persistentACPProcess) copyStdout() {
 					p.Terminate(context.Background())
 					return
 				}
+				if p.captureInitializeResponse(line) {
+					continue
+				}
 				if sendErr := p.sendOutbound(context.Background(), line); sendErr != nil {
 					log.Printf(
 						"[paxd] persistent ACP process id=%s outbound journal failed: %v",
@@ -262,6 +315,39 @@ func (p *persistentACPProcess) copyStdout() {
 			return
 		}
 	}
+}
+
+func (p *persistentACPProcess) captureInitializeResponse(line []byte) bool {
+	msg, ok := parseACPRPCMessage(line)
+	if !ok || !isInternalACPInitializeResponse(msg) {
+		return false
+	}
+	capture := acpInitCapture{}
+	if msg.Error != nil {
+		capture.err = fmt.Errorf("acp initialize rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+	} else {
+		result := bytes.TrimSpace(msg.Result)
+		if len(result) == 0 {
+			result = []byte(`{}`)
+		}
+		canonicalResult, err := canonicalJSON(json.RawMessage(result))
+		if err != nil {
+			capture.err = fmt.Errorf("canonicalize acp initialize result: %w", err)
+		} else {
+			p.mu.Lock()
+			p.initResult = acpWorkerInitResult{
+				Result:        canonicalResult,
+				ResultHash:    hashBytes(canonicalResult),
+				InitializedAt: time.Now(),
+			}
+			p.mu.Unlock()
+		}
+	}
+	select {
+	case p.initCh <- capture:
+	default:
+	}
+	return true
 }
 
 func (p *persistentACPProcess) sendOutbound(ctx context.Context, payload []byte) error {

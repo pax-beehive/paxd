@@ -233,6 +233,7 @@ func TestAgentTunnelPersistentProcessJournalsStdoutAfterTunnelDisconnect(t *test
 		ReliableEngineFactory: ReliableEngineFromStore(store),
 		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
 	})
+	go writePersistentInitializeResponse(t, stdoutWriter, `{"protocolVersion":1,"agentCapabilities":{}}`)
 
 	exit := session.Run(context.Background())
 
@@ -255,6 +256,91 @@ func TestAgentTunnelPersistentProcessJournalsStdoutAfterTunnelDisconnect(t *test
 
 	pool.Stop(validAgentSpec())
 	assert.True(t, proc.terminated)
+}
+
+func TestPersistentACPProcessInitializesOnceAndSuppressesInternalResponse(t *testing.T) {
+	store := newSpyStore()
+	proc := newFakeProcess(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{"prompt":true}}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{"ok":true}}`,
+		"",
+	}, "\n"))
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+
+	acquired, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.NotNil(t, acquired)
+	assert.Contains(t, proc.stdin.String(), `"method":"initialize"`)
+	assert.Contains(t, proc.stdin.String(), `"id":"paxd.initialize"`)
+	require.Eventually(t, func() bool {
+		_, ok := store.Get(reliablemq.FrameKey{
+			QueueID:   "agent_1:queue_1",
+			Stream:    reliablemq.StreamACP,
+			Seq:       1,
+			Direction: reliablemq.DirectionOutbound,
+		})
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	frame, ok := store.Get(reliablemq.FrameKey{
+		QueueID:   "agent_1:queue_1",
+		Stream:    reliablemq.StreamACP,
+		Seq:       1,
+		Direction: reliablemq.DirectionOutbound,
+	})
+	require.True(t, ok)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":2,"result":{"ok":true}}`, string(frame.Payload))
+	assert.NotContains(t, string(frame.Payload), "paxd.initialize")
+}
+
+func TestAgentTunnelManagerInitializeAnsweredFromCachedPersistentResult(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = errors.New("network down")
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdoutWriter.Close()
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+	initializeEnvelope, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:    reliablemq.EnvelopeTypeData,
+		QueueID: "agent_1:queue_1",
+		Stream:  reliablemq.StreamACP,
+		Seq:     7,
+		Payload: []byte(`{"jsonrpc":"2.0","id":99,"method":"initialize","params":{"clientInfo":{"name":"manager"}}}`),
+	})
+	require.NoError(t, err)
+	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: initializeEnvelope}
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ACPProcessPool:        pool,
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+	go writePersistentInitializeResponse(t, stdoutWriter, `{"protocolVersion":1,"agentCapabilities":{"prompt":true}}`)
+
+	exit := session.Run(context.Background())
+
+	assert.Equal(t, ExitTransient, exit.Class)
+	assert.Equal(t, "session_error", exit.Code)
+	assert.Contains(t, proc.stdin.String(), `"id":"paxd.initialize"`)
+	assert.NotContains(t, proc.stdin.String(), `"id":99`)
+	var responsePayload []byte
+	for _, write := range conn.writes() {
+		env, err := reliablemq.UnmarshalEnvelope(write.payload)
+		if err == nil && env.Type == reliablemq.EnvelopeTypeData {
+			responsePayload = env.Payload
+		}
+	}
+	require.NotEmpty(t, responsePayload)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":99,"result":{"agentCapabilities":{"prompt":true},"protocolVersion":1}}`, string(responsePayload))
 }
 
 func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
@@ -624,6 +710,12 @@ func newFakeProcess(stdout string) *fakeProcess {
 		stderr: strings.NewReader(""),
 		waitCh: make(chan error),
 	}
+}
+
+func writePersistentInitializeResponse(t *testing.T, writer io.Writer, result string) {
+	t.Helper()
+	_, err := writer.Write([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":` + result + "}\n"))
+	assert.NoError(t, err)
 }
 
 func (p *fakeProcess) Stdin() io.WriteCloser { return p.stdin }
