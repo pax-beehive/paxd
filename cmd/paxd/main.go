@@ -40,7 +40,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-var version = "0.1.0"
+var version = "dev"
 
 type remoteLoginFunc func(context.Context, remotelogin.LoginSpec, remotelogin.Options) (remotelogin.LoginResult, error)
 
@@ -399,8 +399,9 @@ func cmdRun(args []string) {
 	defer closeHistory()
 
 	daemonRuntime, err := paxdaemon.Bootstrap(sm.Context(), paxdaemon.Options{
-		Config: cfg,
-		Store:  history,
+		Config:      cfg,
+		Store:       history,
+		PaxdVersion: version,
 	})
 	if err != nil {
 		log.Fatalf("bootstrap daemon control plane: %v", err)

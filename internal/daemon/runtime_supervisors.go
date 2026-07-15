@@ -22,6 +22,7 @@ type runtimeSupervisors struct {
 	agent              supervisor.Supervisor
 	agentRuntimeSource *supervisor.AgentConnectionSupervisor
 	statusHub          *statusHub
+	paxdVersion        string
 	transportFlusher   interface {
 		Close(context.Context) error
 		Stats() reliablemq.ProducerWriteBehindStats
@@ -72,7 +73,11 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
 	}
-	agentProcessPool := runtimes.NewPersistentACPProcessPool(runtimes.ExecLocalACPProcessRunner{}, transportStore)
+	agentProcessPool := runtimes.NewPersistentACPProcessPool(
+		runtimes.ExecLocalACPProcessRunner{},
+		transportStore,
+		runtimes.WithPaxdVersionProvider(runtimes.StaticPaxdVersionProvider(s.paxdVersion)),
+	)
 
 	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
 		Store:      store,

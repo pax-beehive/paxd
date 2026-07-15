@@ -23,24 +23,60 @@ import (
 // canceled supervisor contexts, config changes, and explicit restarts stop the
 // cached process.
 type PersistentACPProcessPool struct {
-	runner LocalACPProcessRunner
-	store  reliablemq.DurableStore
+	runner          LocalACPProcessRunner
+	store           reliablemq.DurableStore
+	versionProvider PaxdVersionProvider
+	reporter        ACPPoolCapabilityReporter
 
-	mu        sync.Mutex
-	processes map[string]*persistentACPProcess
+	mu               sync.Mutex
+	processes        map[string]*persistentACPProcess
+	reportGeneration int64
 }
 
 func NewPersistentACPProcessPool(
 	runner LocalACPProcessRunner,
 	store reliablemq.DurableStore,
+	opts ...PersistentACPProcessPoolOption,
 ) *PersistentACPProcessPool {
 	if runner == nil {
 		runner = ExecLocalACPProcessRunner{}
 	}
-	return &PersistentACPProcessPool{
-		runner:    runner,
-		store:     store,
-		processes: make(map[string]*persistentACPProcess),
+	pool := &PersistentACPProcessPool{
+		runner:          runner,
+		store:           store,
+		versionProvider: NoopPaxdVersionProvider{},
+		reporter:        NoopACPPoolCapabilityReporter{},
+		processes:       make(map[string]*persistentACPProcess),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(pool)
+		}
+	}
+	if pool.versionProvider == nil {
+		pool.versionProvider = NoopPaxdVersionProvider{}
+	}
+	if pool.reporter == nil {
+		pool.reporter = NoopACPPoolCapabilityReporter{}
+	}
+	return pool
+}
+
+type PersistentACPProcessPoolOption func(*PersistentACPProcessPool)
+
+func WithPaxdVersionProvider(provider PaxdVersionProvider) PersistentACPProcessPoolOption {
+	return func(pool *PersistentACPProcessPool) {
+		if provider != nil {
+			pool.versionProvider = provider
+		}
+	}
+}
+
+func WithACPPoolCapabilityReporter(reporter ACPPoolCapabilityReporter) PersistentACPProcessPoolOption {
+	return func(pool *PersistentACPProcessPool) {
+		if reporter != nil {
+			pool.reporter = reporter
+		}
 	}
 }
 
@@ -73,7 +109,16 @@ func (p *PersistentACPProcessPool) Acquire(
 		p.mu.Unlock()
 	}
 
-	proc, err := newPersistentACPProcess(ctx, p.runner, p.store, spec, fingerprint)
+	proc, err := newPersistentACPProcess(
+		ctx,
+		p.runner,
+		p.store,
+		spec,
+		fingerprint,
+		p.versionProvider.PaxdVersion(),
+		p.nextReportGeneration(),
+		p.reporter,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +141,13 @@ func (p *PersistentACPProcessPool) Acquire(
 	p.processes[key] = proc
 	p.mu.Unlock()
 	return proc, nil
+}
+
+func (p *PersistentACPProcessPool) nextReportGeneration() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reportGeneration++
+	return p.reportGeneration
 }
 
 func (p *PersistentACPProcessPool) Stop(spec AgentConnectionSpec) {
@@ -130,8 +182,11 @@ func (p *PersistentACPProcessPool) Forget(
 type persistentACPProcess struct {
 	spec        AgentConnectionSpec
 	fingerprint string
+	paxdVersion string
+	reportGen   int64
 	proc        LocalACPProcess
 	store       reliablemq.DurableStore
+	reporter    ACPPoolCapabilityReporter
 
 	mu          sync.Mutex
 	sender      reliablemq.Sender
@@ -151,6 +206,9 @@ func newPersistentACPProcess(
 	store reliablemq.DurableStore,
 	spec AgentConnectionSpec,
 	fingerprint string,
+	paxdVersion string,
+	reportGeneration int64,
+	reporter ACPPoolCapabilityReporter,
 ) (*persistentACPProcess, error) {
 	proc, err := runner.Start(ctx, LocalACPProcessSpec{
 		Command:    spec.Command,
@@ -163,10 +221,16 @@ func newPersistentACPProcess(
 	p := &persistentACPProcess{
 		spec:        spec,
 		fingerprint: fingerprint,
+		paxdVersion: StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
+		reportGen:   reportGeneration,
 		proc:        proc,
 		store:       store,
+		reporter:    reporter,
 		initCh:      make(chan acpInitCapture, 1),
 		done:        make(chan struct{}),
+	}
+	if p.reporter == nil {
+		p.reporter = NoopACPPoolCapabilityReporter{}
 	}
 	go io.Copy(io.Discard, proc.Stderr())
 	go p.copyStdout()
@@ -234,7 +298,7 @@ func (p *persistentACPProcess) InitializeResult() json.RawMessage {
 }
 
 func (p *persistentACPProcess) initialize(ctx context.Context) error {
-	profile, err := buildACPClientInitProfile()
+	profile, err := buildACPClientInitProfile(p.paxdVersion)
 	if err != nil {
 		return fmt.Errorf("build acp initialize profile: %w", err)
 	}
@@ -252,17 +316,45 @@ func (p *persistentACPProcess) initialize(ctx context.Context) error {
 	select {
 	case capture := <-p.initCh:
 		if capture.err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialize_failed", capture.err.Error())
 			return capture.err
 		}
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseReady, "", "")
 		return nil
 	case <-p.done:
 		if err := p.Err(); err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "process_exited", err.Error())
 			return fmt.Errorf("acp process exited before initialize completed: %w", err)
 		}
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "process_exited", "acp process exited before initialize completed")
 		return fmt.Errorf("acp process exited before initialize completed")
 	case <-ctx.Done():
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialize_canceled", ctx.Err().Error())
 		return fmt.Errorf("acp initialize: %w", ctx.Err())
 	}
+}
+
+func (p *persistentACPProcess) reportCapability(ctx context.Context, phase string, errCode string, errMessage string) error {
+	p.mu.Lock()
+	profile := p.initProfile
+	result := p.initResult
+	p.mu.Unlock()
+	report := ACPPoolCapabilityReport{
+		ConnectionID:         p.spec.ConnectionID,
+		ReportGeneration:     p.reportGen,
+		PaxdVersion:          p.paxdVersion,
+		CommandFingerprint:   p.fingerprint,
+		ClientProfileHash:    profile.ProfileHash,
+		WorkerResultHash:     result.ResultHash,
+		ProtocolVersion:      protocolVersionFromResult(result.Result),
+		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
+		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		InitPhase:            phase,
+		InitializedAt:        result.InitializedAt,
+		LastErrorCode:        errCode,
+		LastErrorMessage:     errMessage,
+	}.WithDefaults()
+	return p.reporter.ReportACPPoolCapability(ctx, report)
 }
 
 func (p *persistentACPProcess) wait() {

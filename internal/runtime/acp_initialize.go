@@ -41,13 +41,13 @@ type acpInitCapture struct {
 	err error
 }
 
-func buildACPClientInitProfile() (acpClientInitProfile, error) {
+func buildACPClientInitProfile(paxdVersion string) (acpClientInitProfile, error) {
 	params, err := canonicalJSON(map[string]any{
 		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "paxd",
-			"version": "0.1.0",
+			"version": StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
 		},
 	})
 	if err != nil {

@@ -44,6 +44,7 @@ type Options struct {
 	Harnesses     control.HarnessRegistry
 	LocalSessions control.LocalSessions
 	HostMetrics   control.HostMetricsProvider
+	PaxdVersion   string
 }
 
 func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
@@ -77,7 +78,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		metrics = sampler
 		metricsStarter = sampler
 	}
-	supervisors := &runtimeSupervisors{statusHub: newStatusHub()}
+	supervisors := &runtimeSupervisors{
+		statusHub:   newStatusHub(),
+		paxdVersion: opts.PaxdVersion,
+	}
 	service := control.NewService(control.ServiceOptions{
 		Store:         store,
 		Supervisors:   supervisors,

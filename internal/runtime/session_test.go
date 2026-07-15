@@ -294,6 +294,73 @@ func TestPersistentACPProcessInitializesOnceAndSuppressesInternalResponse(t *tes
 	assert.NotContains(t, string(frame.Payload), "paxd.initialize")
 }
 
+func TestPersistentACPProcessCapabilityReportDefaultsToDevVersion(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{"prompt":true,"tools":{}}}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.Len(t, reporter.reports, 1)
+	report := reporter.reports[0]
+	assert.Equal(t, ACPPoolCapabilityReportSchemaVersion, report.SchemaVersion)
+	assert.Equal(t, "dev", report.PaxdVersion)
+	assert.Equal(t, ACPPoolInitPhaseReady, report.InitPhase)
+	assert.Equal(t, "conn_1", report.ConnectionID)
+	assert.Equal(t, 1, report.ProtocolVersion)
+	assert.Equal(t, []string{"prompt", "tools"}, report.WorkerCapabilityKeys)
+	assert.NotEmpty(t, report.ClientProfileHash)
+	assert.NotEmpty(t, report.WorkerResultHash)
+}
+
+func TestPersistentACPProcessCapabilityReportUsesProvidedPaxdVersion(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{}}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithPaxdVersionProvider(StaticPaxdVersionProvider("1.2.3")),
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.Len(t, reporter.reports, 1)
+	assert.Equal(t, "1.2.3", reporter.reports[0].PaxdVersion)
+	assert.Contains(t, proc.stdin.String(), `"version":"1.2.3"`)
+}
+
+func TestPersistentACPProcessCapabilityReportRecordsInitializeFailure(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","error":{"code":-32000,"message":"no auth"}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.ErrorContains(t, err, "no auth")
+	require.Len(t, reporter.reports, 1)
+	report := reporter.reports[0]
+	assert.Equal(t, "dev", report.PaxdVersion)
+	assert.Equal(t, ACPPoolInitPhaseFailed, report.InitPhase)
+	assert.Equal(t, "initialize_failed", report.LastErrorCode)
+	assert.Contains(t, report.LastErrorMessage, "no auth")
+	assert.NotEmpty(t, report.ClientProfileHash)
+	assert.Empty(t, report.WorkerResultHash)
+}
+
 func TestAgentTunnelManagerInitializeAnsweredFromCachedPersistentResult(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	conn.readErrWhenDrained = errors.New("network down")
@@ -693,6 +760,15 @@ type fakeLocalACPProcessRunner struct {
 
 func (r fakeLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProcessSpec) (LocalACPProcess, error) {
 	return r.proc, r.err
+}
+
+type recordingCapabilityReporter struct {
+	reports []ACPPoolCapabilityReport
+}
+
+func (r *recordingCapabilityReporter) ReportACPPoolCapability(ctx context.Context, report ACPPoolCapabilityReport) error {
+	r.reports = append(r.reports, report)
+	return nil
 }
 
 type fakeProcess struct {
