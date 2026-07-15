@@ -94,7 +94,7 @@ func isCodexSpec(spec SessionScannerSpec) bool {
 	if commandName == "codex" || commandName == "codex-acp" {
 		return true
 	}
-	return strings.Contains(strings.Join(spec.Command, " "), "@zed-industries/codex-acp")
+	return strings.Contains(strings.Join(spec.Command, " "), "@agentclientprotocol/codex-acp")
 }
 
 func listCodexLocalSessions(ctx context.Context, timeout time.Duration) ([]model.SessionInfo, error) {

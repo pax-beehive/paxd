@@ -158,7 +158,7 @@ export PAX_ACP_TUNNEL_PATH="/api/v1/agent/tunnel"
 export PAX_ACP_RECONNECT_INTERVAL="2s"
 ```
 
-Supported ACP harness presets are `hermes` (`hermes acp`), `gemini` (`gemini --acp`), `codex` (`codex-acp` or `npx -y @zed-industries/codex-acp`), and `claude-code` (`claude-agent-acp` or `npx -y @agentclientprotocol/claude-agent-acp`). Run `paxd harnesses` on the target machine to inspect local adapter support. Use `custom` plus `command` for other ACP-compatible adapters. Per-agent `agents[].acp_forwarder.command` overrides the preset for that agent; top-level `acp_forwarder` is the default for agents that do not override it.
+Supported ACP harness presets are `hermes` (`hermes acp`), `gemini` (`gemini --acp`), `codex` (`codex-acp` or `npx -y @agentclientprotocol/codex-acp`), and `claude-code` (`claude-agent-acp` or `npx -y @agentclientprotocol/claude-agent-acp`). Run `paxd harnesses` on the target machine to inspect local adapter support. Use `custom` plus `command` for other ACP-compatible adapters. Per-agent `agents[].acp_forwarder.command` overrides the preset for that agent; top-level `acp_forwarder` is the default for agents that do not override it.
 
 Prefer a short reconnect interval while testing. A healthy forwarder should reset exponential backoff after any successful tunnel connection.
 
