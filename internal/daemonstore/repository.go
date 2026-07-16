@@ -3,9 +3,13 @@ package daemonstore
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,9 +54,76 @@ type AgentConnectionStatusUpdate struct {
 	DetailsJSON          string
 }
 
+type ACPSlotStatusUpdate struct {
+	SlotID            string
+	ConnectionID      string
+	Ordinal           int
+	ProcessEpoch      string
+	PID               *int
+	ProcessGroupID    *int
+	ProcessStartToken string
+	Phase             string
+	FailureClass      string
+	LastErrorCode     string
+	LastErrorMessage  string
+	StartedAt         *time.Time
+	ReadyAt           *time.Time
+	ActiveSince       *time.Time
+	StoppedAt         *time.Time
+}
+
+type ACPSlotStatusView struct {
+	SlotID            string
+	ConnectionID      string
+	Ordinal           int
+	ProcessEpoch      string
+	PID               *int
+	ProcessGroupID    *int
+	ProcessStartToken string
+	Phase             string
+	FailureClass      string
+	LastErrorCode     string
+	LastErrorMessage  string
+	StartedAt         string
+	ReadyAt           string
+	ActiveSince       string
+	StoppedAt         string
+	UpdatedAt         string
+}
+
+type ACPSessionRouteUpsert struct {
+	ConnectionID     string
+	NativeSessionID  string
+	ResumeParamsJSON string
+}
+
+type ACPSessionRouteBindingUpdate struct {
+	ConnectionID     string
+	NativeSessionID  string
+	SlotID           string
+	ProcessEpoch     string
+	ExpectedVersion  int64
+	ResumeParamsJSON string
+}
+
+type ACPSessionRouteView struct {
+	ConnectionID      string
+	NativeSessionID   string
+	BoundSlotID       string
+	BoundProcessEpoch string
+	LastSlotID        string
+	ResumeParamsJSON  string
+	CreatedAt         string
+	LastUsedAt        string
+	UpdatedAt         string
+	Version           int64
+}
+
 type RemoteDesiredSpec = runtimes.RemoteSpec
 
 type AgentConnectionDesiredSpec = runtimes.AgentConnectionSpec
+
+type ACPSlotDesiredSpec = runtimes.ACPSlotSpec
 
 type RemoteAuthMaterial = control.RemoteAuthMaterial
 
@@ -348,22 +419,23 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 		desired = control.DesiredStateRunning
 	}
 	conn := AgentConnection{
-		ID:           cmd.ID,
-		RemoteID:     cmd.RemoteID,
-		Name:         cmd.Name,
-		CloudAgentID: stringPtrOrNil(cmd.CloudAgentID),
-		InstanceID:   cmd.InstanceID,
-		AgentType:    cmd.AgentType,
-		Harness:      cmd.Harness,
-		CommandJSON:  commandJSON,
-		WorkingDir:   cmd.WorkingDir,
-		EnvJSON:      envJSON,
-		Enabled:      boolDefault(cmd.Enabled, true),
-		DesiredState: string(desired),
-		Generation:   1,
-		RestartNonce: 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:              cmd.ID,
+		RemoteID:        cmd.RemoteID,
+		Name:            cmd.Name,
+		CloudAgentID:    stringPtrOrNil(cmd.CloudAgentID),
+		InstanceID:      cmd.InstanceID,
+		AgentType:       cmd.AgentType,
+		Harness:         cmd.Harness,
+		CommandJSON:     commandJSON,
+		WorkingDir:      cmd.WorkingDir,
+		EnvJSON:         envJSON,
+		Enabled:         boolDefault(cmd.Enabled, true),
+		DesiredState:    string(desired),
+		DesiredACPSlots: 1,
+		Generation:      1,
+		RestartNonce:    0,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if conn.ID == "" {
 		conn.ID = "conn_" + strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cmd.Name), " ", "_"))
@@ -417,7 +489,12 @@ func (s *Store) UpdateAgentConnection(ctx context.Context, cmd control.UpdateAge
 	if cmd.DesiredState != nil {
 		conn.DesiredState = string(*cmd.DesiredState)
 	}
-	conn.Generation++
+	if cmd.DesiredSlots != nil {
+		conn.DesiredACPSlots = *cmd.DesiredSlots
+	}
+	if agentConnectionUpdateRotatesRuntime(cmd) {
+		conn.Generation++
+	}
 	conn.UpdatedAt = s.currentTime()
 	if err := s.db.WithContext(ctx).Save(&conn).Error; err != nil {
 		return control.AgentConnectionView{}, mapCreateErr(err)
@@ -683,6 +760,65 @@ func (s *Store) ListDesiredAgentConnections(ctx context.Context) ([]AgentConnect
 	return specs, nil
 }
 
+func (s *Store) ListDesiredACPSlots(ctx context.Context) ([]ACPSlotDesiredSpec, error) {
+	var conns []AgentConnection
+	if err := s.db.WithContext(ctx).
+		Where("enabled = ?", true).
+		Where("desired_state = ?", string(control.DesiredStateRunning)).
+		Find(&conns).Error; err != nil {
+		return nil, err
+	}
+	totalSlots := 0
+	for _, conn := range conns {
+		if conn.DesiredACPSlots > 0 {
+			totalSlots += conn.DesiredACPSlots
+		}
+	}
+	specs := make([]ACPSlotDesiredSpec, 0, totalSlots)
+	for _, conn := range conns {
+		remote, err := s.getRemote(ctx, conn.RemoteID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if !remote.Enabled || conn.DesiredACPSlots <= 0 {
+			continue
+		}
+		command, err := decodeStringSlice(conn.CommandJSON)
+		if err != nil {
+			return nil, err
+		}
+		env, err := decodeStringMap(conn.EnvJSON)
+		if err != nil {
+			return nil, err
+		}
+		transportQueueID, err := s.ensureAgentTransportQueueID(ctx, &conn)
+		if err != nil {
+			return nil, err
+		}
+		commandFingerprint := acpSlotCommandFingerprint(conn, command, env, transportQueueID)
+		for ordinal := 0; ordinal < conn.DesiredACPSlots; ordinal++ {
+			specs = append(specs, ACPSlotDesiredSpec{
+				ConnectionID:       conn.ID,
+				RemoteID:           conn.RemoteID,
+				CloudAgentID:       stringValue(conn.CloudAgentID),
+				TransportQueueID:   transportQueueID,
+				SlotID:             ACPSlotID(conn.ID, ordinal),
+				Ordinal:            ordinal,
+				Command:            command,
+				WorkingDir:         conn.WorkingDir,
+				Env:                env,
+				CommandFingerprint: commandFingerprint,
+				Generation:         conn.Generation,
+				RestartNonce:       conn.RestartNonce,
+			})
+		}
+	}
+	return specs, nil
+}
+
 func (s *Store) ensureAgentTransportQueueID(ctx context.Context, conn *AgentConnection) (string, error) {
 	cloudAgentID := stringValue(conn.CloudAgentID)
 	if cloudAgentID == "" {
@@ -754,6 +890,181 @@ func newTransportQueueID(cloudAgentID string) (string, error) {
 		return "", err
 	}
 	return cloudAgentID + ":" + hex.EncodeToString(random[:]), nil
+}
+
+func ACPSlotID(connectionID string, ordinal int) string {
+	sum := sha256.Sum256([]byte(connectionID + "\x00" + strconv.Itoa(ordinal)))
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
+	return "slot_" + strings.ToLower(encoded[:26])
+}
+
+func acpSlotCommandFingerprint(conn AgentConnection, command []string, env map[string]string, transportQueueID string) string {
+	envKeys := make([]string, 0, len(env))
+	for key := range env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	envPairs := make([]string, 0, len(envKeys))
+	for _, key := range envKeys {
+		envPairs = append(envPairs, key+"="+env[key])
+	}
+	value := strings.Join([]string{
+		transportQueueID,
+		stringValue(conn.CloudAgentID),
+		conn.AgentType,
+		conn.Harness,
+		conn.WorkingDir,
+		strings.Join(command, "\x00"),
+		strings.Join(envPairs, "\x00"),
+	}, "\x01")
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Store) UpsertACPSlotStatus(ctx context.Context, update ACPSlotStatusUpdate) error {
+	status := acpSlotStatusModel(update, s.currentTime())
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "slot_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"connection_id":       status.ConnectionID,
+			"ordinal":             status.Ordinal,
+			"process_epoch":       status.ProcessEpoch,
+			"pid":                 status.PID,
+			"process_group_id":    status.ProcessGroupID,
+			"process_start_token": status.ProcessStartToken,
+			"phase":               status.Phase,
+			"failure_class":       status.FailureClass,
+			"last_error_code":     status.LastErrorCode,
+			"last_error_message":  status.LastErrorMessage,
+			"started_at":          status.StartedAt,
+			"ready_at":            status.ReadyAt,
+			"active_since":        status.ActiveSince,
+			"stopped_at":          status.StoppedAt,
+			"updated_at":          status.UpdatedAt,
+		}),
+	}).Create(&status).Error
+}
+
+func (s *Store) GetACPSlotStatus(ctx context.Context, slotID string) (*ACPSlotStatusView, error) {
+	var status ACPSlotStatus
+	if err := s.db.WithContext(ctx).Where("slot_id = ?", slotID).First(&status).Error; err != nil {
+		return nil, mapGormErr(err)
+	}
+	view := acpSlotStatusView(status)
+	return &view, nil
+}
+
+func (s *Store) UpsertACPSessionRoute(ctx context.Context, update ACPSessionRouteUpsert) (ACPSessionRouteView, error) {
+	now := s.currentTime()
+	route := ACPSessionRoute{
+		ConnectionID:     update.ConnectionID,
+		NativeSessionID:  update.NativeSessionID,
+		ResumeParamsJSON: stringDefault(update.ResumeParamsJSON, "{}"),
+		CreatedAt:        now,
+		LastUsedAt:       now,
+		UpdatedAt:        now,
+		Version:          1,
+	}
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "connection_id"}, {Name: "native_session_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"resume_params_json": route.ResumeParamsJSON,
+			"last_used_at":       route.LastUsedAt,
+			"updated_at":         route.UpdatedAt,
+			"version":            gorm.Expr("version + 1"),
+		}),
+	}).Create(&route).Error; err != nil {
+		return ACPSessionRouteView{}, err
+	}
+	return s.GetACPSessionRoute(ctx, update.ConnectionID, update.NativeSessionID)
+}
+
+func (s *Store) GetACPSessionRoute(ctx context.Context, connectionID string, nativeSessionID string) (ACPSessionRouteView, error) {
+	var route ACPSessionRoute
+	if err := s.db.WithContext(ctx).
+		Where("connection_id = ? AND native_session_id = ?", connectionID, nativeSessionID).
+		First(&route).Error; err != nil {
+		return ACPSessionRouteView{}, mapGormErr(err)
+	}
+	return acpSessionRouteView(route), nil
+}
+
+func (s *Store) BindACPSessionRoute(ctx context.Context, update ACPSessionRouteBindingUpdate) (ACPSessionRouteView, bool, error) {
+	now := s.currentTime()
+	values := map[string]any{
+		"bound_slot_id":       stringPtrOrNil(update.SlotID),
+		"bound_process_epoch": stringPtrOrNil(update.ProcessEpoch),
+		"last_used_at":        now,
+		"updated_at":          now,
+		"version":             gorm.Expr("version + 1"),
+	}
+	if update.ResumeParamsJSON != "" {
+		values["resume_params_json"] = update.ResumeParamsJSON
+	}
+	res := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Where("connection_id = ? AND native_session_id = ? AND version = ?", update.ConnectionID, update.NativeSessionID, update.ExpectedVersion).
+		Updates(values)
+	if res.Error != nil {
+		return ACPSessionRouteView{}, false, mapGormErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ACPSessionRouteView{}, false, nil
+	}
+	route, err := s.GetACPSessionRoute(ctx, update.ConnectionID, update.NativeSessionID)
+	return route, true, err
+}
+
+func (s *Store) CountBoundACPSessionRoutesBySlot(ctx context.Context, connectionID string) (map[string]int, error) {
+	var rows []struct {
+		SlotID string `gorm:"column:slot_id"`
+		Count  int    `gorm:"column:route_count"`
+	}
+	if err := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Select("bound_slot_id AS slot_id, COUNT(*) AS route_count").
+		Where("connection_id = ? AND bound_slot_id IS NOT NULL", connectionID).
+		Group("bound_slot_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(rows))
+	for _, row := range rows {
+		counts[row.SlotID] = row.Count
+	}
+	return counts, nil
+}
+
+func (s *Store) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {
+	now := s.currentTime()
+	res := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Where("connection_id = ? AND bound_slot_id = ? AND bound_process_epoch = ?", connectionID, slotID, processEpoch).
+		Updates(map[string]any{
+			"last_slot_id":        gorm.Expr("bound_slot_id"),
+			"bound_slot_id":       nil,
+			"bound_process_epoch": nil,
+			"updated_at":          now,
+			"version":             gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return 0, mapGormErr(res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
+func (s *Store) ClearAllACPSessionRouteBindings(ctx context.Context) (int64, error) {
+	now := s.currentTime()
+	res := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Where("bound_process_epoch IS NOT NULL").
+		Updates(map[string]any{
+			"last_slot_id":        gorm.Expr("COALESCE(bound_slot_id, last_slot_id)"),
+			"bound_slot_id":       nil,
+			"bound_process_epoch": nil,
+			"updated_at":          now,
+			"version":             gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return 0, mapGormErr(res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 func (s *Store) UpsertAgentConnectionStatus(ctx context.Context, update AgentConnectionStatusUpdate) error {
@@ -1070,20 +1381,21 @@ func agentConnectionView(conn AgentConnection, _ string) control.AgentConnection
 	command, _ := decodeStringSlice(conn.CommandJSON)
 	env, _ := decodeStringMap(conn.EnvJSON)
 	return control.AgentConnectionView{
-		ID:           conn.ID,
-		RemoteID:     conn.RemoteID,
-		Name:         conn.Name,
-		CloudAgentID: stringValue(conn.CloudAgentID),
-		InstanceID:   conn.InstanceID,
-		AgentType:    conn.AgentType,
-		Harness:      conn.Harness,
-		Command:      command,
-		WorkingDir:   conn.WorkingDir,
-		Env:          env,
-		Enabled:      conn.Enabled,
-		DesiredState: control.DesiredState(conn.DesiredState),
-		Generation:   conn.Generation,
-		RestartNonce: conn.RestartNonce,
+		ID:              conn.ID,
+		RemoteID:        conn.RemoteID,
+		Name:            conn.Name,
+		CloudAgentID:    stringValue(conn.CloudAgentID),
+		InstanceID:      conn.InstanceID,
+		AgentType:       conn.AgentType,
+		Harness:         conn.Harness,
+		Command:         command,
+		WorkingDir:      conn.WorkingDir,
+		Env:             env,
+		Enabled:         conn.Enabled,
+		DesiredState:    control.DesiredState(conn.DesiredState),
+		DesiredACPSlots: conn.DesiredACPSlots,
+		Generation:      conn.Generation,
+		RestartNonce:    conn.RestartNonce,
 	}
 }
 
@@ -1228,11 +1540,85 @@ func agentConnectionStatusUpdates(status AgentConnectionStatus) map[string]any {
 	}
 }
 
+func acpSlotStatusModel(update ACPSlotStatusUpdate, now time.Time) ACPSlotStatus {
+	slotID := update.SlotID
+	if slotID == "" && update.ConnectionID != "" {
+		slotID = ACPSlotID(update.ConnectionID, update.Ordinal)
+	}
+	return ACPSlotStatus{
+		SlotID:            slotID,
+		ConnectionID:      update.ConnectionID,
+		Ordinal:           update.Ordinal,
+		ProcessEpoch:      update.ProcessEpoch,
+		PID:               update.PID,
+		ProcessGroupID:    update.ProcessGroupID,
+		ProcessStartToken: update.ProcessStartToken,
+		Phase:             stringDefault(update.Phase, "unknown"),
+		FailureClass:      update.FailureClass,
+		LastErrorCode:     update.LastErrorCode,
+		LastErrorMessage:  update.LastErrorMessage,
+		StartedAt:         update.StartedAt,
+		ReadyAt:           update.ReadyAt,
+		ActiveSince:       update.ActiveSince,
+		StoppedAt:         update.StoppedAt,
+		UpdatedAt:         now,
+	}
+}
+
+func acpSlotStatusView(status ACPSlotStatus) ACPSlotStatusView {
+	return ACPSlotStatusView{
+		SlotID:            status.SlotID,
+		ConnectionID:      status.ConnectionID,
+		Ordinal:           status.Ordinal,
+		ProcessEpoch:      status.ProcessEpoch,
+		PID:               status.PID,
+		ProcessGroupID:    status.ProcessGroupID,
+		ProcessStartToken: status.ProcessStartToken,
+		Phase:             status.Phase,
+		FailureClass:      status.FailureClass,
+		LastErrorCode:     status.LastErrorCode,
+		LastErrorMessage:  status.LastErrorMessage,
+		StartedAt:         formatTimePtr(status.StartedAt),
+		ReadyAt:           formatTimePtr(status.ReadyAt),
+		ActiveSince:       formatTimePtr(status.ActiveSince),
+		StoppedAt:         formatTimePtr(status.StoppedAt),
+		UpdatedAt:         status.UpdatedAt.Format(time.RFC3339Nano),
+	}
+}
+
+func acpSessionRouteView(route ACPSessionRoute) ACPSessionRouteView {
+	return ACPSessionRouteView{
+		ConnectionID:      route.ConnectionID,
+		NativeSessionID:   route.NativeSessionID,
+		BoundSlotID:       stringValue(route.BoundSlotID),
+		BoundProcessEpoch: stringValue(route.BoundProcessEpoch),
+		LastSlotID:        route.LastSlotID,
+		ResumeParamsJSON:  route.ResumeParamsJSON,
+		CreatedAt:         route.CreatedAt.Format(time.RFC3339Nano),
+		LastUsedAt:        route.LastUsedAt.Format(time.RFC3339Nano),
+		UpdatedAt:         route.UpdatedAt.Format(time.RFC3339Nano),
+		Version:           route.Version,
+	}
+}
+
 func boolDefault(value *bool, fallback bool) bool {
 	if value == nil {
 		return fallback
 	}
 	return *value
+}
+
+func agentConnectionUpdateRotatesRuntime(cmd control.UpdateAgentConnectionCommand) bool {
+	return cmd.Name != nil ||
+		cmd.CloudAgentID != nil ||
+		cmd.InstanceID != nil ||
+		cmd.AgentType != nil ||
+		cmd.Harness != nil ||
+		cmd.Command != nil ||
+		cmd.WorkingDir != nil ||
+		cmd.Env != nil ||
+		cmd.Enabled != nil ||
+		cmd.DesiredState != nil
 }
 
 func stringDefault(value, fallback string) string {

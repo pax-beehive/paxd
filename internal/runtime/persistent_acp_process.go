@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,24 +23,60 @@ import (
 // canceled supervisor contexts, config changes, and explicit restarts stop the
 // cached process.
 type PersistentACPProcessPool struct {
-	runner LocalACPProcessRunner
-	store  reliablemq.DurableStore
+	runner          LocalACPProcessRunner
+	store           reliablemq.DurableStore
+	versionProvider PaxdVersionProvider
+	reporter        ACPPoolCapabilityReporter
 
-	mu        sync.Mutex
-	processes map[string]*persistentACPProcess
+	mu               sync.Mutex
+	processes        map[string]*persistentACPProcess
+	reportGeneration int64
 }
 
 func NewPersistentACPProcessPool(
 	runner LocalACPProcessRunner,
 	store reliablemq.DurableStore,
+	opts ...PersistentACPProcessPoolOption,
 ) *PersistentACPProcessPool {
 	if runner == nil {
 		runner = ExecLocalACPProcessRunner{}
 	}
-	return &PersistentACPProcessPool{
-		runner:    runner,
-		store:     store,
-		processes: make(map[string]*persistentACPProcess),
+	pool := &PersistentACPProcessPool{
+		runner:          runner,
+		store:           store,
+		versionProvider: NoopPaxdVersionProvider{},
+		reporter:        NoopACPPoolCapabilityReporter{},
+		processes:       make(map[string]*persistentACPProcess),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(pool)
+		}
+	}
+	if pool.versionProvider == nil {
+		pool.versionProvider = NoopPaxdVersionProvider{}
+	}
+	if pool.reporter == nil {
+		pool.reporter = NoopACPPoolCapabilityReporter{}
+	}
+	return pool
+}
+
+type PersistentACPProcessPoolOption func(*PersistentACPProcessPool)
+
+func WithPaxdVersionProvider(provider PaxdVersionProvider) PersistentACPProcessPoolOption {
+	return func(pool *PersistentACPProcessPool) {
+		if provider != nil {
+			pool.versionProvider = provider
+		}
+	}
+}
+
+func WithACPPoolCapabilityReporter(reporter ACPPoolCapabilityReporter) PersistentACPProcessPoolOption {
+	return func(pool *PersistentACPProcessPool) {
+		if reporter != nil {
+			pool.reporter = reporter
+		}
 	}
 }
 
@@ -72,7 +109,16 @@ func (p *PersistentACPProcessPool) Acquire(
 		p.mu.Unlock()
 	}
 
-	proc, err := newPersistentACPProcess(ctx, p.runner, p.store, spec, fingerprint)
+	proc, err := newPersistentACPProcess(
+		ctx,
+		p.runner,
+		p.store,
+		spec,
+		fingerprint,
+		p.versionProvider.PaxdVersion(),
+		p.nextReportGeneration(),
+		p.reporter,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +141,13 @@ func (p *PersistentACPProcessPool) Acquire(
 	p.processes[key] = proc
 	p.mu.Unlock()
 	return proc, nil
+}
+
+func (p *PersistentACPProcessPool) nextReportGeneration() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reportGeneration++
+	return p.reportGeneration
 }
 
 func (p *PersistentACPProcessPool) Stop(spec AgentConnectionSpec) {
@@ -129,14 +182,20 @@ func (p *PersistentACPProcessPool) Forget(
 type persistentACPProcess struct {
 	spec        AgentConnectionSpec
 	fingerprint string
+	paxdVersion string
+	reportGen   int64
 	proc        LocalACPProcess
 	store       reliablemq.DurableStore
+	reporter    ACPPoolCapabilityReporter
 
-	mu          sync.Mutex
-	sender      reliablemq.Sender
-	senderToken int64
-	err         error
+	mu              sync.Mutex
+	outputSink      func(context.Context, []byte) error
+	outputSinkToken int64
+	err             error
+	initProfile     acpClientInitProfile
+	initResult      acpWorkerInitResult
 
+	initCh   chan acpInitCapture
 	done     chan struct{}
 	stopOnce sync.Once
 }
@@ -147,6 +206,9 @@ func newPersistentACPProcess(
 	store reliablemq.DurableStore,
 	spec AgentConnectionSpec,
 	fingerprint string,
+	paxdVersion string,
+	reportGeneration int64,
+	reporter ACPPoolCapabilityReporter,
 ) (*persistentACPProcess, error) {
 	proc, err := runner.Start(ctx, LocalACPProcessSpec{
 		Command:    spec.Command,
@@ -159,13 +221,24 @@ func newPersistentACPProcess(
 	p := &persistentACPProcess{
 		spec:        spec,
 		fingerprint: fingerprint,
+		paxdVersion: StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
+		reportGen:   reportGeneration,
 		proc:        proc,
 		store:       store,
+		reporter:    reporter,
+		initCh:      make(chan acpInitCapture, 1),
 		done:        make(chan struct{}),
+	}
+	if p.reporter == nil {
+		p.reporter = NoopACPPoolCapabilityReporter{}
 	}
 	go io.Copy(io.Discard, proc.Stderr())
 	go p.copyStdout()
 	go p.wait()
+	if err := p.initialize(ctx); err != nil {
+		p.Terminate(context.Background())
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -192,16 +265,16 @@ func (p *persistentACPProcess) Exited() bool {
 	}
 }
 
-func (p *persistentACPProcess) AttachSender(sender reliablemq.Sender) func() {
+func (p *persistentACPProcess) AttachOutputSink(sink func(context.Context, []byte) error) func() {
 	p.mu.Lock()
-	p.senderToken++
-	token := p.senderToken
-	p.sender = sender
+	p.outputSinkToken++
+	token := p.outputSinkToken
+	p.outputSink = sink
 	p.mu.Unlock()
 	return func() {
 		p.mu.Lock()
-		if p.senderToken == token {
-			p.sender = nil
+		if p.outputSinkToken == token {
+			p.outputSink = nil
 		}
 		p.mu.Unlock()
 	}
@@ -215,11 +288,94 @@ func (p *persistentACPProcess) Terminate(ctx context.Context) {
 	})
 }
 
+func (p *persistentACPProcess) InitializeResult() json.RawMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.initResult.Result) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), p.initResult.Result...)
+}
+
+func (p *persistentACPProcess) initialize(ctx context.Context) error {
+	profile, err := buildACPClientInitProfile(p.paxdVersion)
+	if err != nil {
+		return fmt.Errorf("build acp initialize profile: %w", err)
+	}
+	request, err := buildInternalACPInitializeRequest(profile)
+	if err != nil {
+		return fmt.Errorf("build acp initialize request: %w", err)
+	}
+	initializedNotification, err := buildInternalACPInitializedNotification()
+	if err != nil {
+		return fmt.Errorf("build acp initialized notification: %w", err)
+	}
+	p.mu.Lock()
+	p.initProfile = profile
+	p.mu.Unlock()
+	if err := writeACPStdin(p.proc.Stdin(), request); err != nil {
+		return fmt.Errorf("send acp initialize: %w", err)
+	}
+	log.Printf(
+		"[paxd] persistent ACP initialize request sent connection_id=%s transport_queue_id=%s request_id=%q",
+		p.spec.ConnectionID,
+		p.spec.TransportQueueID,
+		internalACPInitializeID,
+	)
+
+	select {
+	case capture := <-p.initCh:
+		if capture.err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialize_failed", capture.err.Error())
+			return capture.err
+		}
+		if err := writeACPStdin(p.proc.Stdin(), initializedNotification); err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialized_notification_failed", err.Error())
+			return fmt.Errorf("send acp initialized notification: %w", err)
+		}
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseReady, "", "")
+		return nil
+	case <-p.done:
+		if err := p.Err(); err != nil {
+			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "process_exited", err.Error())
+			return fmt.Errorf("acp process exited before initialize completed: %w", err)
+		}
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "process_exited", "acp process exited before initialize completed")
+		return fmt.Errorf("acp process exited before initialize completed")
+	case <-ctx.Done():
+		_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialize_canceled", ctx.Err().Error())
+		return fmt.Errorf("acp initialize: %w", ctx.Err())
+	}
+}
+
+func (p *persistentACPProcess) reportCapability(ctx context.Context, phase string, errCode string, errMessage string) error {
+	p.mu.Lock()
+	profile := p.initProfile
+	result := p.initResult
+	p.mu.Unlock()
+	report := ACPPoolCapabilityReport{
+		ConnectionID:         p.spec.ConnectionID,
+		ReportGeneration:     p.reportGen,
+		PaxdVersion:          p.paxdVersion,
+		CommandFingerprint:   p.fingerprint,
+		ClientProfileHash:    profile.ProfileHash,
+		WorkerResultHash:     result.ResultHash,
+		ProtocolVersion:      protocolVersionFromResult(result.Result),
+		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
+		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		InitPhase:            phase,
+		InitializedAt:        result.InitializedAt,
+		LastErrorCode:        errCode,
+		LastErrorMessage:     errMessage,
+	}.WithDefaults()
+	return p.reporter.ReportACPPoolCapability(ctx, report)
+}
+
 func (p *persistentACPProcess) wait() {
 	err := p.proc.Wait()
 	p.mu.Lock()
 	p.err = err
-	p.sender = nil
+	p.outputSink = nil
 	p.mu.Unlock()
 	close(p.done)
 }
@@ -238,6 +394,9 @@ func (p *persistentACPProcess) copyStdout() {
 					)
 					p.Terminate(context.Background())
 					return
+				}
+				if p.captureInitializeResponse(line) {
+					continue
 				}
 				if sendErr := p.sendOutbound(context.Background(), line); sendErr != nil {
 					log.Printf(
@@ -264,25 +423,47 @@ func (p *persistentACPProcess) copyStdout() {
 	}
 }
 
-func (p *persistentACPProcess) sendOutbound(ctx context.Context, payload []byte) error {
-	frame, err := p.store.AppendOutboundData(ctx, p.spec.TransportQueueID, reliablemq.StreamACP, append([]byte(nil), payload...), reliablemq.Metadata{
-		"agent_id": p.spec.CloudAgentID,
-	})
-	if err != nil {
-		return err
+func (p *persistentACPProcess) captureInitializeResponse(line []byte) bool {
+	msg, ok := parseACPRPCMessage(line)
+	if !ok || !isInternalACPInitializeResponse(msg) {
+		return false
 	}
+	capture := acpInitCapture{}
+	if msg.Error != nil {
+		capture.err = fmt.Errorf("acp initialize rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+	} else {
+		result := bytes.TrimSpace(msg.Result)
+		if len(result) == 0 {
+			result = []byte(`{}`)
+		}
+		canonicalResult, err := canonicalJSON(json.RawMessage(result))
+		if err != nil {
+			capture.err = fmt.Errorf("canonicalize acp initialize result: %w", err)
+		} else {
+			p.mu.Lock()
+			p.initResult = acpWorkerInitResult{
+				Result:        canonicalResult,
+				ResultHash:    hashBytes(canonicalResult),
+				InitializedAt: time.Now(),
+			}
+			p.mu.Unlock()
+		}
+	}
+	select {
+	case p.initCh <- capture:
+	default:
+	}
+	return true
+}
 
+func (p *persistentACPProcess) sendOutbound(ctx context.Context, payload []byte) error {
 	p.mu.Lock()
-	sender := p.sender
+	sink := p.outputSink
 	p.mu.Unlock()
-	if sender == nil {
-		return nil
+	if sink == nil {
+		return fmt.Errorf("persistent ACP process output sink is not attached")
 	}
-	if err := sender.Send(ctx, reliablemq.EnvelopeFromFrame(frame)); err != nil {
-		_ = p.store.RecordSendFailure(ctx, frame.Key, err.Error())
-		return nil
-	}
-	return p.store.MarkSent(ctx, frame.Key)
+	return sink(ctx, append([]byte(nil), payload...))
 }
 
 func persistentACPProcessKey(spec AgentConnectionSpec) string {

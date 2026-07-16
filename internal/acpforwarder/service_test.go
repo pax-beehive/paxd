@@ -3,6 +3,7 @@ package acpforwarder
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -193,9 +194,12 @@ func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T)
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close()
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := testDataEnvelope(7, payload)
+	frame, err := testDataEnvelope(1, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +213,7 @@ func TestCopyWSToStdinDuplicateInboundAcksWithoutDuplicateDispatch(t *testing.T)
 		}
 		ack := decodeTestEnvelope(t, ackBytes)
 		if ack.Type != reliablemq.EnvelopeTypeAck || ack.QueueID != "conn_1" ||
-			ack.Stream != reliablemq.StreamACP || ack.Seq != 7 {
+			ack.Stream != reliablemq.StreamACP || ack.Seq != 1 {
 			t.Fatalf("ack %d = %+v", i, ack)
 		}
 	}
@@ -264,9 +268,12 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close()
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := testDataEnvelope(9, payload)
+	frame, err := testDataEnvelope(1, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +287,7 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 	}
 	ack := decodeTestEnvelope(t, ackBytes)
 	if ack.Type != reliablemq.EnvelopeTypeAck || ack.QueueID != "conn_1" ||
-		ack.Stream != reliablemq.StreamACP || ack.Seq != 9 {
+		ack.Stream != reliablemq.StreamACP || ack.Seq != 1 {
 		t.Fatalf("ack = %+v", ack)
 	}
 
@@ -296,7 +303,7 @@ func TestCopyWSToStdinPersistsInboundFrameAndAcks(t *testing.T) {
 	stored := waitReliableFrame(t, journal, reliablemq.FrameKey{
 		QueueID:   "conn_1",
 		Stream:    reliablemq.StreamACP,
-		Seq:       9,
+		Seq:       1,
 		Direction: reliablemq.DirectionInbound,
 	}, func(frame reliablemq.Frame) bool {
 		return frame.Status == reliablemq.StatusApplied && string(frame.Payload) == string(payload)
@@ -339,9 +346,12 @@ func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close()
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
 
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	frame, err := testDataEnvelope(11, payload)
+	frame, err := testDataEnvelope(1, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +371,7 @@ func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 	stored := waitReliableFrame(t, journal, reliablemq.FrameKey{
 		QueueID:   "conn_1",
 		Stream:    reliablemq.StreamACP,
-		Seq:       11,
+		Seq:       1,
 		Direction: reliablemq.DirectionInbound,
 	}, func(frame reliablemq.Frame) bool {
 		return frame.Status == reliablemq.StatusReceived &&
@@ -450,6 +460,10 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 	})
 	var writeMu sync.Mutex
 	payload := []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+	stdout, stdoutWriter := io.Pipe()
+	defer stdout.Close()
+	defer stdoutWriter.Close()
+	copyDone := make(chan error, 1)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := testUpgrader.Upgrade(w, r, nil)
@@ -458,9 +472,7 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		if err := svc.copyStdoutToWS(bytes.NewReader(append(payload, '\n')), conn, &writeMu); err != nil {
-			t.Errorf("copyStdoutToWS() error = %v", err)
-		}
+		copyDone <- svc.copyStdoutToWS(stdout, conn, &writeMu)
 	}))
 	defer server.Close()
 
@@ -469,6 +481,14 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := stdoutWriter.Write(append(payload, '\n'))
+		writeDone <- writeErr
+	}()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write stdout: %v", err)
+	}
 
 	_, frameBytes, err := client.ReadMessage()
 	if err != nil {
@@ -480,6 +500,12 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 		env.Seq != 1 || string(env.Payload) != string(payload) {
 		t.Fatalf("frame = %+v", env)
 	}
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatalf("close stdout: %v", err)
+	}
+	if err := <-copyDone; err != nil {
+		t.Fatalf("copyStdoutToWS() error = %v", err)
+	}
 
 	stored := waitReliableFrame(t, journal, reliablemq.FrameKey{
 		QueueID:   "conn_1",
@@ -487,9 +513,9 @@ func TestCopyStdoutToWSPersistsOutboundFrame(t *testing.T) {
 		Seq:       1,
 		Direction: reliablemq.DirectionOutbound,
 	}, func(frame reliablemq.Frame) bool {
-		return frame.Status == reliablemq.StatusSent && string(frame.Payload) == string(payload)
+		return frame.Status == reliablemq.StatusPending && string(frame.Payload) == string(payload)
 	})
-	if stored.Status != reliablemq.StatusSent || string(stored.Payload) != string(payload) {
+	if stored.Status != reliablemq.StatusPending || string(stored.Payload) != string(payload) {
 		t.Fatalf("stored frame = %+v", stored)
 	}
 }

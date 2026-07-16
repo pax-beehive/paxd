@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,231 @@ func TestAgentConnectionSupervisorWakeStartsTunnelSession(t *testing.T) {
 	if got := len(factory.specs()); got != 1 {
 		t.Fatalf("sessions started = %d, want 1", got)
 	}
+}
+
+func TestACPSlotSupervisorRestartsWithNewProcessEpochOnCommandFingerprintChange(t *testing.T) {
+	store := newFakeACPSlotStore()
+	initial := acpSlotSpec("slot_1", "conn_1", 1, 0)
+	initial.CommandFingerprint = "fingerprint_1"
+	store.setDesired([]runtimes.ACPSlotSpec{initial})
+	factory := &fakeACPSlotFactory{}
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	first := factory.waitSession(t, 0)
+	first.waitStarted(t)
+	firstEpoch := factory.specs()[0].ProcessEpoch
+	require.NotEmpty(t, firstEpoch)
+
+	generationOnly := acpSlotSpec("slot_1", "conn_1", 2, 0)
+	generationOnly.CommandFingerprint = initial.CommandFingerprint
+	store.setDesired([]runtimes.ACPSlotSpec{generationOnly})
+	require.NoError(t, sup.Reconcile(context.Background()))
+	require.Len(t, factory.specs(), 1)
+	require.Never(t, func() bool {
+		select {
+		case <-first.done:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, time.Millisecond, "generation-only update stopped the ACP slot")
+
+	changedCommand := generationOnly
+	changedCommand.CommandFingerprint = "fingerprint_2"
+	store.setDesired([]runtimes.ACPSlotSpec{changedCommand})
+	require.NoError(t, sup.Reconcile(context.Background()))
+	first.waitDone(t)
+	second := factory.waitSession(t, 1)
+	second.waitStarted(t)
+	secondEpoch := factory.specs()[1].ProcessEpoch
+
+	require.NotEmpty(t, secondEpoch)
+	assert.NotEqual(t, firstEpoch, secondEpoch)
+	assert.Equal(t, secondEpoch, store.latestStatus("slot_1").ProcessEpoch)
+}
+
+func TestACPSlotSupervisorStopsActiveSlotWhenDesiredRemoved(t *testing.T) {
+	store := newFakeACPSlotStore()
+	store.setDesired([]runtimes.ACPSlotSpec{acpSlotSpec("slot_1", "conn_1", 1, 0)})
+	factory := &fakeACPSlotFactory{}
+	stopped := make(chan runtimes.ACPSlotSpec, 1)
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			_ = ctx
+			stopped <- spec
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	session := factory.waitSession(t, 0)
+	session.waitStarted(t)
+	store.setDesired(nil)
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	session.waitDone(t)
+	select {
+	case spec := <-stopped:
+		assert.Equal(t, "slot_1", spec.SlotID)
+		assert.Equal(t, "conn_1", spec.ConnectionID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for active slot stop handler")
+	}
+	require.Eventually(t, func() bool {
+		return store.latestStatus("slot_1").Phase == PhaseStopped
+	}, 2*time.Second, time.Millisecond)
+}
+
+func TestACPSlotSupervisorWaitsForDrainBeforeStoppingActiveSlot(t *testing.T) {
+	store := newFakeACPSlotStore()
+	spec := acpSlotSpec("slot_1", "conn_1", 1, 0)
+	spec.CommandFingerprint = "fingerprint_1"
+	store.setDesired([]runtimes.ACPSlotSpec{spec})
+	factory := &fakeACPSlotFactory{}
+	drained := make(chan struct{})
+	drainStarted := make(chan runtimes.ACPSlotSpec, 1)
+	stopped := make(chan runtimes.ACPSlotSpec, 1)
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+		DrainHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) <-chan struct{} {
+			_ = ctx
+			drainStarted <- spec
+			return drained
+		},
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			_ = ctx
+			stopped <- spec
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	session := factory.waitSession(t, 0)
+	session.waitStarted(t)
+	processEpoch := factory.specs()[0].ProcessEpoch
+	require.NotEmpty(t, processEpoch)
+
+	store.setDesired(nil)
+	require.NoError(t, sup.Reconcile(context.Background()))
+	drainingSpec := <-drainStarted
+	assert.Equal(t, processEpoch, drainingSpec.ProcessEpoch)
+	assert.Equal(t, string(runtimes.ACPSlotPhaseDraining), store.latestStatus("slot_1").Phase)
+	select {
+	case <-session.done:
+		t.Fatal("active ACP slot stopped before drain completed")
+	default:
+	}
+	select {
+	case <-stopped:
+		t.Fatal("slot bindings were cleared before drain completed")
+	default:
+	}
+
+	close(drained)
+	stoppedSpec := <-stopped
+	assert.Equal(t, processEpoch, stoppedSpec.ProcessEpoch)
+	session.waitDone(t)
+	require.Eventually(t, func() bool {
+		return store.latestStatus("slot_1").Phase == PhaseStopped
+	}, 2*time.Second, time.Millisecond)
+}
+
+func TestACPSlotSupervisorDaemonStopInterruptsDrain(t *testing.T) {
+	store := newFakeACPSlotStore()
+	spec := acpSlotSpec("slot_1", "conn_1", 1, 0)
+	spec.CommandFingerprint = "fingerprint_1"
+	store.setDesired([]runtimes.ACPSlotSpec{spec})
+	factory := &fakeACPSlotFactory{}
+	drained := make(chan struct{})
+	stopped := make(chan runtimes.ACPSlotSpec, 1)
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+		DrainHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) <-chan struct{} {
+			return drained
+		},
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			stopped <- spec
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	session := factory.waitSession(t, 0)
+	session.waitStarted(t)
+	store.setDesired(nil)
+	require.NoError(t, sup.Reconcile(context.Background()))
+
+	shutdownCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sup.base.stopAll(shutdownCtx)
+	session.waitDone(t)
+	select {
+	case stoppedSpec := <-stopped:
+		assert.NotEmpty(t, stoppedSpec.ProcessEpoch)
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon stop did not interrupt draining ACP slot")
+	}
+}
+
+func TestACPSlotSupervisorScalesHighestOrdinalsFirstAndReusesSlotIDs(t *testing.T) {
+	desired := func(count int) []runtimes.ACPSlotSpec {
+		specs := make([]runtimes.ACPSlotSpec, 0, count)
+		for ordinal := 0; ordinal < count; ordinal++ {
+			spec := acpSlotSpec(fmt.Sprintf("slot_%d", ordinal), "conn_1", 1, 0)
+			spec.Ordinal = ordinal
+			spec.CommandFingerprint = "fingerprint_1"
+			specs = append(specs, spec)
+		}
+		return specs
+	}
+	store := newFakeACPSlotStore()
+	store.setDesired(desired(1))
+	factory := &fakeACPSlotFactory{}
+	var stoppedOrdinals []int
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: factory,
+		Clock:   newFakeClock(),
+		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+			_ = ctx
+			stoppedOrdinals = append(stoppedOrdinals, spec.Ordinal)
+		},
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	factory.waitSession(t, 0).waitStarted(t)
+	store.setDesired(desired(3))
+	require.NoError(t, sup.Reconcile(context.Background()))
+	factory.waitSession(t, 1).waitStarted(t)
+	factory.waitSession(t, 2).waitStarted(t)
+	firstSpecs := factory.specs()
+	require.Len(t, firstSpecs, 3)
+
+	store.setDesired(desired(1))
+	require.NoError(t, sup.Reconcile(context.Background()))
+	assert.Equal(t, []int{2, 1}, stoppedOrdinals)
+	factory.waitSession(t, 1).waitDone(t)
+	factory.waitSession(t, 2).waitDone(t)
+
+	store.setDesired(desired(3))
+	require.NoError(t, sup.Reconcile(context.Background()))
+	factory.waitSession(t, 3).waitStarted(t)
+	factory.waitSession(t, 4).waitStarted(t)
+	allSpecs := factory.specs()
+	require.Len(t, allSpecs, 5)
+	assert.Equal(t, "slot_1", allSpecs[3].SlotID)
+	assert.Equal(t, "slot_2", allSpecs[4].SlotID)
+	assert.NotEqual(t, firstSpecs[1].ProcessEpoch, allSpecs[3].ProcessEpoch)
+	assert.NotEqual(t, firstSpecs[2].ProcessEpoch, allSpecs[4].ProcessEpoch)
 }
 
 func TestAgentConnectionSupervisorObservedRuntimesReturnsCopiedSpecs(t *testing.T) {
@@ -245,9 +471,21 @@ func TestAgentConnectionBackoffResetsAfterConnectedTransientExit(t *testing.T) {
 func TestDesiredUpdateInterruptsRunningSessionAndCoalescesLatestSpec(t *testing.T) {
 	store := newFakeAgentStore()
 	store.setDesired([]runtimes.AgentConnectionSpec{agentSpec("conn_1", 1, 0)})
+	firstExitGate := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-firstExitGate:
+		default:
+			close(firstExitGate)
+		}
+	})
 	factory := &fakeAgentFactory{
 		makeSession: func(spec runtimes.AgentConnectionSpec, index int) *scriptedSession {
-			return blockingSession()
+			session := blockingSession()
+			if index == 0 {
+				session.cancelGate = firstExitGate
+			}
+			return session
 		},
 	}
 	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
@@ -269,6 +507,7 @@ func TestDesiredUpdateInterruptsRunningSessionAndCoalescesLatestSpec(t *testing.
 	if err := sup.Reconcile(context.Background()); err != nil {
 		t.Fatalf("generation 3 Reconcile() error = %v", err)
 	}
+	close(firstExitGate)
 
 	factory.waitSession(t, 1).waitStarted(t)
 	specs := factory.specs()
@@ -590,6 +829,19 @@ func agentSpec(id string, generation, restartNonce int64) runtimes.AgentConnecti
 	}
 }
 
+func acpSlotSpec(slotID string, connectionID string, generation, restartNonce int64) runtimes.ACPSlotSpec {
+	return runtimes.ACPSlotSpec{
+		ConnectionID:     connectionID,
+		CloudAgentID:     "agent_1",
+		TransportQueueID: "agent_1:queue_1",
+		SlotID:           slotID,
+		Ordinal:          0,
+		Command:          []string{"codex", "serve"},
+		Generation:       generation,
+		RestartNonce:     restartNonce,
+	}
+}
+
 type fakeRemoteStore struct {
 	mu       sync.Mutex
 	desired  []runtimes.RemoteSpec
@@ -706,6 +958,45 @@ func (s *fakeAgentStore) desiredQueueID(connectionID string) string {
 }
 
 func (s *fakeAgentStore) latestStatus(id string) daemonstore.AgentConnectionStatusUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latest[id]
+}
+
+type fakeACPSlotStore struct {
+	mu       sync.Mutex
+	desired  []runtimes.ACPSlotSpec
+	statuses []daemonstore.ACPSlotStatusUpdate
+	latest   map[string]daemonstore.ACPSlotStatusUpdate
+}
+
+func newFakeACPSlotStore() *fakeACPSlotStore {
+	return &fakeACPSlotStore{latest: make(map[string]daemonstore.ACPSlotStatusUpdate)}
+}
+
+func (s *fakeACPSlotStore) setDesired(specs []runtimes.ACPSlotSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.desired = append([]runtimes.ACPSlotSpec(nil), specs...)
+}
+
+func (s *fakeACPSlotStore) ListDesiredACPSlots(ctx context.Context) ([]runtimes.ACPSlotSpec, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]runtimes.ACPSlotSpec(nil), s.desired...), nil
+}
+
+func (s *fakeACPSlotStore) UpsertACPSlotStatus(ctx context.Context, update daemonstore.ACPSlotStatusUpdate) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latest[update.SlotID] = update
+	s.statuses = append(s.statuses, update)
+	return nil
+}
+
+func (s *fakeACPSlotStore) latestStatus(id string) daemonstore.ACPSlotStatusUpdate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.latest[id]
@@ -830,11 +1121,61 @@ func (f *fakeAgentFactory) specs() []runtimes.AgentConnectionSpec {
 	return append([]runtimes.AgentConnectionSpec(nil), f.gotSpecs...)
 }
 
+type fakeACPSlotFactory struct {
+	mu          sync.Mutex
+	makeSession func(runtimes.ACPSlotSpec, int) *scriptedSession
+	gotSpecs    []runtimes.ACPSlotSpec
+	sessions    []*scriptedSession
+}
+
+func (f *fakeACPSlotFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	index := len(f.sessions)
+	session := blockingSession()
+	if f.makeSession != nil {
+		session = f.makeSession(spec, index)
+	}
+	f.gotSpecs = append(f.gotSpecs, spec)
+	if session != nil {
+		f.sessions = append(f.sessions, session)
+		return session
+	}
+	return nil
+}
+
+func (f *fakeACPSlotFactory) waitSession(t *testing.T, index int) *scriptedSession {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		f.mu.Lock()
+		if len(f.sessions) > index {
+			session := f.sessions[index]
+			f.mu.Unlock()
+			return session
+		}
+		f.mu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for acp slot session %d", index)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func (f *fakeACPSlotFactory) specs() []runtimes.ACPSlotSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtimes.ACPSlotSpec(nil), f.gotSpecs...)
+}
+
 type scriptedSession struct {
-	started chan struct{}
-	done    chan struct{}
-	release chan runtimes.Exit
-	once    sync.Once
+	started    chan struct{}
+	done       chan struct{}
+	release    chan runtimes.Exit
+	cancelGate <-chan struct{}
+	once       sync.Once
 }
 
 func blockingSession() *scriptedSession {
@@ -858,6 +1199,9 @@ func (s *scriptedSession) Run(ctx context.Context) runtimes.Exit {
 	case exit := <-s.release:
 		return exit
 	case <-ctx.Done():
+		if s.cancelGate != nil {
+			<-s.cancelGate
+		}
 		return runtimes.CanceledExit(ctx.Err())
 	}
 }
@@ -868,6 +1212,15 @@ func (s *scriptedSession) waitStarted(t *testing.T) {
 	case <-s.started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for session start")
+	}
+}
+
+func (s *scriptedSession) waitDone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for session done")
 	}
 }
 

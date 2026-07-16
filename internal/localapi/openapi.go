@@ -302,7 +302,7 @@ func requestExample(schema string) map[string]any {
 	case "UpdateAgentConnectionCommand":
 		return map[string]any{
 			"name":          "Codex Main",
-			"command":       []any{"npx", "-y", "@zed-industries/codex-acp"},
+			"command":       []any{"npx", "-y", "@agentclientprotocol/codex-acp"},
 			"working_dir":   "/Users/me/workspace",
 			"enabled":       true,
 			"desired_state": "running",

@@ -149,10 +149,10 @@ func DefaultDetectors() []Detector {
 			FallbackCommand: []string{
 				"npx",
 				"-y",
-				"@zed-industries/codex-acp",
+				"@agentclientprotocol/codex-acp",
 			},
 			Source:      "official",
-			InstallHint: "install codex-acp or use fallback: npx -y @zed-industries/codex-acp",
+			InstallHint: "install codex-acp or use fallback: npx -y @agentclientprotocol/codex-acp",
 		},
 		CommandDetector{
 			Harness:     "claude-code",
@@ -172,6 +172,28 @@ func DefaultDetectors() []Detector {
 			Command:     []string{"gemini", "--acp"},
 			Source:      "native",
 			InstallHint: "install gemini with ACP support",
+		},
+		CommandDetector{
+			Harness:     "opencode",
+			DisplayName: "OpenCode",
+			Command:     []string{"opencode", "acp"},
+			Source:      "first-party",
+			InstallHint: "install OpenCode with ACP support; run opencode acp",
+		},
+		CommandDetector{
+			Harness:     "openclaw",
+			DisplayName: "OpenClaw",
+			Command:     []string{"openclaw", "acp"},
+			Source:      "gateway-bridge",
+			InstallHint: "install OpenClaw and configure a reachable Gateway; run openclaw acp",
+		},
+		CommandDetector{
+			Harness:         "pi",
+			DisplayName:     "Pi Agent",
+			Command:         []string{"pi-acp"},
+			FallbackCommand: []string{"npx", "-y", "pi-acp"},
+			Source:          "community",
+			InstallHint:     "install pi-acp or use fallback: npx -y pi-acp; requires the Pi CLI to be configured",
 		},
 	}
 }

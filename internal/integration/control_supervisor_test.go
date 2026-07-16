@@ -55,6 +55,74 @@ func TestLocalAPIControlStoreAndSupervisorIntegration(t *testing.T) {
 	assert.NotNil(t, result.AgentConnections.Items[0].Status)
 }
 
+func TestDesiredSlotHotScaleDoesNotRestartAgentTunnel(t *testing.T) {
+	ctx := context.Background()
+	store := openIntegrationStore(t)
+	_, err := store.CreateRemote(ctx, *createRemoteCommand("cmd_remote_create_scale").CreateRemote)
+	require.NoError(t, err)
+	_, err = store.CreateAgentConnection(ctx, *createAgentConnectionCommand("cmd_agent_create_scale").CreateAgentConnection)
+	require.NoError(t, err)
+
+	agentFactory := &recordingAgentFactory{}
+	slotFactory := &recordingACPSlotFactory{}
+	agentSupervisor := supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
+		Store:   store,
+		Factory: agentFactory,
+	})
+	slotSupervisor := supervisor.NewACPSlotSupervisor(supervisor.ACPSlotSupervisorOptions{
+		Store:   store,
+		Factory: slotFactory,
+	})
+	require.NoError(t, agentSupervisor.Reconcile(ctx))
+	require.NoError(t, slotSupervisor.Reconcile(ctx))
+	require.Len(t, agentFactory.specs(), 1)
+	require.Len(t, slotFactory.specs(), 1)
+	tunnelSession := agentFactory.sessions()[0]
+
+	desiredSlots := 3
+	updated, err := store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{
+		ConnectionID: "conn_codex",
+		DesiredSlots: &desiredSlots,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.Generation)
+	require.NoError(t, agentSupervisor.Reconcile(ctx))
+	require.NoError(t, slotSupervisor.Reconcile(ctx))
+	require.Len(t, agentFactory.specs(), 1)
+	require.Len(t, slotFactory.specs(), 3)
+	assert.False(t, tunnelSession.canceled())
+	assert.Equal(t, []int{0, 1, 2}, []int{
+		slotFactory.specs()[0].Ordinal,
+		slotFactory.specs()[1].Ordinal,
+		slotFactory.specs()[2].Ordinal,
+	})
+
+	desiredSlots = 1
+	updated, err = store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{
+		ConnectionID: "conn_codex",
+		DesiredSlots: &desiredSlots,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.Generation)
+	require.NoError(t, agentSupervisor.Reconcile(ctx))
+	require.NoError(t, slotSupervisor.Reconcile(ctx))
+	require.Len(t, agentFactory.specs(), 1)
+	assert.False(t, tunnelSession.canceled())
+	require.Eventually(t, func() bool {
+		sessions := slotFactory.sessions()
+		return len(sessions) == 3 && sessions[1].canceled() && sessions[2].canceled()
+	}, time.Second, 10*time.Millisecond)
+
+	enabled := false
+	_, err = store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{
+		ConnectionID: "conn_codex",
+		Enabled:      &enabled,
+	})
+	require.NoError(t, err)
+	require.NoError(t, agentSupervisor.Reconcile(ctx))
+	require.NoError(t, slotSupervisor.Reconcile(ctx))
+}
+
 func TestLocalObservationWorksThroughLocalAPIWithoutRemotes(t *testing.T) {
 	store := openIntegrationStore(t)
 	harnesses := harnessregistry.New(store, staticDetector{
@@ -439,6 +507,7 @@ func getJSON(t *testing.T, handler http.Handler, path string, wantStatus int, de
 type supervisorWaker struct {
 	remotes *supervisor.RemoteSupervisor
 	agents  *supervisor.AgentConnectionSupervisor
+	slots   *supervisor.ACPSlotSupervisor
 }
 
 func (w supervisorWaker) WakeRemotes() {
@@ -447,6 +516,12 @@ func (w supervisorWaker) WakeRemotes() {
 
 func (w supervisorWaker) WakeAgentConnections() {
 	w.agents.Wake()
+}
+
+func (w supervisorWaker) WakeACPSlots() {
+	if w.slots != nil {
+		w.slots.Wake()
+	}
 }
 
 type staticDetector struct {
@@ -533,6 +608,33 @@ func (f *recordingAgentFactory) specs() []runtimes.AgentConnectionSpec {
 }
 
 func (f *recordingAgentFactory) sessions() []*blockingSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*blockingSession(nil), f.runs...)
+}
+
+type recordingACPSlotFactory struct {
+	mu       sync.Mutex
+	specsLog []runtimes.ACPSlotSpec
+	runs     []*blockingSession
+}
+
+func (f *recordingACPSlotFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
+	session := newBlockingSession()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.specsLog = append(f.specsLog, spec)
+	f.runs = append(f.runs, session)
+	return session
+}
+
+func (f *recordingACPSlotFactory) specs() []runtimes.ACPSlotSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtimes.ACPSlotSpec(nil), f.specsLog...)
+}
+
+func (f *recordingACPSlotFactory) sessions() []*blockingSession {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]*blockingSession(nil), f.runs...)
