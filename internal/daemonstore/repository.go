@@ -802,6 +802,7 @@ func (s *Store) ListDesiredACPSlots(ctx context.Context) ([]ACPSlotDesiredSpec, 
 		for ordinal := 0; ordinal < conn.DesiredACPSlots; ordinal++ {
 			specs = append(specs, ACPSlotDesiredSpec{
 				ConnectionID:       conn.ID,
+				RemoteID:           conn.RemoteID,
 				CloudAgentID:       stringValue(conn.CloudAgentID),
 				TransportQueueID:   transportQueueID,
 				SlotID:             ACPSlotID(conn.ID, ordinal),

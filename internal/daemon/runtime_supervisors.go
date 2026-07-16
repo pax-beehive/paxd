@@ -112,10 +112,11 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	s.acpSlots = supervisor.NewACPSlotSupervisor(supervisor.ACPSlotSupervisorOptions{
 		Store: store,
 		Factory: acpSlotSessionFactory{
-			runner:       runtimes.ExecLocalACPProcessRunner{},
-			registry:     acpPoolRegistry,
-			paxdVersion:  s.paxdVersion,
-			readyHandler: acpSlotReadyStatusWriter(store),
+			runner:            runtimes.ExecLocalACPProcessRunner{},
+			registry:          acpPoolRegistry,
+			paxdVersion:       s.paxdVersion,
+			readyHandler:      acpSlotReadyStatusWriter(store),
+			capabilityHandler: acpSlotCapabilityWriter(s.acpCapabilityReports, s.statusHub),
 		},
 		DrainHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) <-chan struct{} {
 			_ = ctx
@@ -280,20 +281,44 @@ func (f agentTunnelSessionFactory) NewAgentTunnelSession(spec runtimes.AgentConn
 }
 
 type acpSlotSessionFactory struct {
-	runner       runtimes.LocalACPProcessRunner
-	registry     *runtimes.ACPPoolRegistry
-	paxdVersion  string
-	readyHandler func(context.Context, runtimes.ACPSlotSpec)
+	runner            runtimes.LocalACPProcessRunner
+	registry          *runtimes.ACPPoolRegistry
+	paxdVersion       string
+	readyHandler      func(context.Context, runtimes.ACPSlotSpec)
+	capabilityHandler func(context.Context, runtimes.ACPSlotSpec, *runtimes.ACPPoolCapabilityReport)
 }
 
 func (f acpSlotSessionFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
 	spec.PaxdVersion = sFirstNonEmpty(spec.PaxdVersion, f.paxdVersion)
 	return runtimes.NewACPSlotSession(runtimes.ACPSlotSessionConfig{
-		Spec:         spec,
-		Runner:       f.runner,
-		Registry:     f.registry,
-		ReadyHandler: f.readyHandler,
+		Spec:              spec,
+		Runner:            f.runner,
+		Registry:          f.registry,
+		ReadyHandler:      f.readyHandler,
+		CapabilityHandler: f.capabilityHandler,
 	})
+}
+
+func acpSlotCapabilityWriter(
+	reports *acpCapabilityReports,
+	status *statusHub,
+) func(context.Context, runtimes.ACPSlotSpec, *runtimes.ACPPoolCapabilityReport) {
+	return func(ctx context.Context, spec runtimes.ACPSlotSpec, report *runtimes.ACPPoolCapabilityReport) {
+		if reports != nil {
+			if err := reports.ReportACPSlotCapability(ctx, spec, report); err != nil {
+				log.Printf(
+					"[paxd] acp slot capability report failed connection_id=%s slot_id=%s process_epoch=%s: %v",
+					spec.ConnectionID,
+					spec.SlotID,
+					spec.ProcessEpoch,
+					err,
+				)
+			}
+		}
+		if status != nil {
+			status.Poke(spec.RemoteID)
+		}
+	}
 }
 
 func acpSlotReadyStatusWriter(store *daemonstore.Store) func(context.Context, runtimes.ACPSlotSpec) {

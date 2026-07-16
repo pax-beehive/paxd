@@ -24,6 +24,7 @@ const (
 
 type ACPSlotSpec struct {
 	ConnectionID       string
+	RemoteID           string
 	CloudAgentID       string
 	TransportQueueID   string
 	SlotID             string
@@ -54,6 +55,7 @@ type ACPSlotEvent struct {
 	Ordinal      int
 	Phase        ACPSlotPhase
 	Payload      json.RawMessage
+	Capability   *ACPPoolCapabilityReport
 	Err          error
 	At           time.Time
 }
@@ -157,8 +159,33 @@ func (s *ACPSlot) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.phase = ACPSlotPhaseReady
 	s.mu.Unlock()
-	s.emit(ACPSlotEvent{Type: ACPSlotEventReady, Phase: ACPSlotPhaseReady})
+	report := s.capabilityReport()
+	s.emit(ACPSlotEvent{
+		Type:       ACPSlotEventReady,
+		Phase:      ACPSlotPhaseReady,
+		Capability: &report,
+	})
 	return nil
+}
+
+func (s *ACPSlot) capabilityReport() ACPPoolCapabilityReport {
+	s.mu.Lock()
+	profile := s.initProfile
+	result := s.initResult
+	s.mu.Unlock()
+	return ACPPoolCapabilityReport{
+		ConnectionID:         s.spec.ConnectionID,
+		ReportGeneration:     s.spec.Generation,
+		PaxdVersion:          s.spec.PaxdVersion,
+		CommandFingerprint:   s.spec.CommandFingerprint,
+		ClientProfileHash:    profile.ProfileHash,
+		WorkerResultHash:     result.ResultHash,
+		ProtocolVersion:      protocolVersionFromResult(result.Result),
+		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
+		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		InitPhase:            ACPPoolInitPhaseReady,
+		InitializedAt:        result.InitializedAt,
+	}.WithDefaults()
 }
 
 func (s *ACPSlot) SlotID() string {

@@ -75,22 +75,33 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 	defer cancel()
 	proc := newSlotFakeLocalACPProcess()
 	ready := make(chan ACPSlotSpec, 1)
+	capabilities := make(chan ACPPoolCapabilityReport, 1)
+	capabilityRemoved := make(chan ACPSlotSpec, 1)
 	registry := NewACPPoolRegistry(ACPRouteStoreFactoryFunc(func(connectionID string) ACPRouteStore {
 		return newFakeACPRouteStore(connectionID)
 	}))
 	session := NewACPSlotSession(ACPSlotSessionConfig{
 		Spec: ACPSlotSpec{
-			ConnectionID: "conn_1",
-			SlotID:       "slot_a",
-			Ordinal:      0,
-			ProcessEpoch: "epoch_a",
-			Command:      []string{"fake-acp"},
-			PaxdVersion:  "test",
+			ConnectionID:       "conn_1",
+			RemoteID:           "local",
+			SlotID:             "slot_a",
+			Ordinal:            0,
+			ProcessEpoch:       "epoch_a",
+			Command:            []string{"fake-acp"},
+			PaxdVersion:        "test",
+			CommandFingerprint: "fingerprint_a",
 		},
 		Runner:   slotFakeLocalACPProcessRunner{proc: proc},
 		Registry: registry,
 		ReadyHandler: func(ctx context.Context, spec ACPSlotSpec) {
 			ready <- spec
+		},
+		CapabilityHandler: func(ctx context.Context, spec ACPSlotSpec, report *ACPPoolCapabilityReport) {
+			if report == nil {
+				capabilityRemoved <- spec
+				return
+			}
+			capabilities <- *report
 		},
 	})
 	done := make(chan Exit, 1)
@@ -108,11 +119,31 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 	case <-time.After(eventuallyWait):
 		t.Fatal("slot session did not report ready")
 	}
+	select {
+	case report := <-capabilities:
+		assert.Equal(t, "conn_1", report.ConnectionID)
+		assert.Equal(t, "test", report.PaxdVersion)
+		assert.Equal(t, "fingerprint_a", report.CommandFingerprint)
+		assert.NotEmpty(t, report.ClientProfileHash)
+		assert.NotEmpty(t, report.WorkerResultHash)
+		assert.Equal(t, 1, report.ProtocolVersion)
+		assert.Equal(t, ACPPoolInitPhaseReady, report.InitPhase)
+		assert.False(t, report.InitializedAt.IsZero())
+	case <-time.After(eventuallyWait):
+		t.Fatal("slot session did not report capability")
+	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(eventuallyWait):
 		t.Fatal("slot session did not stop after cancellation")
+	}
+	select {
+	case spec := <-capabilityRemoved:
+		assert.Equal(t, "slot_a", spec.SlotID)
+		assert.Equal(t, "epoch_a", spec.ProcessEpoch)
+	case <-time.After(eventuallyWait):
+		t.Fatal("slot session did not remove capability after stopping")
 	}
 }
 

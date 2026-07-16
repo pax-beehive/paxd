@@ -218,10 +218,11 @@ func (p *ACPPool) OutputSinkForEngine(spec AgentConnectionSpec, engine ReliableE
 }
 
 type ACPSlotSessionConfig struct {
-	Spec         ACPSlotSpec
-	Runner       LocalACPProcessRunner
-	Registry     *ACPPoolRegistry
-	ReadyHandler func(context.Context, ACPSlotSpec)
+	Spec              ACPSlotSpec
+	Runner            LocalACPProcessRunner
+	Registry          *ACPPoolRegistry
+	ReadyHandler      func(context.Context, ACPSlotSpec)
+	CapabilityHandler func(context.Context, ACPSlotSpec, *ACPPoolCapabilityReport)
 }
 
 type ACPSlotSession struct {
@@ -262,6 +263,9 @@ func (s *ACPSlotSession) Run(ctx context.Context) Exit {
 		switch event.Type {
 		case ACPSlotEventReady:
 			pool.UpsertSlot(slot)
+			if s.cfg.CapabilityHandler != nil {
+				s.cfg.CapabilityHandler(context.Background(), spec, event.Capability)
+			}
 			if s.cfg.ReadyHandler != nil {
 				s.cfg.ReadyHandler(context.Background(), spec)
 			}
@@ -271,6 +275,9 @@ func (s *ACPSlotSession) Run(ctx context.Context) Exit {
 			}
 		case ACPSlotEventTerminal:
 			pool.RemoveSlot(context.Background(), event.SlotID, event.ProcessEpoch)
+			if s.cfg.CapabilityHandler != nil {
+				s.cfg.CapabilityHandler(context.Background(), spec, nil)
+			}
 		}
 	})))
 	if err := slot.Start(ctx); err != nil {

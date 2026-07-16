@@ -820,6 +820,7 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	for ordinal, slotSpec := range slotSpecs {
 		require.Equal(t, ACPSlotID("conn_codex", ordinal), slotSpec.SlotID)
 		require.Equal(t, "conn_codex", slotSpec.ConnectionID)
+		require.Equal(t, "remote_prod", slotSpec.RemoteID)
 		require.Equal(t, ordinal, slotSpec.Ordinal)
 		require.Equal(t, "agent_runtime", slotSpec.CloudAgentID)
 		require.Equal(t, firstQueueID, slotSpec.TransportQueueID)
