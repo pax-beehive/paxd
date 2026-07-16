@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -142,7 +144,53 @@ func (p *ACPPool) HandleManagerFrameForSession(ctx context.Context, nativeSessio
 	if p == nil {
 		return fmt.Errorf("acp pool is required")
 	}
-	return p.router.HandleManagerFrameForSession(ctx, nativeSessionID, payload)
+	err := p.router.HandleManagerFrameForSession(ctx, nativeSessionID, payload)
+	if err == nil {
+		return nil
+	}
+	response, ok := acpRouterErrorResponse(payload, err)
+	if !ok {
+		return err
+	}
+	return p.router.output.EmitManagerFrame(ctx, nativeSessionID, response)
+}
+
+func acpRouterErrorResponse(payload []byte, err error) ([]byte, bool) {
+	var routerErr ACPRouterError
+	if !errors.As(err, &routerErr) {
+		return nil, false
+	}
+	request, ok := parseACPRPCMessage(payload)
+	if !ok || request.Method == "" || len(request.ID) == 0 {
+		return nil, false
+	}
+	code := int64(-32000)
+	data := map[string]any{"kind": routerErr.Code}
+	switch routerErr.Code {
+	case "slot_busy", "session_busy":
+		code = -32001
+		data["retryable"] = true
+	case "session_route_missing":
+		code = -32002
+		data["requiresResume"] = true
+	case "slot_unavailable", "slot_draining":
+		code = -32003
+		data["retryable"] = true
+	}
+	dataPayload, marshalErr := json.Marshal(data)
+	if marshalErr != nil {
+		return nil, false
+	}
+	response, marshalErr := json.Marshal(acpRPCMessage{
+		JSONRPC: "2.0",
+		ID:      append(json.RawMessage(nil), request.ID...),
+		Error: &acpRPCError{
+			Code:    code,
+			Message: routerErr.Message,
+			Data:    dataPayload,
+		},
+	})
+	return response, marshalErr == nil
 }
 
 func (p *ACPPool) HandleSlotFrame(ctx context.Context, slotID string, processEpoch string, payload []byte) error {

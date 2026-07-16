@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,65 @@ func TestACPPoolRemoveSlotClearsOnlyMatchingProcessEpoch(t *testing.T) {
 	assert.Empty(t, route.BoundSlotID)
 	assert.Empty(t, route.BoundProcessEpoch)
 	assert.Equal(t, "slot_1", route.LastSlotID)
+}
+
+func TestACPPoolReturnsTypedRouterErrorsToManager(t *testing.T) {
+	pool := NewACPPool("conn_1", newFakeACPRouteStore("conn_1"))
+	type emittedFrame struct {
+		nativeSessionID string
+		payload         []byte
+	}
+	emitted := make(chan emittedFrame, 1)
+	pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(_ context.Context, nativeSessionID string, payload []byte) error {
+		emitted <- emittedFrame{nativeSessionID: nativeSessionID, payload: append([]byte(nil), payload...)}
+		return nil
+	}))
+
+	require.NoError(t, pool.HandleManagerFrameForSession(
+		context.Background(),
+		"native-missing",
+		[]byte(`{"jsonrpc":"2.0","id":"request-7","method":"session/prompt","params":{"sessionId":"native-missing","prompt":[]}}`),
+	))
+	frame := <-emitted
+	assert.Equal(t, "native-missing", frame.nativeSessionID)
+	var response struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int64 `json:"code"`
+			Data struct {
+				Kind           string `json:"kind"`
+				RequiresResume bool   `json:"requiresResume"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(frame.payload, &response))
+	assert.JSONEq(t, `"request-7"`, string(response.ID))
+	assert.Equal(t, int64(-32002), response.Error.Code)
+	assert.Equal(t, "session_route_missing", response.Error.Data.Kind)
+	assert.True(t, response.Error.Data.RequiresResume)
+}
+
+func TestACPRouterErrorResponsePreservesNumericRequestIDAndMarksBusyRetryable(t *testing.T) {
+	payload, ok := acpRouterErrorResponse(
+		[]byte(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{}}`),
+		ACPRouterError{Code: "slot_busy", Message: "ACP slot already has an active prompt"},
+	)
+	require.True(t, ok)
+	var response struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int64 `json:"code"`
+			Data struct {
+				Kind      string `json:"kind"`
+				Retryable bool   `json:"retryable"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &response))
+	assert.Equal(t, "7", string(response.ID))
+	assert.Equal(t, int64(-32001), response.Error.Code)
+	assert.Equal(t, "slot_busy", response.Error.Data.Kind)
+	assert.True(t, response.Error.Data.Retryable)
 }
 
 func TestACPPoolOutputSinkDetachUsesAttachmentToken(t *testing.T) {

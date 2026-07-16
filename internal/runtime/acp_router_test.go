@@ -383,6 +383,46 @@ func TestACPRouterUnknownRouteDoesNotReachSlot(t *testing.T) {
 	assert.Empty(t, slot.writes)
 }
 
+func TestACPRouterExplicitResumeCreatesMissingRouteBeforeReply(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	managerFrames := make(chan []byte, 1)
+	router := NewACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(_ context.Context, nativeSessionID string, payload []byte) error {
+		require.Equal(t, "session_legacy", nativeSessionID)
+		managerFrames <- append([]byte(nil), payload...)
+		return nil
+	})))
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router.UpsertSlot(slot)
+	done := make(chan error, 1)
+	go func() {
+		done <- router.HandleManagerFrameForSession(ctx, "session_legacy", []byte(`{"jsonrpc":"2.0","id":"resume-7","method":"session/resume","params":{"sessionId":"session_legacy","cwd":"/work","mcpServers":[],"additionalDirectories":["/shared"]}}`))
+	}()
+
+	require.Eventually(t, func() bool { return slot.writeCount() == 1 }, eventuallyWait, eventuallyTick)
+	slot.mu.Lock()
+	request := append([]byte(nil), slot.writes[0]...)
+	slot.mu.Unlock()
+	var internalResume acpRPCMessage
+	require.NoError(t, json.Unmarshal(request, &internalResume))
+	assert.Equal(t, "session/resume", internalResume.Method)
+	assert.NotEqual(t, `"resume-7"`, string(internalResume.ID))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":`+string(internalResume.ID)+`,"result":{}}`)))
+	require.NoError(t, <-done)
+
+	response := <-managerFrames
+	var responseMessage acpRPCMessage
+	require.NoError(t, json.Unmarshal(response, &responseMessage))
+	assert.Equal(t, `"resume-7"`, string(responseMessage.ID))
+	assert.JSONEq(t, `{}`, string(responseMessage.Result))
+	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_legacy")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "slot_a", route.BoundSlotID)
+	assert.Equal(t, "epoch_a", route.BoundProcessEpoch)
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[],"additionalDirectories":["/shared"]}`, string(route.ResumeParams))
+}
+
 func routerErrorCode(err error) string {
 	var routerErr ACPRouterError
 	if errors.As(err, &routerErr) {

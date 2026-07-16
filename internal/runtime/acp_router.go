@@ -235,6 +235,9 @@ func (r *ACPRouter) HandleManagerFrameForSession(ctx context.Context, nativeSess
 	switch msg.Method {
 	case "session/new":
 		return r.handleSessionNew(ctx, msg, payload)
+	case "session/resume":
+		sessionID := firstSessionID(nativeSessionID, msg.Params)
+		return r.handleExplicitSessionResume(ctx, sessionID, msg, payload)
 	case "session/prompt":
 		sessionID := firstSessionID(nativeSessionID, msg.Params)
 		return r.handleSessionOperation(ctx, sessionID, msg, payload, true)
@@ -248,6 +251,50 @@ func (r *ACPRouter) HandleManagerFrameForSession(ctx context.Context, nativeSess
 		}
 		return r.handleSessionOperation(ctx, sessionID, msg, payload, false)
 	}
+}
+
+func (r *ACPRouter) handleExplicitSessionResume(
+	ctx context.Context,
+	nativeSessionID string,
+	msg acpRPCMessage,
+	payload []byte,
+) error {
+	if nativeSessionID == "" {
+		return ACPRouterError{Code: "session_id_required", Message: "manager frame has no native session id"}
+	}
+	if rpcIDKey(msg.ID) == "" {
+		return ACPRouterError{Code: "request_id_required", Message: "session/resume requires an id"}
+	}
+	if _, ok, err := r.store.GetACPSessionRoute(ctx, r.connectionID, nativeSessionID); err != nil {
+		return err
+	} else if ok {
+		return r.handleSessionOperation(ctx, nativeSessionID, msg, payload, false)
+	}
+	resumeParams, err := resumeDescriptorFromSessionNewParams(msg.Params)
+	if err != nil {
+		return err
+	}
+	route, err := r.store.UpsertACPSessionRoute(ctx, r.connectionID, nativeSessionID, resumeParams)
+	if err != nil {
+		return err
+	}
+	slot, err := r.selectReadySlot(ctx)
+	if err != nil {
+		return err
+	}
+	defer r.releaseSlotReservation(slot.SlotID())
+	if err := r.resumeColdRoute(ctx, slot, route); err != nil {
+		return err
+	}
+	response, err := json.Marshal(acpRPCMessage{
+		JSONRPC: "2.0",
+		ID:      append(json.RawMessage(nil), msg.ID...),
+		Result:  json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return err
+	}
+	return r.output.EmitManagerFrame(ctx, nativeSessionID, response)
 }
 
 func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processEpoch string, payload []byte) error {
