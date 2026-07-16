@@ -42,17 +42,17 @@ func TestACPPoolOutputSinkDetachUsesAttachmentToken(t *testing.T) {
 	firstCalls := 0
 	secondCalls := 0
 
-	detachFirst := pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(context.Context, []byte) error {
+	detachFirst := pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(context.Context, string, []byte) error {
 		firstCalls++
 		return nil
 	}))
-	detachSecond := pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(context.Context, []byte) error {
+	detachSecond := pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(context.Context, string, []byte) error {
 		secondCalls++
 		return nil
 	}))
 
 	assert.NotPanics(t, detachFirst)
-	require.NoError(t, pool.outputSink.EmitManagerFrame(context.Background(), []byte(`{}`)))
+	require.NoError(t, pool.outputSink.EmitManagerFrame(context.Background(), "session_1", []byte(`{}`)))
 	assert.Zero(t, firstCalls)
 	assert.Equal(t, 1, secondCalls)
 

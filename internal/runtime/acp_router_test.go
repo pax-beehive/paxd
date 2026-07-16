@@ -22,8 +22,10 @@ func TestACPRouterCommitsNewSessionRouteBeforeEmittingResponse(t *testing.T) {
 	store := newFakeACPRouteStore("conn_1")
 	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	var emitted [][]byte
-	router := NewACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, payload []byte) error {
+	var emittedSessionID string
+	router := NewACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
 		assert.True(t, store.boundBeforeEmit("session_1"), "route must be bound before session/new response is emitted")
+		emittedSessionID = nativeSessionID
 		emitted = append(emitted, append([]byte(nil), payload...))
 		return nil
 	})))
@@ -36,6 +38,7 @@ func TestACPRouterCommitsNewSessionRouteBeforeEmittingResponse(t *testing.T) {
 	err = router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_1"}}`))
 	require.NoError(t, err)
 	require.Len(t, emitted, 1)
+	assert.Equal(t, "session_1", emittedSessionID)
 	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_1"}}`, string(emitted[0]))
 
 	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_1")

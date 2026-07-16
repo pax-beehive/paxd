@@ -61,16 +61,16 @@ type ACPRouterSlot interface {
 }
 
 type ACPRouterOutputSink interface {
-	EmitManagerFrame(ctx context.Context, payload []byte) error
+	EmitManagerFrame(ctx context.Context, nativeSessionID string, payload []byte) error
 }
 
-type ACPRouterOutputSinkFunc func(ctx context.Context, payload []byte) error
+type ACPRouterOutputSinkFunc func(ctx context.Context, nativeSessionID string, payload []byte) error
 
-func (f ACPRouterOutputSinkFunc) EmitManagerFrame(ctx context.Context, payload []byte) error {
+func (f ACPRouterOutputSinkFunc) EmitManagerFrame(ctx context.Context, nativeSessionID string, payload []byte) error {
 	if f == nil {
 		return nil
 	}
-	return f(ctx, payload)
+	return f(ctx, nativeSessionID, payload)
 }
 
 type ACPRouter struct {
@@ -210,22 +210,25 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		return nil
 	}
 	if msg.Method == "" {
-		if err := r.handleSessionNewResponse(ctx, slotID, processEpoch, msg, payload); err != nil {
+		nativeSessionID, err := r.handleSessionNewResponse(ctx, slotID, processEpoch, msg, payload)
+		if err != nil {
 			return err
 		}
-		r.releasePromptForResponse(msg.ID, slotID, processEpoch)
-		return r.output.EmitManagerFrame(ctx, append([]byte(nil), payload...))
+		if promptSessionID := r.releasePromptForResponse(msg.ID, slotID, processEpoch); nativeSessionID == "" {
+			nativeSessionID = promptSessionID
+		}
+		return r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
 	}
+	nativeSessionID := firstSessionID("", msg.Params)
 	if len(bytes.TrimSpace(msg.ID)) > 0 {
-		sessionID := firstSessionID("", msg.Params)
-		if sessionID != "" {
-			key := workerRequestKey(sessionID, msg.ID)
+		if nativeSessionID != "" {
+			key := workerRequestKey(nativeSessionID, msg.ID)
 			r.mu.Lock()
 			r.pendingWorkerReqs[key] = pendingWorkerRequest{slotID: slotID, processEpoch: processEpoch}
 			r.mu.Unlock()
 		}
 	}
-	return r.output.EmitManagerFrame(ctx, append([]byte(nil), payload...))
+	return r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
 }
 
 func (r *ACPRouter) handleSessionNew(ctx context.Context, msg acpRPCMessage, payload []byte) error {
@@ -314,29 +317,29 @@ func (r *ACPRouter) handleManagerResponse(ctx context.Context, nativeSessionID s
 	return slot.Send(ctx, append([]byte(nil), payload...))
 }
 
-func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string, processEpoch string, msg acpRPCMessage, payload []byte) error {
+func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string, processEpoch string, msg acpRPCMessage, payload []byte) (string, error) {
 	key := rpcIDKey(msg.ID)
 	r.mu.Lock()
 	pending, ok := r.pendingNew[key]
 	if ok && (pending.slotID != slotID || pending.processEpoch != processEpoch) {
 		r.mu.Unlock()
-		return ACPRouterError{Code: "session_new_source_mismatch", Message: "session/new response came from a different slot epoch"}
+		return "", ACPRouterError{Code: "session_new_source_mismatch", Message: "session/new response came from a different slot epoch"}
 	}
 	if ok {
 		delete(r.pendingNew, key)
 	}
 	r.mu.Unlock()
 	if !ok || msg.Error != nil {
-		return nil
+		return "", nil
 	}
 	sessionID := sessionIDFromResult(msg.Result)
 	if sessionID == "" {
-		return ACPRouterError{Code: "session_id_required", Message: "session/new result has no session id"}
+		return "", ACPRouterError{Code: "session_id_required", Message: "session/new result has no session id"}
 	}
 	resumeParams := append(json.RawMessage(nil), pending.resumeParams...)
 	route, err := r.store.UpsertACPSessionRoute(ctx, r.connectionID, sessionID, resumeParams)
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, bound, err := r.store.BindACPSessionRoute(ctx, ACPRouteBindingUpdate{
 		ConnectionID:    r.connectionID,
@@ -347,13 +350,13 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 		ResumeParams:    resumeParams,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !bound {
-		return ACPRouterError{Code: "session_route_conflict", Message: "session/new route bind conflicted"}
+		return "", ACPRouterError{Code: "session_route_conflict", Message: "session/new route bind conflicted"}
 	}
 	_ = payload
-	return nil
+	return sessionID, nil
 }
 
 func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, route ACPRoute) error {
@@ -465,7 +468,7 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	return nil
 }
 
-func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID string, processEpoch string) {
+func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID string, processEpoch string) string {
 	key := rpcIDKey(requestID)
 	r.mu.Lock()
 	pending, ok := r.pendingPrompts[key]
@@ -475,6 +478,10 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 		delete(r.activeSlotPrompts, slotID)
 	}
 	r.mu.Unlock()
+	if ok && pending.slotID == slotID && pending.processEpoch == processEpoch {
+		return pending.nativeSessionID
+	}
+	return ""
 }
 
 func (r *ACPRouter) releasePrompt(nativeSessionID string, slotID string, requestKey string) {

@@ -30,6 +30,9 @@ type runtimeSupervisors struct {
 		Close(context.Context) error
 		Stats() reliablemq.ProducerWriteBehindStats
 	}
+	transportProducers interface {
+		Close(context.Context) error
+	}
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -63,6 +66,15 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		}),
 	)
 	s.transportFlusher = transportStore
+	engineFactory := runtimes.ReliableEngineFromStoreWithProducerConfig(
+		transportStore,
+		reliablemq.ProducerConfig{OnError: func(err error) {
+			log.Printf("[paxd] FATAL acp transport producer stopped accepting output: %v", err)
+		}},
+	)
+	if closer, ok := engineFactory.(interface{ Close(context.Context) error }); ok {
+		s.transportProducers = closer
+	}
 
 	headers := auth.NewProvider(store, nil)
 	dialer := runtimes.GorillaWebSocketDialer{}
@@ -92,8 +104,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 			Headers:               headers,
 			Dialer:                dialer,
 			ACPPoolRegistry:       acpPoolRegistry,
-			ReliableEngineFactory: runtimes.ReliableEngineFromStore(transportStore),
-			TransportReconciler:   transportStore,
+			ReliableEngineFactory: engineFactory,
 		}},
 	})
 	s.agent = agent
@@ -182,6 +193,11 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 			<-ctx.Done()
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			if s.transportProducers != nil {
+				if err := s.transportProducers.Close(closeCtx); err != nil {
+					log.Printf("[paxd] acp transport producer registry close failed: %v", err)
+				}
+			}
 			if err := s.transportFlusher.Close(closeCtx); err != nil {
 				stats := s.transportFlusher.Stats()
 				log.Printf(

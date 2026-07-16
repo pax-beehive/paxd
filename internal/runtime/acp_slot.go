@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 )
@@ -229,6 +230,13 @@ func (s *ACPSlot) initialize(ctx context.Context) error {
 	if err := s.Send(ctx, request); err != nil {
 		return fmt.Errorf("send acp initialize: %w", err)
 	}
+	log.Printf(
+		"[paxd] acp slot initialize request sent connection_id=%s slot_id=%s process_epoch=%s request_id=%q",
+		s.spec.ConnectionID,
+		s.spec.SlotID,
+		s.spec.ProcessEpoch,
+		internalACPInitializeID,
+	)
 	msg, err := waitACPRPCResult(ctx, waitCh, s.done)
 	if err != nil {
 		return fmt.Errorf("acp initialize: %w", err)

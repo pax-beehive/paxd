@@ -188,12 +188,12 @@ type persistentACPProcess struct {
 	store       reliablemq.DurableStore
 	reporter    ACPPoolCapabilityReporter
 
-	mu          sync.Mutex
-	sender      reliablemq.Sender
-	senderToken int64
-	err         error
-	initProfile acpClientInitProfile
-	initResult  acpWorkerInitResult
+	mu              sync.Mutex
+	outputSink      func(context.Context, []byte) error
+	outputSinkToken int64
+	err             error
+	initProfile     acpClientInitProfile
+	initResult      acpWorkerInitResult
 
 	initCh   chan acpInitCapture
 	done     chan struct{}
@@ -265,16 +265,16 @@ func (p *persistentACPProcess) Exited() bool {
 	}
 }
 
-func (p *persistentACPProcess) AttachSender(sender reliablemq.Sender) func() {
+func (p *persistentACPProcess) AttachOutputSink(sink func(context.Context, []byte) error) func() {
 	p.mu.Lock()
-	p.senderToken++
-	token := p.senderToken
-	p.sender = sender
+	p.outputSinkToken++
+	token := p.outputSinkToken
+	p.outputSink = sink
 	p.mu.Unlock()
 	return func() {
 		p.mu.Lock()
-		if p.senderToken == token {
-			p.sender = nil
+		if p.outputSinkToken == token {
+			p.outputSink = nil
 		}
 		p.mu.Unlock()
 	}
@@ -316,6 +316,12 @@ func (p *persistentACPProcess) initialize(ctx context.Context) error {
 	if err := writeACPStdin(p.proc.Stdin(), request); err != nil {
 		return fmt.Errorf("send acp initialize: %w", err)
 	}
+	log.Printf(
+		"[paxd] persistent ACP initialize request sent connection_id=%s transport_queue_id=%s request_id=%q",
+		p.spec.ConnectionID,
+		p.spec.TransportQueueID,
+		internalACPInitializeID,
+	)
 
 	select {
 	case capture := <-p.initCh:
@@ -369,7 +375,7 @@ func (p *persistentACPProcess) wait() {
 	err := p.proc.Wait()
 	p.mu.Lock()
 	p.err = err
-	p.sender = nil
+	p.outputSink = nil
 	p.mu.Unlock()
 	close(p.done)
 }
@@ -451,24 +457,13 @@ func (p *persistentACPProcess) captureInitializeResponse(line []byte) bool {
 }
 
 func (p *persistentACPProcess) sendOutbound(ctx context.Context, payload []byte) error {
-	frame, err := p.store.AppendOutboundData(ctx, p.spec.TransportQueueID, reliablemq.StreamACP, append([]byte(nil), payload...), reliablemq.Metadata{
-		"agent_id": p.spec.CloudAgentID,
-	})
-	if err != nil {
-		return err
-	}
-
 	p.mu.Lock()
-	sender := p.sender
+	sink := p.outputSink
 	p.mu.Unlock()
-	if sender == nil {
-		return nil
+	if sink == nil {
+		return fmt.Errorf("persistent ACP process output sink is not attached")
 	}
-	if err := sender.Send(ctx, reliablemq.EnvelopeFromFrame(frame)); err != nil {
-		_ = p.store.RecordSendFailure(ctx, frame.Key, err.Error())
-		return nil
-	}
-	return p.store.MarkSent(ctx, frame.Key)
+	return sink(ctx, append([]byte(nil), payload...))
 }
 
 func persistentACPProcessKey(spec AgentConnectionSpec) string {

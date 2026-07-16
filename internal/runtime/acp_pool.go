@@ -76,14 +76,14 @@ func NewACPPool(connectionID string, routeStore ACPRouteStore) *ACPPool {
 		connectionID: connectionID,
 		routeStore:   routeStore,
 	}
-	pool.router = NewACPRouter(connectionID, routeStore, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, payload []byte) error {
+	pool.router = NewACPRouter(connectionID, routeStore, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
 		pool.mu.Lock()
 		sink := pool.outputSink
 		pool.mu.Unlock()
 		if sink == nil {
 			return fmt.Errorf("acp pool output sink is not attached")
 		}
-		return sink.EmitManagerFrame(ctx, payload)
+		return sink.EmitManagerFrame(ctx, nativeSessionID, payload)
 	})))
 	return pool
 }
@@ -126,10 +126,14 @@ func (p *ACPPool) RemoveSlot(ctx context.Context, slotID string, processEpoch st
 }
 
 func (p *ACPPool) HandleManagerFrame(ctx context.Context, payload []byte) error {
+	return p.HandleManagerFrameForSession(ctx, "", payload)
+}
+
+func (p *ACPPool) HandleManagerFrameForSession(ctx context.Context, nativeSessionID string, payload []byte) error {
 	if p == nil {
 		return fmt.Errorf("acp pool is required")
 	}
-	return p.router.HandleManagerFrame(ctx, payload)
+	return p.router.HandleManagerFrameForSession(ctx, nativeSessionID, payload)
 }
 
 func (p *ACPPool) HandleSlotFrame(ctx context.Context, slotID string, processEpoch string, payload []byte) error {
@@ -140,16 +144,19 @@ func (p *ACPPool) HandleSlotFrame(ctx context.Context, slotID string, processEpo
 }
 
 func (p *ACPPool) OutputSinkForEngine(spec AgentConnectionSpec, engine ReliableEngine) ACPRouterOutputSink {
-	return ACPRouterOutputSinkFunc(func(ctx context.Context, payload []byte) error {
-		_, err := engine.Send(ctx, reliablemq.OutboundMessage{
-			QueueID: spec.TransportQueueID,
-			Stream:  reliablemq.StreamACP,
-			Payload: append([]byte(nil), payload...),
-			Metadata: reliablemq.Metadata{
-				"agent_id": spec.CloudAgentID,
-			},
+	return ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
+		metadata := reliablemq.Metadata{
+			"agent_id": spec.CloudAgentID,
+		}
+		if nativeSessionID != "" {
+			metadata["native_session_id"] = nativeSessionID
+		}
+		return engine.Send(ctx, reliablemq.OutboundMessage{
+			QueueID:  spec.TransportQueueID,
+			Stream:   reliablemq.StreamACP,
+			Payload:  append([]byte(nil), payload...),
+			Metadata: metadata,
 		})
-		return err
 	})
 }
 
