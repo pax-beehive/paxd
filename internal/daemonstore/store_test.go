@@ -564,15 +564,22 @@ func TestAgentConnectionDesiredSlotsValidation(t *testing.T) {
 		require.NoError(t, cmd.Validate())
 	})
 
-	t.Run("rejects disabled multi slot path", func(t *testing.T) {
-		desiredSlots := 2
+	t.Run("allows multiple slots", func(t *testing.T) {
+		desiredSlots := 3
+		cmd := control.UpdateAgentConnectionCommand{ConnectionID: "conn_codex", DesiredSlots: &desiredSlots}
+
+		require.NoError(t, cmd.Validate())
+	})
+
+	t.Run("rejects invalid lower bound", func(t *testing.T) {
+		desiredSlots := 0
 		cmd := control.UpdateAgentConnectionCommand{ConnectionID: "conn_codex", DesiredSlots: &desiredSlots}
 
 		require.Error(t, cmd.Validate())
 	})
 
-	t.Run("rejects invalid lower bound", func(t *testing.T) {
-		desiredSlots := 0
+	t.Run("rejects count above the v1 limit", func(t *testing.T) {
+		desiredSlots := 17
 		cmd := control.UpdateAgentConnectionCommand{ConnectionID: "conn_codex", DesiredSlots: &desiredSlots}
 
 		require.Error(t, cmd.Validate())
@@ -664,6 +671,9 @@ func TestACPSessionRouteRepository(t *testing.T) {
 	require.Equal(t, slotID, bound.BoundSlotID)
 	require.Equal(t, "epoch_1", bound.BoundProcessEpoch)
 	require.JSONEq(t, `{"cwd":"/tmp/project","mcpServers":[]}`, bound.ResumeParamsJSON)
+	counts, err := store.CountBoundACPSessionRoutesBySlot(ctx, "conn_codex")
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{slotID: 1}, counts)
 
 	_, ok, err = store.BindACPSessionRoute(ctx, ACPSessionRouteBindingUpdate{
 		ConnectionID:    "conn_codex",
@@ -684,6 +694,9 @@ func TestACPSessionRouteRepository(t *testing.T) {
 	require.Empty(t, route.BoundProcessEpoch)
 	require.Equal(t, slotID, route.LastSlotID)
 	require.Equal(t, int64(3), route.Version)
+	counts, err = store.CountBoundACPSessionRoutesBySlot(ctx, "conn_codex")
+	require.NoError(t, err)
+	require.Empty(t, counts)
 
 	route, ok, err = store.BindACPSessionRoute(ctx, ACPSessionRouteBindingUpdate{
 		ConnectionID:    "conn_codex",
@@ -752,6 +765,14 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAgentConnection(disabled remote) error = %v", err)
 	}
+	desiredSlots := 3
+	updated, err := store.UpdateAgentConnection(ctx, control.UpdateAgentConnectionCommand{
+		ConnectionID: "conn_codex",
+		DesiredSlots: &desiredSlots,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), updated.Generation)
+	require.Equal(t, desiredSlots, updated.DesiredACPSlots)
 
 	remoteSpecs, err := store.ListDesiredRemotes(ctx)
 	if err != nil {
@@ -795,15 +816,17 @@ func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {
 	firstQueueID := connSpecs[0].TransportQueueID
 	slotSpecs, err := store.ListDesiredACPSlots(ctx)
 	require.NoError(t, err)
-	require.Len(t, slotSpecs, 1)
-	require.Equal(t, ACPSlotID("conn_codex", 0), slotSpecs[0].SlotID)
-	require.Equal(t, "conn_codex", slotSpecs[0].ConnectionID)
-	require.Equal(t, 0, slotSpecs[0].Ordinal)
-	require.Equal(t, "agent_runtime", slotSpecs[0].CloudAgentID)
-	require.Equal(t, firstQueueID, slotSpecs[0].TransportQueueID)
-	require.Equal(t, []string{"codex", "--acp"}, slotSpecs[0].Command)
-	require.Equal(t, "prod", slotSpecs[0].Env["PAX_PROFILE"])
-	require.NotEmpty(t, slotSpecs[0].CommandFingerprint)
+	require.Len(t, slotSpecs, desiredSlots)
+	for ordinal, slotSpec := range slotSpecs {
+		require.Equal(t, ACPSlotID("conn_codex", ordinal), slotSpec.SlotID)
+		require.Equal(t, "conn_codex", slotSpec.ConnectionID)
+		require.Equal(t, ordinal, slotSpec.Ordinal)
+		require.Equal(t, "agent_runtime", slotSpec.CloudAgentID)
+		require.Equal(t, firstQueueID, slotSpec.TransportQueueID)
+		require.Equal(t, []string{"codex", "--acp"}, slotSpec.Command)
+		require.Equal(t, "prod", slotSpec.Env["PAX_PROFILE"])
+		require.NotEmpty(t, slotSpec.CommandFingerprint)
+	}
 	connSpecs, err = store.ListDesiredAgentConnections(ctx)
 	require.NoError(t, err)
 	require.Len(t, connSpecs, 1)

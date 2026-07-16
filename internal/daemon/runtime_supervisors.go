@@ -112,9 +112,19 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	s.acpSlots = supervisor.NewACPSlotSupervisor(supervisor.ACPSlotSupervisorOptions{
 		Store: store,
 		Factory: acpSlotSessionFactory{
-			runner:      runtimes.ExecLocalACPProcessRunner{},
-			registry:    acpPoolRegistry,
-			paxdVersion: s.paxdVersion,
+			runner:       runtimes.ExecLocalACPProcessRunner{},
+			registry:     acpPoolRegistry,
+			paxdVersion:  s.paxdVersion,
+			readyHandler: acpSlotReadyStatusWriter(store),
+		},
+		DrainHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) <-chan struct{} {
+			_ = ctx
+			pool, err := acpPoolRegistry.Get(spec.ConnectionID)
+			if err != nil {
+				log.Printf("[paxd] acp slot drain connection_id=%s slot_id=%s pool lookup failed: %v", spec.ConnectionID, spec.SlotID, err)
+				return nil
+			}
+			return pool.BeginSlotDrain(spec.SlotID, spec.ProcessEpoch)
 		},
 		StopHandler: func(ctx context.Context, spec runtimes.ACPSlotSpec) {
 			pool, err := acpPoolRegistry.Get(spec.ConnectionID)
@@ -137,11 +147,28 @@ func (s *runtimeSupervisors) WakeRemotes() {
 }
 
 func (s *runtimeSupervisors) WakeAgentConnections() {
-	if s == nil || s.agent == nil {
+	if s == nil {
 		log.Printf("[paxd] agent connection supervisor wake requested before supervisor is configured")
 		return
 	}
-	s.agent.Wake()
+	if s.agent == nil {
+		log.Printf("[paxd] agent connection supervisor wake requested before supervisor is configured")
+	} else {
+		s.agent.Wake()
+	}
+
+}
+
+func (s *runtimeSupervisors) WakeACPSlots() {
+	if s == nil {
+		log.Printf("[paxd] acp slot supervisor wake requested before supervisor is configured")
+		return
+	}
+	if s.acpSlots == nil {
+		log.Printf("[paxd] acp slot supervisor wake requested before supervisor is configured")
+	} else {
+		s.acpSlots.Wake()
+	}
 }
 
 func (r *Runtime) StartSupervisors(ctx context.Context) {
@@ -253,18 +280,36 @@ func (f agentTunnelSessionFactory) NewAgentTunnelSession(spec runtimes.AgentConn
 }
 
 type acpSlotSessionFactory struct {
-	runner      runtimes.LocalACPProcessRunner
-	registry    *runtimes.ACPPoolRegistry
-	paxdVersion string
+	runner       runtimes.LocalACPProcessRunner
+	registry     *runtimes.ACPPoolRegistry
+	paxdVersion  string
+	readyHandler func(context.Context, runtimes.ACPSlotSpec)
 }
 
 func (f acpSlotSessionFactory) NewACPSlotSession(spec runtimes.ACPSlotSpec) runtimes.Session {
 	spec.PaxdVersion = sFirstNonEmpty(spec.PaxdVersion, f.paxdVersion)
 	return runtimes.NewACPSlotSession(runtimes.ACPSlotSessionConfig{
-		Spec:     spec,
-		Runner:   f.runner,
-		Registry: f.registry,
+		Spec:         spec,
+		Runner:       f.runner,
+		Registry:     f.registry,
+		ReadyHandler: f.readyHandler,
 	})
+}
+
+func acpSlotReadyStatusWriter(store *daemonstore.Store) func(context.Context, runtimes.ACPSlotSpec) {
+	return func(ctx context.Context, spec runtimes.ACPSlotSpec) {
+		readyAt := time.Now().UTC()
+		if err := store.UpsertACPSlotStatus(ctx, daemonstore.ACPSlotStatusUpdate{
+			SlotID:       spec.SlotID,
+			ConnectionID: spec.ConnectionID,
+			Ordinal:      spec.Ordinal,
+			ProcessEpoch: spec.ProcessEpoch,
+			Phase:        string(runtimes.ACPSlotPhaseReady),
+			ReadyAt:      &readyAt,
+		}); err != nil {
+			log.Printf("[paxd] acp slot ready status write failed connection_id=%s slot_id=%s process_epoch=%s: %v", spec.ConnectionID, spec.SlotID, spec.ProcessEpoch, err)
+		}
+	}
 }
 
 type acpRouteStoreAdapter struct {
@@ -307,6 +352,10 @@ func (a acpRouteStoreAdapter) BindACPSessionRoute(ctx context.Context, update ru
 		return runtimes.ACPRoute{}, ok, err
 	}
 	return runtimeACPRoute(route), true, nil
+}
+
+func (a acpRouteStoreAdapter) CountBoundACPSessionRoutesBySlot(ctx context.Context, connectionID string) (map[string]int, error) {
+	return a.store.CountBoundACPSessionRoutesBySlot(ctx, connectionID)
 }
 
 func (a acpRouteStoreAdapter) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {

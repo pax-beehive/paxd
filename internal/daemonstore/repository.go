@@ -768,7 +768,13 @@ func (s *Store) ListDesiredACPSlots(ctx context.Context) ([]ACPSlotDesiredSpec, 
 		Find(&conns).Error; err != nil {
 		return nil, err
 	}
-	specs := make([]ACPSlotDesiredSpec, 0, len(conns))
+	totalSlots := 0
+	for _, conn := range conns {
+		if conn.DesiredACPSlots > 0 {
+			totalSlots += conn.DesiredACPSlots
+		}
+	}
+	specs := make([]ACPSlotDesiredSpec, 0, totalSlots)
 	for _, conn := range conns {
 		remote, err := s.getRemote(ctx, conn.RemoteID)
 		if err != nil {
@@ -792,19 +798,22 @@ func (s *Store) ListDesiredACPSlots(ctx context.Context) ([]ACPSlotDesiredSpec, 
 		if err != nil {
 			return nil, err
 		}
-		specs = append(specs, ACPSlotDesiredSpec{
-			ConnectionID:       conn.ID,
-			CloudAgentID:       stringValue(conn.CloudAgentID),
-			TransportQueueID:   transportQueueID,
-			SlotID:             ACPSlotID(conn.ID, 0),
-			Ordinal:            0,
-			Command:            command,
-			WorkingDir:         conn.WorkingDir,
-			Env:                env,
-			CommandFingerprint: acpSlotCommandFingerprint(conn, command, env, transportQueueID),
-			Generation:         conn.Generation,
-			RestartNonce:       conn.RestartNonce,
-		})
+		commandFingerprint := acpSlotCommandFingerprint(conn, command, env, transportQueueID)
+		for ordinal := 0; ordinal < conn.DesiredACPSlots; ordinal++ {
+			specs = append(specs, ACPSlotDesiredSpec{
+				ConnectionID:       conn.ID,
+				CloudAgentID:       stringValue(conn.CloudAgentID),
+				TransportQueueID:   transportQueueID,
+				SlotID:             ACPSlotID(conn.ID, ordinal),
+				Ordinal:            ordinal,
+				Command:            command,
+				WorkingDir:         conn.WorkingDir,
+				Env:                env,
+				CommandFingerprint: commandFingerprint,
+				Generation:         conn.Generation,
+				RestartNonce:       conn.RestartNonce,
+			})
+		}
 	}
 	return specs, nil
 }
@@ -1002,6 +1011,25 @@ func (s *Store) BindACPSessionRoute(ctx context.Context, update ACPSessionRouteB
 	}
 	route, err := s.GetACPSessionRoute(ctx, update.ConnectionID, update.NativeSessionID)
 	return route, true, err
+}
+
+func (s *Store) CountBoundACPSessionRoutesBySlot(ctx context.Context, connectionID string) (map[string]int, error) {
+	var rows []struct {
+		SlotID string `gorm:"column:slot_id"`
+		Count  int    `gorm:"column:route_count"`
+	}
+	if err := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Select("bound_slot_id AS slot_id, COUNT(*) AS route_count").
+		Where("connection_id = ? AND bound_slot_id IS NOT NULL", connectionID).
+		Group("bound_slot_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(rows))
+	for _, row := range rows {
+		counts[row.SlotID] = row.Count
+	}
+	return counts, nil
 }
 
 func (s *Store) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {

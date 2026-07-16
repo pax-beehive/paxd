@@ -110,6 +110,15 @@ func (p *ACPPool) UpsertSlot(slot ACPRouterSlot) {
 	p.router.UpsertSlot(slot)
 }
 
+func (p *ACPPool) BeginSlotDrain(slotID string, processEpoch string) <-chan struct{} {
+	if p == nil || p.router == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return p.router.BeginSlotDrain(slotID, processEpoch)
+}
+
 func (p *ACPPool) RemoveSlot(ctx context.Context, slotID string, processEpoch string) {
 	if p == nil {
 		return
@@ -161,9 +170,10 @@ func (p *ACPPool) OutputSinkForEngine(spec AgentConnectionSpec, engine ReliableE
 }
 
 type ACPSlotSessionConfig struct {
-	Spec     ACPSlotSpec
-	Runner   LocalACPProcessRunner
-	Registry *ACPPoolRegistry
+	Spec         ACPSlotSpec
+	Runner       LocalACPProcessRunner
+	Registry     *ACPPoolRegistry
+	ReadyHandler func(context.Context, ACPSlotSpec)
 }
 
 type ACPSlotSession struct {
@@ -204,6 +214,9 @@ func (s *ACPSlotSession) Run(ctx context.Context) Exit {
 		switch event.Type {
 		case ACPSlotEventReady:
 			pool.UpsertSlot(slot)
+			if s.cfg.ReadyHandler != nil {
+				s.cfg.ReadyHandler(context.Background(), spec)
+			}
 		case ACPSlotEventFrame:
 			if err := pool.HandleSlotFrame(context.Background(), event.SlotID, event.ProcessEpoch, event.Payload); err != nil {
 				log.Printf("[paxd] acp slot id=%s process_epoch=%s route frame failed: %v", event.SlotID, event.ProcessEpoch, err)

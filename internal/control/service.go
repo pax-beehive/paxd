@@ -71,6 +71,7 @@ type CommandCompletion struct {
 type Supervisors interface {
 	WakeRemotes()
 	WakeAgentConnections()
+	WakeACPSlots()
 }
 
 type HarnessRegistry interface {
@@ -168,6 +169,10 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 		}
 		return failedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
 	}
+	wakeACPSlots := wakeAgents
+	if isDesiredSlotsOnlyUpdate(cmd) {
+		wakeAgents = false
+	}
 
 	if wakeRemotes {
 		if s.supervisors != nil {
@@ -185,7 +190,23 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 			log.Printf("[paxd] control command=%s type=%s needs agent connection reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
 		}
 	}
+	if wakeACPSlots {
+		if s.supervisors != nil {
+			log.Printf("[paxd] control command=%s type=%s waking acp slot supervisor", cmd.CommandID, cmd.Type)
+			s.supervisors.WakeACPSlots()
+		} else {
+			log.Printf("[paxd] control command=%s type=%s needs acp slot reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
+		}
+	}
 	return ack, nil
+}
+
+func isDesiredSlotsOnlyUpdate(cmd Command) bool {
+	update := cmd.UpdateAgentConnection
+	return cmd.Type == CommandAgentConnectionUpdate && update != nil && update.DesiredSlots != nil &&
+		update.Name == nil && update.CloudAgentID == nil && update.InstanceID == nil &&
+		update.AgentType == nil && update.Harness == nil && update.Command == nil &&
+		update.WorkingDir == nil && update.Env == nil && update.Enabled == nil && update.DesiredState == nil
 }
 
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {

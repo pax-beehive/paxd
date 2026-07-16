@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,6 +68,52 @@ func TestACPSlotInitializesAndEmitsOneTerminalEventOnProcessExit(t *testing.T) {
 	assert.Equal(t, "slot_a", terminal[0].SlotID)
 	assert.Equal(t, "epoch_a", terminal[0].ProcessEpoch)
 	assert.Equal(t, ACPSlotPhaseStopped, terminal[0].Phase)
+}
+
+func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proc := newSlotFakeLocalACPProcess()
+	ready := make(chan ACPSlotSpec, 1)
+	registry := NewACPPoolRegistry(ACPRouteStoreFactoryFunc(func(connectionID string) ACPRouteStore {
+		return newFakeACPRouteStore(connectionID)
+	}))
+	session := NewACPSlotSession(ACPSlotSessionConfig{
+		Spec: ACPSlotSpec{
+			ConnectionID: "conn_1",
+			SlotID:       "slot_a",
+			Ordinal:      0,
+			ProcessEpoch: "epoch_a",
+			Command:      []string{"fake-acp"},
+			PaxdVersion:  "test",
+		},
+		Runner:   slotFakeLocalACPProcessRunner{proc: proc},
+		Registry: registry,
+		ReadyHandler: func(ctx context.Context, spec ACPSlotSpec) {
+			ready <- spec
+		},
+	})
+	done := make(chan Exit, 1)
+	go func() { done <- session.Run(ctx) }()
+	require.Eventually(t, func() bool {
+		return bytes.Contains(proc.stdinBytes(), []byte(`"method":"initialize"`))
+	}, eventuallyWait, eventuallyTick)
+	proc.writeStdout([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{}}}` + "\n"))
+
+	select {
+	case spec := <-ready:
+		assert.Equal(t, "conn_1", spec.ConnectionID)
+		assert.Equal(t, "slot_a", spec.SlotID)
+		assert.Equal(t, "epoch_a", spec.ProcessEpoch)
+	case <-time.After(eventuallyWait):
+		t.Fatal("slot session did not report ready")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(eventuallyWait):
+		t.Fatal("slot session did not stop after cancellation")
+	}
 }
 
 type slotFakeLocalACPProcessRunner struct {

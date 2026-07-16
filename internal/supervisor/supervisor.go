@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -135,6 +136,7 @@ type ACPSlotSupervisorOptions struct {
 	Clock             Clock
 	ReconcileInterval time.Duration
 	Backoff           BackoffPolicy
+	DrainHandler      RuntimeDrainHandler[runtimes.ACPSlotSpec]
 	StopHandler       RuntimeStopHandler[runtimes.ACPSlotSpec]
 }
 
@@ -230,10 +232,17 @@ type ACPSlotSupervisor struct {
 
 func NewACPSlotSupervisor(opts ACPSlotSupervisorOptions) *ACPSlotSupervisor {
 	ops := slotOps[runtimes.ACPSlotSpec]{
-		id:            func(spec runtimes.ACPSlotSpec) string { return spec.SlotID },
-		generation:    func(spec runtimes.ACPSlotSpec) int64 { return spec.Generation },
-		restartNonce:  func(spec runtimes.ACPSlotSpec) int64 { return spec.RestartNonce },
+		id:           func(spec runtimes.ACPSlotSpec) string { return spec.SlotID },
+		generation:   func(spec runtimes.ACPSlotSpec) int64 { return spec.Generation },
+		restartNonce: func(spec runtimes.ACPSlotSpec) int64 { return spec.RestartNonce },
+		desiredChanged: func(current runtimes.ACPSlotSpec, next runtimes.ACPSlotSpec) bool {
+			return current.CommandFingerprint != next.CommandFingerprint || current.RestartNonce != next.RestartNonce
+		},
+		stopBefore: func(current runtimes.ACPSlotSpec, next runtimes.ACPSlotSpec) bool {
+			return current.Ordinal > next.Ordinal
+		},
 		startingPhase: string(runtimes.PhaseStarting),
+		drainingPhase: string(runtimes.ACPSlotPhaseDraining),
 		prepareStart: func(spec runtimes.ACPSlotSpec) runtimes.ACPSlotSpec {
 			epoch, err := runtimes.NewACPProcessEpoch()
 			if err != nil {
@@ -245,6 +254,7 @@ func NewACPSlotSupervisor(opts ACPSlotSupervisorOptions) *ACPSlotSupervisor {
 		},
 		newSession:  opts.Factory.NewACPSlotSession,
 		writeStatus: acpSlotStatusWriter(opts.Store),
+		beginDrain:  opts.DrainHandler,
 		handleStop:  opts.StopHandler,
 	}
 	return &ACPSlotSupervisor{base: newBaseSupervisor(opts.Store.ListDesiredACPSlots, ops, baseOptions{
@@ -308,6 +318,7 @@ type baseOptions struct {
 }
 
 type RuntimeExitHandler[S any] func(ctx context.Context, spec S, exit runtimes.Exit) (S, bool, error)
+type RuntimeDrainHandler[S any] func(ctx context.Context, spec S) <-chan struct{}
 type RuntimeStopHandler[S any] func(ctx context.Context, spec S)
 
 type baseSupervisor[S any] struct {
@@ -414,22 +425,36 @@ func (s *baseSupervisor[S]) Reconcile(ctx context.Context) error {
 		slot.ApplyDesired(spec)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	stopped := 0
+	toStop := make([]*runtimeSlot[S], 0)
 	for id, slot := range s.slots {
 		if _, ok := seen[id]; !ok {
-			stopped++
-			slot.Stop("not_desired")
+			_, _, hasDesired := slot.observedDesired()
+			if hasDesired {
+				toStop = append(toStop, slot)
+			}
 		}
+	}
+	slotCount := len(s.slots)
+	s.mu.Unlock()
+	sort.Slice(toStop, func(i, j int) bool {
+		left, _, _ := toStop[i].observedDesired()
+		right, _, _ := toStop[j].observedDesired()
+		if s.ops.stopBefore != nil {
+			return s.ops.stopBefore(left, right)
+		}
+		return s.ops.id(left) < s.ops.id(right)
+	})
+	for _, slot := range toStop {
+		slot.Stop("not_desired")
 	}
 	log.Printf(
 		"[paxd] %s supervisor reconcile done desired=%d valid=%d slots=%d created=%d stopped=%d",
 		s.name,
 		len(desired),
 		valid,
-		len(s.slots),
+		slotCount,
 		created,
-		stopped,
+		len(toStop),
 	)
 	return nil
 }
@@ -465,15 +490,19 @@ func (s *baseSupervisor[S]) stopAll(ctx context.Context) {
 }
 
 type slotOps[S any] struct {
-	id            func(S) string
-	generation    func(S) int64
-	restartNonce  func(S) int64
-	startingPhase string
-	prepareStart  func(S) S
-	newSession    func(S) runtimes.Session
-	writeStatus   func(context.Context, S, statusWrite) error
-	handleExit    RuntimeExitHandler[S]
-	handleStop    RuntimeStopHandler[S]
+	id             func(S) string
+	generation     func(S) int64
+	restartNonce   func(S) int64
+	desiredChanged func(S, S) bool
+	stopBefore     func(S, S) bool
+	startingPhase  string
+	drainingPhase  string
+	prepareStart   func(S) S
+	newSession     func(S) runtimes.Session
+	writeStatus    func(context.Context, S, statusWrite) error
+	handleExit     RuntimeExitHandler[S]
+	beginDrain     RuntimeDrainHandler[S]
+	handleStop     RuntimeStopHandler[S]
 }
 
 type statusWrite struct {
@@ -493,6 +522,8 @@ type runtimeSlot[S any] struct {
 	backoff        BackoffPolicy
 	desired        S
 	hasDesired     bool
+	currentSpec    S
+	hasCurrentSpec bool
 	currentCancel  context.CancelFunc
 	currentAttempt int64
 	reconnects     int
@@ -501,6 +532,8 @@ type runtimeSlot[S any] struct {
 	backoffUntil   *time.Time
 	phase          string
 	pending        bool
+	draining       bool
+	drainToken     int64
 }
 
 func newRuntimeSlot[S any](supervisorName string, id string, ops slotOps[S], clock Clock, backoff BackoffPolicy) *runtimeSlot[S] {
@@ -518,9 +551,7 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	changed := !s.hasDesired ||
-		s.ops.generation(s.desired) != s.ops.generation(spec) ||
-		s.ops.restartNonce(s.desired) != s.ops.restartNonce(spec)
+	changed := !s.hasDesired || s.desiredChanged(s.desired, spec)
 	oldGeneration := int64(0)
 	oldRestartNonce := int64(0)
 	if s.hasDesired {
@@ -539,6 +570,7 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 		s.stopTimerLocked()
 	}
 	if s.currentCancel != nil {
+		currentSpec := s.currentOrDesiredLocked()
 		log.Printf(
 			"[paxd] %s slot id=%s interrupting running session old_generation=%d new_generation=%d old_restart_nonce=%d new_restart_nonce=%d",
 			s.supervisorName,
@@ -549,8 +581,15 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 			s.ops.restartNonce(spec),
 		)
 		s.pending = true
+		if s.draining {
+			s.draining = false
+			s.drainToken++
+			if s.ops.handleStop != nil {
+				s.ops.handleStop(context.Background(), currentSpec)
+			}
+		}
 		s.phase = string(runtimes.PhaseStopping)
-		s.writeStatusLoggedLocked(spec, statusWrite{Phase: s.phase, At: s.clock.Now()})
+		s.writeStatusLoggedLocked(currentSpec, statusWrite{Phase: s.phase, At: s.clock.Now()})
 		s.currentCancel()
 		return
 	}
@@ -561,13 +600,73 @@ func (s *runtimeSlot[S]) Stop(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	log.Printf("[paxd] %s slot id=%s stop requested reason=%s", s.supervisorName, s.id, reason)
-	if s.hasDesired && s.ops.handleStop != nil {
-		s.ops.handleStop(context.Background(), s.desired)
+	if !s.hasDesired && (!s.draining || reason == "not_desired") {
+		return
 	}
+	stopSpec := s.currentOrDesiredLocked()
 	s.hasDesired = false
 	s.pending = false
+	if s.draining && reason != "not_desired" {
+		s.draining = false
+		s.drainToken++
+	}
 	if s.timer != nil {
 		s.stopTimerLocked()
+	}
+	if s.currentCancel != nil {
+		if reason == "not_desired" && s.ops.beginDrain != nil {
+			s.draining = true
+			s.drainToken++
+			token := s.drainToken
+			attemptID := s.currentAttempt
+			s.phase = s.ops.drainingPhase
+			if s.phase == "" {
+				s.phase = string(runtimes.PhaseStopping)
+			}
+			s.writeStatusLoggedLocked(stopSpec, statusWrite{Phase: s.phase, At: s.clock.Now()})
+			drained := s.ops.beginDrain(context.Background(), stopSpec)
+			if drained != nil {
+				select {
+				case <-drained:
+					s.finishStopLocked(reason, stopSpec)
+				default:
+					go s.waitForDrain(token, attemptID, reason, stopSpec, drained)
+				}
+				return
+			}
+		}
+		s.finishStopLocked(reason, stopSpec)
+		return
+	}
+	if s.ops.handleStop != nil {
+		s.ops.handleStop(context.Background(), stopSpec)
+	}
+	if s.phase != PhaseStopped {
+		s.phase = PhaseStopped
+		s.writeStatusLoggedLocked(stopSpec, statusWrite{
+			Phase: PhaseStopped,
+			Exit:  runtimes.TerminalExit("stopped", reason),
+			At:    s.clock.Now(),
+		})
+	}
+}
+
+func (s *runtimeSlot[S]) waitForDrain(token int64, attemptID int64, reason string, spec S, drained <-chan struct{}) {
+	<-drained
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.draining || token != s.drainToken || attemptID != s.currentAttempt {
+		return
+	}
+	log.Printf("[paxd] %s slot id=%s drain complete", s.supervisorName, s.id)
+	s.finishStopLocked(reason, spec)
+}
+
+func (s *runtimeSlot[S]) finishStopLocked(reason string, spec S) {
+	s.draining = false
+	s.drainToken++
+	if s.ops.handleStop != nil {
+		s.ops.handleStop(context.Background(), spec)
 	}
 	if s.currentCancel != nil {
 		s.phase = string(runtimes.PhaseStopping)
@@ -576,12 +675,19 @@ func (s *runtimeSlot[S]) Stop(reason string) {
 	}
 	if s.phase != PhaseStopped {
 		s.phase = PhaseStopped
-		s.writeStatusLoggedLocked(s.desired, statusWrite{
+		s.writeStatusLoggedLocked(spec, statusWrite{
 			Phase: PhaseStopped,
 			Exit:  runtimes.TerminalExit("stopped", reason),
 			At:    s.clock.Now(),
 		})
 	}
+}
+
+func (s *runtimeSlot[S]) currentOrDesiredLocked() S {
+	if s.hasCurrentSpec {
+		return s.currentSpec
+	}
+	return s.desired
 }
 
 func (s *runtimeSlot[S]) Snapshot() SlotSnapshot {
@@ -611,6 +717,8 @@ func (s *runtimeSlot[S]) startLocked() {
 	if s.ops.prepareStart != nil {
 		spec = s.ops.prepareStart(spec)
 	}
+	s.currentSpec = spec
+	s.hasCurrentSpec = true
 	session := s.ops.newSession(spec)
 	if session == nil {
 		session = runtimes.Session(sessionFunc(func(context.Context) runtimes.Exit {
@@ -622,6 +730,7 @@ func (s *runtimeSlot[S]) startLocked() {
 	s.currentAttempt++
 	attemptID := s.currentAttempt
 	s.pending = false
+	s.draining = false
 	s.backoffUntil = nil
 	s.phase = s.ops.startingPhase
 	log.Printf(
@@ -661,13 +770,20 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		return
 	}
 	s.currentCancel = nil
+	s.hasCurrentSpec = false
 	if !s.hasDesired {
+		if s.draining {
+			s.draining = false
+			s.drainToken++
+			if s.ops.handleStop != nil {
+				s.ops.handleStop(context.Background(), spec)
+			}
+		}
 		s.phase = PhaseStopped
 		s.writeStatusLoggedLocked(spec, statusWrite{Phase: PhaseStopped, Exit: exit, At: s.clock.Now()})
 		return
 	}
-	if s.ops.generation(spec) != s.ops.generation(s.desired) ||
-		s.ops.restartNonce(spec) != s.ops.restartNonce(s.desired) {
+	if s.pending || s.desiredChanged(spec, s.desired) {
 		log.Printf("[paxd] %s slot id=%s restarting for newer desired", s.supervisorName, s.id)
 		s.reconnects = 0
 		s.startLocked()
@@ -740,6 +856,14 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 			At:    s.clock.Now(),
 		})
 	}
+}
+
+func (s *runtimeSlot[S]) desiredChanged(current S, next S) bool {
+	if s.ops.desiredChanged != nil {
+		return s.ops.desiredChanged(current, next)
+	}
+	return s.ops.generation(current) != s.ops.generation(next) ||
+		s.ops.restartNonce(current) != s.ops.restartNonce(next)
 }
 
 func (s *runtimeSlot[S]) startTimerLocked(delay time.Duration) {

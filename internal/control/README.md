@@ -103,6 +103,7 @@ type Store interface {
 type Supervisors interface {
     WakeRemotes()
     WakeAgentConnections()
+    WakeACPSlots()
 }
 
 type HarnessRegistry interface {

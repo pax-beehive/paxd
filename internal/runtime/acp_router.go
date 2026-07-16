@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ type ACPRouteStore interface {
 	GetACPSessionRoute(ctx context.Context, connectionID string, nativeSessionID string) (ACPRoute, bool, error)
 	UpsertACPSessionRoute(ctx context.Context, connectionID string, nativeSessionID string, resumeParams json.RawMessage) (ACPRoute, error)
 	BindACPSessionRoute(ctx context.Context, update ACPRouteBindingUpdate) (ACPRoute, bool, error)
+	CountBoundACPSessionRoutesBySlot(ctx context.Context, connectionID string) (map[string]int, error)
 	ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error)
 }
 
@@ -86,6 +88,10 @@ type ACPRouter struct {
 	activeSlotPrompts  map[string]string
 	activeSessionTurns map[string]string
 	waiters            map[string]chan acpRPCWaitResult
+	slotReservations   map[string]int
+	lastAssigned       map[string]uint64
+	drainingSlots      map[string]*slotDrain
+	assignmentSeq      uint64
 	resumeSeq          int64
 }
 
@@ -116,6 +122,12 @@ type pendingWorkerRequest struct {
 	processEpoch string
 }
 
+type slotDrain struct {
+	processEpoch string
+	done         chan struct{}
+	closed       bool
+}
+
 func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOption) *ACPRouter {
 	router := &ACPRouter{
 		connectionID:       connectionID,
@@ -128,6 +140,9 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		activeSlotPrompts:  make(map[string]string),
 		activeSessionTurns: make(map[string]string),
 		waiters:            make(map[string]chan acpRPCWaitResult),
+		slotReservations:   make(map[string]int),
+		lastAssigned:       make(map[string]uint64),
+		drainingSlots:      make(map[string]*slotDrain),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -142,14 +157,40 @@ func (r *ACPRouter) UpsertSlot(slot ACPRouterSlot) {
 		return
 	}
 	r.mu.Lock()
+	if drain := r.drainingSlots[slot.SlotID()]; drain != nil && drain.processEpoch != slot.ProcessEpoch() {
+		r.closeSlotDrainLocked(drain)
+		delete(r.drainingSlots, slot.SlotID())
+	}
 	r.slots[slot.SlotID()] = slot
 	r.mu.Unlock()
+}
+
+func (r *ACPRouter) BeginSlotDrain(slotID string, processEpoch string) <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	slot := r.slots[slotID]
+	if slot == nil || (processEpoch != "" && slot.ProcessEpoch() != processEpoch) {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	if drain := r.drainingSlots[slotID]; drain != nil && drain.processEpoch == slot.ProcessEpoch() {
+		return drain.done
+	}
+	drain := &slotDrain{processEpoch: slot.ProcessEpoch(), done: make(chan struct{})}
+	r.drainingSlots[slotID] = drain
+	r.signalSlotDrainIfIdleLocked(slotID)
+	return drain.done
 }
 
 func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 	r.mu.Lock()
 	if slot := r.slots[slotID]; slot != nil && (processEpoch == "" || slot.ProcessEpoch() == processEpoch) {
 		delete(r.slots, slotID)
+	}
+	if drain := r.drainingSlots[slotID]; drain != nil && (processEpoch == "" || drain.processEpoch == processEpoch) {
+		r.closeSlotDrainLocked(drain)
+		delete(r.drainingSlots, slotID)
 	}
 	waiterPrefix := slotID + "|"
 	if processEpoch != "" {
@@ -166,6 +207,14 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 			delete(r.pendingPrompts, id)
 			delete(r.activeSessionTurns, prompt.nativeSessionID)
 			delete(r.activeSlotPrompts, slotID)
+		}
+	}
+	for id, pending := range r.pendingNew {
+		if pending.slotID == slotID && (processEpoch == "" || pending.processEpoch == processEpoch) {
+			delete(r.pendingNew, id)
+			if r.slotReservations[slotID] > 0 {
+				r.slotReservations[slotID]--
+			}
 		}
 	}
 	r.mu.Unlock()
@@ -236,13 +285,13 @@ func (r *ACPRouter) handleSessionNew(ctx context.Context, msg acpRPCMessage, pay
 	if err != nil {
 		return err
 	}
-	slot, err := r.selectReadySlot("")
-	if err != nil {
-		return err
-	}
 	key := rpcIDKey(msg.ID)
 	if key == "" {
 		return ACPRouterError{Code: "request_id_required", Message: "session/new requires an id"}
+	}
+	slot, err := r.selectReadySlot(ctx)
+	if err != nil {
+		return err
 	}
 	r.mu.Lock()
 	r.pendingNew[key] = pendingNewSession{
@@ -255,6 +304,7 @@ func (r *ACPRouter) handleSessionNew(ctx context.Context, msg acpRPCMessage, pay
 		r.mu.Lock()
 		delete(r.pendingNew, key)
 		r.mu.Unlock()
+		r.releaseSlotReservation(slot.SlotID())
 		return err
 	}
 	return nil
@@ -271,26 +321,42 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 	if !ok {
 		return ACPRouterError{Code: "session_route_missing", Message: "native session has no paxd route"}
 	}
-	slot, hot := r.hotSlot(route)
+	allowDraining := msg.Method == "session/cancel"
+	slot, hot := r.hotSlot(route, allowDraining)
+	if !hot && !allowDraining && r.routeSlotDraining(route) {
+		return ACPRouterError{Code: "slot_draining", Message: "ACP slot is draining"}
+	}
+	reserved := false
 	if !hot {
-		slot, err = r.selectReadySlot(route.LastSlotID)
+		slot, err = r.selectReadySlot(ctx)
 		if err != nil {
 			return err
 		}
+		reserved = true
 		if err := r.resumeColdRoute(ctx, slot, route); err != nil {
+			r.releaseSlotReservation(slot.SlotID())
 			return err
 		}
 	}
 	if needsPromptLease {
 		if err := r.acquirePromptLease(nativeSessionID, slot, msg.ID); err != nil {
+			if reserved {
+				r.releaseSlotReservation(slot.SlotID())
+			}
 			return err
 		}
 	}
 	if err := slot.Send(ctx, append([]byte(nil), payload...)); err != nil {
+		if reserved {
+			r.releaseSlotReservation(slot.SlotID())
+		}
 		if needsPromptLease {
 			r.releasePrompt(nativeSessionID, slot.SlotID(), rpcIDKey(msg.ID))
 		}
 		return err
+	}
+	if reserved {
+		r.releaseSlotReservation(slot.SlotID())
 	}
 	return nil
 }
@@ -312,9 +378,12 @@ func (r *ACPRouter) handleManagerResponse(ctx context.Context, nativeSessionID s
 		return ACPRouterError{Code: "worker_request_missing", Message: "no pending worker request for response"}
 	}
 	if !live {
+		r.notifySlotDrain(source.slotID)
 		return ACPRouterError{Code: "worker_request_source_stale", Message: "worker request source is no longer live"}
 	}
-	return slot.Send(ctx, append([]byte(nil), payload...))
+	err := slot.Send(ctx, append([]byte(nil), payload...))
+	r.notifySlotDrain(source.slotID)
+	return err
 }
 
 func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string, processEpoch string, msg acpRPCMessage, payload []byte) (string, error) {
@@ -329,6 +398,9 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 		delete(r.pendingNew, key)
 	}
 	r.mu.Unlock()
+	if ok {
+		r.releaseSlotReservation(pending.slotID)
+	}
 	if !ok || msg.Error != nil {
 		return "", nil
 	}
@@ -355,6 +427,13 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 	if !bound {
 		return "", ACPRouterError{Code: "session_route_conflict", Message: "session/new route bind conflicted"}
 	}
+	log.Printf(
+		"[paxd] acp route bound connection_id=%s native_session_id=%s slot_id=%s process_epoch=%s operation=session_new",
+		r.connectionID,
+		sessionID,
+		slotID,
+		processEpoch,
+	)
 	_ = payload
 	return sessionID, nil
 }
@@ -364,6 +443,14 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 	if err != nil {
 		return err
 	}
+	log.Printf(
+		"[paxd] acp route resume starting connection_id=%s native_session_id=%s last_slot_id=%s target_slot_id=%s target_process_epoch=%s",
+		r.connectionID,
+		route.NativeSessionID,
+		route.LastSlotID,
+		slot.SlotID(),
+		slot.ProcessEpoch(),
+	)
 	id := r.nextResumeID()
 	request, err := json.Marshal(acpRPCMessage{
 		JSONRPC: "2.0",
@@ -405,44 +492,82 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 	if !bound {
 		return ACPRouterError{Code: "session_route_conflict", Message: "resume route bind conflicted"}
 	}
+	log.Printf(
+		"[paxd] acp route resume complete connection_id=%s native_session_id=%s slot_id=%s process_epoch=%s",
+		r.connectionID,
+		route.NativeSessionID,
+		slot.SlotID(),
+		slot.ProcessEpoch(),
+	)
 	return nil
 }
 
-func (r *ACPRouter) selectReadySlot(preferAvoidSlotID string) (ACPRouterSlot, error) {
+func (r *ACPRouter) selectReadySlot(ctx context.Context) (ACPRouterSlot, error) {
+	boundCounts, err := r.store.CountBoundACPSessionRoutesBySlot(ctx, r.connectionID)
+	if err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	slots := make([]ACPRouterSlot, 0, len(r.slots))
 	for _, slot := range r.slots {
-		if slot.Ready() {
+		if slot.Ready() && !r.slotDrainingLocked(slot) {
 			slots = append(slots, slot)
 		}
 	}
-	r.mu.Unlock()
 	if len(slots) == 0 {
 		return nil, ACPRouterError{Code: "slot_unavailable", Message: "no ready ACP slot"}
 	}
 	sort.Slice(slots, func(i, j int) bool {
-		if slots[i].SlotID() == preferAvoidSlotID && slots[j].SlotID() != preferAvoidSlotID {
-			return false
+		countI := boundCounts[slots[i].SlotID()] + r.slotReservations[slots[i].SlotID()]
+		countJ := boundCounts[slots[j].SlotID()] + r.slotReservations[slots[j].SlotID()]
+		if countI != countJ {
+			return countI < countJ
 		}
-		if slots[j].SlotID() == preferAvoidSlotID && slots[i].SlotID() != preferAvoidSlotID {
-			return true
+		assignedI := r.lastAssigned[slots[i].SlotID()]
+		assignedJ := r.lastAssigned[slots[j].SlotID()]
+		if assignedI != assignedJ {
+			return assignedI < assignedJ
 		}
 		return slots[i].Ordinal() < slots[j].Ordinal()
 	})
-	return slots[0], nil
+	selected := slots[0]
+	r.slotReservations[selected.SlotID()]++
+	r.assignmentSeq++
+	r.lastAssigned[selected.SlotID()] = r.assignmentSeq
+	return selected, nil
 }
 
-func (r *ACPRouter) hotSlot(route ACPRoute) (ACPRouterSlot, bool) {
+func (r *ACPRouter) releaseSlotReservation(slotID string) {
+	r.mu.Lock()
+	if r.slotReservations[slotID] > 0 {
+		r.slotReservations[slotID]--
+	}
+	r.signalSlotDrainIfIdleLocked(slotID)
+	r.mu.Unlock()
+}
+
+func (r *ACPRouter) hotSlot(route ACPRoute, allowDraining bool) (ACPRouterSlot, bool) {
 	if route.BoundSlotID == "" || route.BoundProcessEpoch == "" {
 		return nil, false
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	slot := r.slots[route.BoundSlotID]
-	r.mu.Unlock()
 	if slot == nil || !slot.Ready() || slot.ProcessEpoch() != route.BoundProcessEpoch {
 		return nil, false
 	}
+	if !allowDraining && r.slotDrainingLocked(slot) {
+		return nil, false
+	}
 	return slot, true
+}
+
+func (r *ACPRouter) routeSlotDraining(route ACPRoute) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	drain := r.drainingSlots[route.BoundSlotID]
+	return drain != nil && drain.processEpoch == route.BoundProcessEpoch
 }
 
 func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlot, requestID json.RawMessage) error {
@@ -476,6 +601,7 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 		delete(r.pendingPrompts, key)
 		delete(r.activeSessionTurns, pending.nativeSessionID)
 		delete(r.activeSlotPrompts, slotID)
+		r.signalSlotDrainIfIdleLocked(slotID)
 	}
 	r.mu.Unlock()
 	if ok && pending.slotID == slotID && pending.processEpoch == processEpoch {
@@ -489,6 +615,50 @@ func (r *ACPRouter) releasePrompt(nativeSessionID string, slotID string, request
 	delete(r.pendingPrompts, requestKey)
 	delete(r.activeSessionTurns, nativeSessionID)
 	delete(r.activeSlotPrompts, slotID)
+	r.signalSlotDrainIfIdleLocked(slotID)
+	r.mu.Unlock()
+}
+
+func (r *ACPRouter) slotDrainingLocked(slot ACPRouterSlot) bool {
+	drain := r.drainingSlots[slot.SlotID()]
+	return drain != nil && drain.processEpoch == slot.ProcessEpoch()
+}
+
+func (r *ACPRouter) signalSlotDrainIfIdleLocked(slotID string) {
+	drain := r.drainingSlots[slotID]
+	if drain == nil || drain.closed || r.slotReservations[slotID] > 0 || r.activeSlotPrompts[slotID] != "" {
+		return
+	}
+	for _, pending := range r.pendingNew {
+		if pending.slotID == slotID && pending.processEpoch == drain.processEpoch {
+			return
+		}
+	}
+	for _, pending := range r.pendingWorkerReqs {
+		if pending.slotID == slotID && pending.processEpoch == drain.processEpoch {
+			return
+		}
+	}
+	waiterPrefix := slotID + "|" + drain.processEpoch + "|"
+	for key := range r.waiters {
+		if strings.HasPrefix(key, waiterPrefix) {
+			return
+		}
+	}
+	r.closeSlotDrainLocked(drain)
+}
+
+func (r *ACPRouter) closeSlotDrainLocked(drain *slotDrain) {
+	if drain == nil || drain.closed {
+		return
+	}
+	drain.closed = true
+	close(drain.done)
+}
+
+func (r *ACPRouter) notifySlotDrain(slotID string) {
+	r.mu.Lock()
+	r.signalSlotDrainIfIdleLocked(slotID)
 	r.mu.Unlock()
 }
 

@@ -4,6 +4,7 @@ import "strings"
 
 const (
 	ErrCodeInvalidArgument = "invalid_argument"
+	maxDesiredACPSlots     = 16
 )
 
 func (status CommandStatus) Valid() bool {
@@ -228,8 +229,8 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 		if *cmd.DesiredSlots < 1 {
 			return invalid("update_agent_connection.desired_slots", "desired slots must be at least 1")
 		}
-		if *cmd.DesiredSlots > 1 {
-			return invalid("update_agent_connection.desired_slots", "desired slots above 1 are not enabled")
+		if *cmd.DesiredSlots > maxDesiredACPSlots {
+			return invalid("update_agent_connection.desired_slots", "desired slots must not exceed 16")
 		}
 	}
 	return nil

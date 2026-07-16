@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -156,6 +157,7 @@ func TestRuntimeSupervisorValidationAndNilBranches(t *testing.T) {
 	empty := &runtimeSupervisors{}
 	empty.WakeRemotes()
 	empty.WakeAgentConnections()
+	empty.WakeACPSlots()
 	empty.Start(context.Background())
 
 	if err := empty.Configure(nil, nil); err == nil {
@@ -174,12 +176,14 @@ func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	harnesses := &fakeDaemonHarnessRegistry{}
 	remote := &fakeDaemonSupervisor{}
 	agent := &fakeDaemonSupervisor{}
+	acpSlots := &fakeDaemonSupervisor{}
 	rt := &Runtime{
 		hostMetrics: metrics,
 		harnesses:   harnesses,
 		supervisors: &runtimeSupervisors{
-			remote: remote,
-			agent:  agent,
+			remote:   remote,
+			agent:    agent,
+			acpSlots: acpSlots,
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,12 +192,14 @@ func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	rt.StartSupervisors(ctx)
 
 	require.Eventually(t, func() bool {
-		return metrics.started && harnesses.discovered && remote.started && agent.started
+		return metrics.isStarted() && harnesses.isDiscovered() && remote.isStarted() && agent.isStarted() && acpSlots.isStarted()
 	}, time.Second, 10*time.Millisecond)
 	rt.supervisors.WakeRemotes()
 	rt.supervisors.WakeAgentConnections()
-	assert.Equal(t, 1, remote.wakes)
-	assert.Equal(t, 1, agent.wakes)
+	rt.supervisors.WakeACPSlots()
+	assert.Equal(t, 1, remote.wakeCount())
+	assert.Equal(t, 1, agent.wakeCount())
+	assert.Equal(t, 1, acpSlots.wakeCount())
 	cancel()
 }
 
@@ -246,14 +252,24 @@ func openTestStore(t *testing.T) *daemonstore.Store {
 }
 
 type fakeMetricsStarter struct {
+	mu      sync.Mutex
 	started bool
 }
 
 func (f *fakeMetricsStarter) Start(context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = true
 }
 
+func (f *fakeMetricsStarter) isStarted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
+}
+
 type fakeDaemonHarnessRegistry struct {
+	mu         sync.Mutex
 	discovered bool
 }
 
@@ -262,11 +278,20 @@ func (f *fakeDaemonHarnessRegistry) ListCached(context.Context) ([]control.Harne
 }
 
 func (f *fakeDaemonHarnessRegistry) Discover(context.Context, control.DiscoverHarnessesQuery) ([]control.HarnessView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.discovered = true
 	return nil, nil
 }
 
+func (f *fakeDaemonHarnessRegistry) isDiscovered() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.discovered
+}
+
 type fakeDaemonSupervisor struct {
+	mu       sync.Mutex
 	wakes    int
 	started  bool
 	starts   int
@@ -274,12 +299,16 @@ type fakeDaemonSupervisor struct {
 }
 
 func (f *fakeDaemonSupervisor) Start(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = true
 	f.starts++
 	return f.startErr
 }
 
 func (f *fakeDaemonSupervisor) Wake() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.wakes++
 }
 
@@ -288,7 +317,21 @@ func (f *fakeDaemonSupervisor) Snapshot() supervisor.Snapshot {
 }
 
 func (f *fakeDaemonSupervisor) startedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.starts
+}
+
+func (f *fakeDaemonSupervisor) isStarted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
+}
+
+func (f *fakeDaemonSupervisor) wakeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.wakes
 }
 
 type fakeHeaderProvider struct{}
