@@ -201,6 +201,9 @@ func (cmd CreateAgentConnectionCommand) Validate() error {
 	if err := validateCommandWords("create_agent_connection.command", cmd.Command); err != nil {
 		return err
 	}
+	if err := validateDesiredSlots("create_agent_connection.desired_slots", cmd.DesiredSlots); err != nil {
+		return err
+	}
 	if cmd.DesiredState != "" {
 		return validateDesiredState("create_agent_connection.desired_state", cmd.DesiredState)
 	}
@@ -225,13 +228,21 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 	if cmd.DesiredState != nil {
 		return validateDesiredState("update_agent_connection.desired_state", *cmd.DesiredState)
 	}
-	if cmd.DesiredSlots != nil {
-		if *cmd.DesiredSlots < 1 {
-			return invalid("update_agent_connection.desired_slots", "desired slots must be at least 1")
-		}
-		if *cmd.DesiredSlots > maxDesiredACPSlots {
-			return invalid("update_agent_connection.desired_slots", "desired slots must not exceed 16")
-		}
+	if err := validateDesiredSlots("update_agent_connection.desired_slots", cmd.DesiredSlots); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDesiredSlots(field string, desiredSlots *int) error {
+	if desiredSlots == nil {
+		return nil
+	}
+	if *desiredSlots < 1 {
+		return invalid(field, "desired slots must be at least 1")
+	}
+	if *desiredSlots > maxDesiredACPSlots {
+		return invalid(field, "desired slots must not exceed 16")
 	}
 	return nil
 }

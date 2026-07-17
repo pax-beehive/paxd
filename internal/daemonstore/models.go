@@ -61,7 +61,7 @@ type AgentConnection struct {
 	EnvJSON          string     `gorm:"type:text;not null;default:'{}'"`
 	Enabled          bool       `gorm:"not null"`
 	DesiredState     string     `gorm:"type:text;not null"`
-	DesiredACPSlots  int        `gorm:"column:desired_acp_slots;not null;default:1"`
+	DesiredACPSlots  int        `gorm:"column:desired_acp_slots;not null;default:2"`
 	Generation       int64      `gorm:"not null;default:1"`
 	RestartNonce     int64      `gorm:"not null;default:0"`
 	CreatedAt        time.Time  `gorm:"column:created_at;not null"`

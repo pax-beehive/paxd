@@ -76,7 +76,7 @@ func TestDesiredSlotHotScaleDoesNotRestartAgentTunnel(t *testing.T) {
 	require.NoError(t, agentSupervisor.Reconcile(ctx))
 	require.NoError(t, slotSupervisor.Reconcile(ctx))
 	require.Len(t, agentFactory.specs(), 1)
-	require.Len(t, slotFactory.specs(), 1)
+	require.Len(t, slotFactory.specs(), 2)
 	tunnelSession := agentFactory.sessions()[0]
 
 	desiredSlots := 3

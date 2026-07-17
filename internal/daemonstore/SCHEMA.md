@@ -153,6 +153,7 @@ working_dir TEXT NOT NULL DEFAULT ''
 env_json TEXT NOT NULL DEFAULT '{}'
 enabled INTEGER NOT NULL DEFAULT 1
 desired_state TEXT NOT NULL         -- running | stopped | deleted
+desired_acp_slots INTEGER NOT NULL DEFAULT 2
 generation INTEGER NOT NULL DEFAULT 1
 restart_nonce INTEGER NOT NULL DEFAULT 0
 created_at TEXT NOT NULL
@@ -171,6 +172,8 @@ Rules:
 - `cloud_agent_id` may be filled later by runtime registration through a generation-guarded update and must not increment `generation`.
 - `command_json` is a JSON string array.
 - `env_json` stores non-secret runtime environment configuration. Do not store secrets here unless they are explicit dev-only refs.
+- `desired_acp_slots` defaults to `2` for new connections and is constrained by
+  the control API to the range `1..16`.
 - `desired_state=deleted` should be treated as logically deleted. Runtime must stop; physical cleanup can happen later.
 
 ## agent_connection_status

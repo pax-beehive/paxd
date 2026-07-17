@@ -418,6 +418,10 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 	if desired == "" {
 		desired = control.DesiredStateRunning
 	}
+	desiredSlots := 2
+	if cmd.DesiredSlots != nil {
+		desiredSlots = *cmd.DesiredSlots
+	}
 	conn := AgentConnection{
 		ID:              cmd.ID,
 		RemoteID:        cmd.RemoteID,
@@ -431,7 +435,7 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 		EnvJSON:         envJSON,
 		Enabled:         boolDefault(cmd.Enabled, true),
 		DesiredState:    string(desired),
-		DesiredACPSlots: 1,
+		DesiredACPSlots: desiredSlots,
 		Generation:      1,
 		RestartNonce:    0,
 		CreatedAt:       now,
