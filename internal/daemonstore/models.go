@@ -49,9 +49,9 @@ func (RemoteStatus) TableName() string { return "remote_status" }
 
 type AgentConnection struct {
 	ID               string     `gorm:"primaryKey;type:text"`
-	RemoteID         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
-	Name             string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name"`
-	CloudAgentID     *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
+	RemoteID         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name,where:deleted_at IS NULL;uniqueIndex:idx_agent_connection_remote_cloud_agent,where:deleted_at IS NULL"`
+	Name             string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name,where:deleted_at IS NULL"`
+	CloudAgentID     *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent,where:deleted_at IS NULL"`
 	TransportQueueID string     `gorm:"type:text;not null;default:''"`
 	InstanceID       string     `gorm:"type:text;not null"`
 	AgentType        string     `gorm:"type:text;not null"`

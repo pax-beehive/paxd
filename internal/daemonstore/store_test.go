@@ -80,6 +80,40 @@ func TestMigrateCreatesTargetTablesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateUpgradesAgentConnectionUniqueIndexes(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+
+	for _, name := range []string{
+		"idx_agent_connection_remote_name",
+		"idx_agent_connection_remote_cloud_agent",
+	} {
+		require.NoError(t, store.DB().Migrator().DropIndex(&AgentConnection{}, name))
+	}
+	require.NoError(t, store.DB().Exec(
+		"CREATE UNIQUE INDEX idx_agent_connection_remote_name ON agent_connection(remote_id, name)",
+	).Error)
+	require.NoError(t, store.DB().Exec(
+		"CREATE UNIQUE INDEX idx_agent_connection_remote_cloud_agent ON agent_connection(remote_id, cloud_agent_id)",
+	).Error)
+
+	require.NoError(t, store.Migrate(ctx))
+	for _, name := range []string{
+		"idx_agent_connection_remote_name",
+		"idx_agent_connection_remote_cloud_agent",
+	} {
+		var definition struct {
+			SQL string
+		}
+		result := store.DB().Raw(
+			"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", name,
+		).Scan(&definition)
+		require.NoError(t, result.Error)
+		require.Equal(t, int64(1), result.RowsAffected)
+		require.True(t, isActiveAgentConnectionIndex(definition.SQL), definition.SQL)
+	}
+}
+
 func TestOpenSQLite(t *testing.T) {
 	store, err := OpenSQLite(t.TempDir() + "/daemonstore.db")
 	if err != nil {
@@ -460,7 +494,10 @@ func TestAgentConnectionRepository(t *testing.T) {
 	}
 	require.Equal(t, 2, conn.DesiredACPSlots)
 
-	if _, err := store.CreateAgentConnection(ctx, create); !errors.Is(err, ErrDuplicate) {
+	duplicate := create
+	duplicate.ID = "conn_duplicate_name"
+	duplicate.CloudAgentID = "agent_duplicate_name"
+	if _, err := store.CreateAgentConnection(ctx, duplicate); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate CreateAgentConnection() error = %v, want ErrDuplicate", err)
 	}
 
@@ -554,6 +591,26 @@ func TestAgentConnectionRepository(t *testing.T) {
 	if len(conns) != 1 {
 		t.Fatalf("all connections = %+v, want deleted connection included", conns)
 	}
+
+	recreated, err := store.CreateAgentConnection(ctx, control.CreateAgentConnectionCommand{
+		RemoteID:     create.RemoteID,
+		Name:         updatedAll.Name,
+		CloudAgentID: updatedAll.CloudAgentID,
+		InstanceID:   create.InstanceID,
+		AgentType:    create.AgentType,
+		Harness:      create.Harness,
+		Command:      create.Command,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, deleted.ID, recreated.ID)
+	require.True(t, strings.HasPrefix(recreated.ID, "conn_"), recreated.ID)
+	require.Equal(t, deleted.Name, recreated.Name)
+	require.Equal(t, deleted.CloudAgentID, recreated.CloudAgentID)
+
+	conns, err = store.ListAgentConnections(ctx, control.ListAgentConnectionsQuery{})
+	require.NoError(t, err)
+	require.Len(t, conns, 1)
+	require.Equal(t, recreated.ID, conns[0].ID)
 }
 
 func TestCreateAgentConnectionDesiredSlots(t *testing.T) {
