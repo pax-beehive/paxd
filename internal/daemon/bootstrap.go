@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -77,7 +78,11 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	metrics := opts.HostMetrics
 	var metricsStarter interface{ Start(context.Context) }
 	if metrics == nil {
-		sampler := hostmetrics.NewSampler(10 * time.Second)
+		sampler := hostmetrics.NewSampler(10*time.Second).WithIdentity(
+			cfg.Agent.MachineType,
+			runtime.GOOS,
+			runtime.GOARCH,
+		)
 		metrics = sampler
 		metricsStarter = sampler
 	}

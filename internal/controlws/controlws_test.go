@@ -331,6 +331,9 @@ func TestInitialRuntimeSnapshotReportUsesControlLayer(t *testing.T) {
 		snapshot: control.RuntimeSnapshotReport{
 			SnapshotID: "snap_1",
 			Host: &control.HostMetricsReport{
+				MachineName:   "MacBook Pro",
+				OS:            "darwin",
+				Arch:          "amd64",
 				CPUPercent:    21.4,
 				MemoryPercent: 63.2,
 				UptimeSeconds: 80422,
@@ -371,6 +374,10 @@ func TestInitialRuntimeSnapshotReportUsesControlLayer(t *testing.T) {
 	assert.Equal(t, control.ReportRuntimeSnapshot, got.Report.Type)
 	require.NotNil(t, got.Report.RuntimeSnapshot)
 	assert.Equal(t, "snap_1", got.Report.RuntimeSnapshot.SnapshotID)
+	require.NotNil(t, got.Report.RuntimeSnapshot.Host)
+	assert.Equal(t, "MacBook Pro", got.Report.RuntimeSnapshot.Host.MachineName)
+	assert.Equal(t, "darwin", got.Report.RuntimeSnapshot.Host.OS)
+	assert.Equal(t, "amd64", got.Report.RuntimeSnapshot.Host.Arch)
 	require.NotNil(t, got.Report.RuntimeSnapshot.Host)
 	assert.Equal(t, 21.4, got.Report.RuntimeSnapshot.Host.CPUPercent)
 	require.Len(t, got.Report.RuntimeSnapshot.Agents, 1)
