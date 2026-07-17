@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 const (
 	internalACPResumeIDPrefix = "paxd.resume."
+	paxConversationMCPName    = "pax-conversation"
 )
 
 type ACPRouterError struct {
@@ -79,6 +81,7 @@ type ACPRouter struct {
 	connectionID string
 	store        ACPRouteStore
 	output       ACPRouterOutputSink
+	executable   func() (string, error)
 
 	mu                 sync.Mutex
 	slots              map[string]ACPRouterSlot
@@ -101,6 +104,14 @@ func WithACPRouterOutputSink(sink ACPRouterOutputSink) ACPRouterOption {
 	return func(router *ACPRouter) {
 		if sink != nil {
 			router.output = sink
+		}
+	}
+}
+
+func WithACPRouterExecutablePath(resolver func() (string, error)) ACPRouterOption {
+	return func(router *ACPRouter) {
+		if resolver != nil {
+			router.executable = resolver
 		}
 	}
 }
@@ -133,6 +144,7 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		connectionID:       connectionID,
 		store:              store,
 		output:             ACPRouterOutputSinkFunc(nil),
+		executable:         os.Executable,
 		slots:              make(map[string]ACPRouterSlot),
 		pendingNew:         make(map[string]pendingNewSession),
 		pendingPrompts:     make(map[string]pendingPrompt),
@@ -234,10 +246,18 @@ func (r *ACPRouter) HandleManagerFrameForSession(ctx context.Context, nativeSess
 	}
 	switch msg.Method {
 	case "session/new":
-		return r.handleSessionNew(ctx, msg, payload)
+		localizedMsg, localizedPayload, err := r.localizeSessionLifecycleMessage(msg)
+		if err != nil {
+			return err
+		}
+		return r.handleSessionNew(ctx, localizedMsg, localizedPayload)
 	case "session/resume":
-		sessionID := firstSessionID(nativeSessionID, msg.Params)
-		return r.handleExplicitSessionResume(ctx, sessionID, msg, payload)
+		localizedMsg, localizedPayload, err := r.localizeSessionLifecycleMessage(msg)
+		if err != nil {
+			return err
+		}
+		sessionID := firstSessionID(nativeSessionID, localizedMsg.Params)
+		return r.handleExplicitSessionResume(ctx, sessionID, localizedMsg, localizedPayload)
 	case "session/prompt":
 		sessionID := firstSessionID(nativeSessionID, msg.Params)
 		return r.handleSessionOperation(ctx, sessionID, msg, payload, true)
@@ -486,7 +506,11 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 }
 
 func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, route ACPRoute) error {
-	resumeParams, err := resumeParamsForSession(route.NativeSessionID, route.ResumeParams)
+	resumeDescriptor, err := r.localizeSessionLifecycleParams(route.ResumeParams)
+	if err != nil {
+		return err
+	}
+	resumeParams, err := resumeParamsForSession(route.NativeSessionID, resumeDescriptor)
 	if err != nil {
 		return err
 	}
@@ -531,7 +555,7 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		SlotID:          slot.SlotID(),
 		ProcessEpoch:    slot.ProcessEpoch(),
 		ExpectedVersion: route.Version,
-		ResumeParams:    route.ResumeParams,
+		ResumeParams:    resumeDescriptor,
 	})
 	if err != nil {
 		return err
@@ -547,6 +571,71 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		slot.ProcessEpoch(),
 	)
 	return nil
+}
+
+func (r *ACPRouter) localizeSessionLifecycleMessage(msg acpRPCMessage) (acpRPCMessage, []byte, error) {
+	params, err := r.localizeSessionLifecycleParams(msg.Params)
+	if err != nil {
+		return acpRPCMessage{}, nil, err
+	}
+	msg.Params = params
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return acpRPCMessage{}, nil, err
+	}
+	return msg, payload, nil
+}
+
+func (r *ACPRouter) localizeSessionLifecycleParams(params json.RawMessage) (json.RawMessage, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(params, &raw); err != nil {
+		return nil, ACPRouterError{Code: "invalid_session_lifecycle", Message: "session lifecycle params must be an object"}
+	}
+	mcpServers, ok := firstJSONField(raw, "mcpServers", "mcp_servers")
+	if !ok {
+		raw["mcpServers"] = json.RawMessage(`[]`)
+		delete(raw, "mcp_servers")
+		return canonicalJSON(raw)
+	}
+	localizedServers, err := r.localizeMCPServers(mcpServers)
+	if err != nil {
+		return nil, err
+	}
+	raw["mcpServers"] = localizedServers
+	delete(raw, "mcp_servers")
+	return canonicalJSON(raw)
+}
+
+func (r *ACPRouter) localizeMCPServers(mcpServers json.RawMessage) (json.RawMessage, error) {
+	var servers []map[string]json.RawMessage
+	if err := json.Unmarshal(mcpServers, &servers); err != nil {
+		return append(json.RawMessage(nil), mcpServers...), nil
+	}
+	var executable string
+	for i := range servers {
+		if stringField(servers[i], "name") != paxConversationMCPName {
+			continue
+		}
+		if executable == "" {
+			path, err := r.executable()
+			if err != nil {
+				return nil, fmt.Errorf("resolve paxd executable path: %w", err)
+			}
+			executable = strings.TrimSpace(path)
+			if executable == "" {
+				return nil, ACPRouterError{Code: "paxd_executable_missing", Message: "paxd executable path is empty"}
+			}
+		}
+		command, _ := json.Marshal(executable)
+		args, _ := json.Marshal([]string{"mcp", "conversation", "serve"})
+		servers[i]["command"] = command
+		servers[i]["args"] = args
+	}
+	payload, err := json.Marshal(servers)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(payload), nil
 }
 
 func (r *ACPRouter) selectReadySlot(ctx context.Context) (ACPRouterSlot, error) {

@@ -49,6 +49,32 @@ func TestACPRouterCommitsNewSessionRouteBeforeEmittingResponse(t *testing.T) {
 	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[{"name":"fs","command":"fs-mcp","args":[],"env":[]}],"additionalDirectories":["/shared"]}`, string(route.ResumeParams))
 }
 
+func TestACPRouterLocalizesPaxConversationMCPServerOnNewSession(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router := NewACPRouter(
+		"conn_1",
+		store,
+		WithACPRouterExecutablePath(func() (string, error) {
+			return "/home/kk/.local/bin/paxd", nil
+		}),
+	)
+	router.UpsertSlot(slot)
+
+	err := router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`))
+	require.NoError(t, err)
+	require.Len(t, slot.writes, 1)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`, string(slot.writes[0]))
+
+	err = router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_1"}}`))
+	require.NoError(t, err)
+	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}`, string(route.ResumeParams))
+}
+
 func TestACPRouterDistributesNewSessionsAcrossReadySlotsAndKeepsRoutesSticky(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
@@ -249,6 +275,43 @@ func TestACPRouterResumesColdRouteBeforePrompt(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "slot_b", route.BoundSlotID)
 	assert.Equal(t, "epoch_b", route.BoundProcessEpoch)
+}
+
+func TestACPRouterLocalizesPaxConversationMCPServerOnColdResume(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_b", "epoch_b", 1)
+	store.seedRoute(ACPRoute{
+		ConnectionID:    "conn_1",
+		NativeSessionID: "session_cold",
+		ResumeParams:    json.RawMessage(`{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/usr/local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_SESSION_ID","value":"session_cold"}]}]}`),
+		Version:         1,
+	})
+	router := NewACPRouter(
+		"conn_1",
+		store,
+		WithACPRouterExecutablePath(func() (string, error) {
+			return "/home/kk/.local/bin/paxd", nil
+		}),
+	)
+	router.UpsertSlot(slot)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":20,"method":"session/prompt","params":{"sessionId":"session_cold","prompt":[]}}`))
+	}()
+
+	require.Eventually(t, func() bool { return slot.writeCount() == 1 }, eventuallyWait, eventuallyTick)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":"paxd.resume.1","method":"session/resume","params":{"sessionId":"session_cold","cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_SESSION_ID","value":"session_cold"}]}]}}`, string(slot.writes[0]))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_b", "epoch_b", []byte(`{"jsonrpc":"2.0","id":"paxd.resume.1","result":{"ok":true}}`)))
+	require.NoError(t, <-done)
+	require.Len(t, slot.writes, 2)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":20,"method":"session/prompt","params":{"sessionId":"session_cold","prompt":[]}}`, string(slot.writes[1]))
+
+	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_cold")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_SESSION_ID","value":"session_cold"}]}]}`, string(route.ResumeParams))
 }
 
 func TestACPRouterResumeFailureDoesNotCreateReplacementSession(t *testing.T) {
