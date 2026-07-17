@@ -458,7 +458,7 @@ func TestAgentConnectionRepository(t *testing.T) {
 	if conn.Generation != 1 || conn.RestartNonce != 0 || conn.DesiredState != control.DesiredStateRunning {
 		t.Fatalf("connection view = %+v", conn)
 	}
-	require.Equal(t, 1, conn.DesiredACPSlots)
+	require.Equal(t, 2, conn.DesiredACPSlots)
 
 	if _, err := store.CreateAgentConnection(ctx, create); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate CreateAgentConnection() error = %v, want ErrDuplicate", err)
@@ -556,6 +556,29 @@ func TestAgentConnectionRepository(t *testing.T) {
 	}
 }
 
+func TestCreateAgentConnectionDesiredSlots(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	_, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api.example.test"))
+	require.NoError(t, err)
+
+	create := control.CreateAgentConnectionCommand{
+		RemoteID: "remote_prod", Name: "codex", InstanceID: "codex",
+		AgentType: "codex", Harness: "codex", Command: []string{"codex"},
+	}
+	created, err := store.CreateAgentConnection(ctx, create)
+	require.NoError(t, err)
+	require.Equal(t, 2, created.DesiredACPSlots)
+
+	desiredSlots := 4
+	create.Name = "codex-slots"
+	create.InstanceID = "codex-slots"
+	create.DesiredSlots = &desiredSlots
+	created, err = store.CreateAgentConnection(ctx, create)
+	require.NoError(t, err)
+	require.Equal(t, desiredSlots, created.DesiredACPSlots)
+}
+
 func TestAgentConnectionDesiredSlotsValidation(t *testing.T) {
 	t.Run("allows count one", func(t *testing.T) {
 		desiredSlots := 1
@@ -583,6 +606,19 @@ func TestAgentConnectionDesiredSlotsValidation(t *testing.T) {
 		cmd := control.UpdateAgentConnectionCommand{ConnectionID: "conn_codex", DesiredSlots: &desiredSlots}
 
 		require.Error(t, cmd.Validate())
+	})
+
+	t.Run("validates create count", func(t *testing.T) {
+		desiredSlots := 0
+		cmd := control.CreateAgentConnectionCommand{
+			RemoteID: "remote_prod", Name: "codex", InstanceID: "codex",
+			AgentType: "codex", Harness: "codex", Command: []string{"codex"},
+			DesiredSlots: &desiredSlots,
+		}
+
+		require.Error(t, cmd.Validate())
+		desiredSlots = 2
+		require.NoError(t, cmd.Validate())
 	})
 }
 

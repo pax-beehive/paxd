@@ -188,6 +188,7 @@ type CreateAgentConnectionCommand struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Enabled      *bool             `json:"enabled,omitempty"`
 	DesiredState DesiredState      `json:"desired_state,omitempty"`
+	DesiredSlots *int              `json:"desired_slots,omitempty"`
 }
 
 type UpdateAgentConnectionCommand struct {
