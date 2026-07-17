@@ -10,7 +10,7 @@ Upstream callers:
 
 - `control.Service` calls supervisor wake ports after desired-state commits.
 - daemon bootstrap starts supervisors and owns their root contexts.
-- runtime sessions report exits back to their owning slots.
+- runtime sessions report phase events and exits back to their owning slots.
 
 Downstream dependencies:
 
@@ -73,6 +73,13 @@ Then it creates a remote slot
 And starts one `RemoteControlSession`  
 And writes status `connecting` or `connected` according to session lifecycle
 
+### Scenario: records successful node-control connection
+
+Given the current remote session publishes phase `connected`
+When the owning supervisor receives the session event
+Then it writes remote status `connected`
+And its snapshot reports phase `connected`
+
 ### Scenario: does not start session for disabled remote
 
 Given store lists a disabled remote  
@@ -106,6 +113,13 @@ And no slot exists for it
 When `AgentConnectionSupervisor` reconciles  
 Then it creates an agent connection slot  
 And starts one `AgentTunnelSession`
+
+### Scenario: records running agent tunnel
+
+Given the current agent tunnel session publishes phase `running`
+When the owning supervisor receives the session event
+Then it writes agent connection status `running` with the observed PID
+And its snapshot reports phase `running`
 
 ### Scenario: does not start deleted agent connection
 
