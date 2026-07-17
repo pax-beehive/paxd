@@ -39,6 +39,57 @@ func TestAgentConnectionSupervisorWakeStartsTunnelSession(t *testing.T) {
 	}
 }
 
+func TestRemoteSupervisorRecordsConnectedSessionEvent(t *testing.T) {
+	clock := newFakeClock()
+	store := newFakeRemoteStore()
+	store.setDesired([]runtimes.RemoteSpec{remoteSpec("remote_1", 2, 1)})
+	factory := &fakeRemoteFactory{}
+	sup := NewRemoteSupervisor(RemoteSupervisorOptions{
+		Store: store, Factory: factory, Clock: clock,
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	factory.waitSession(t, 0).waitStarted(t)
+	sup.OnSessionEvent(runtimes.SessionEvent{
+		Kind: runtimes.SessionRemoteControl, Phase: runtimes.PhaseConnected,
+		RemoteID: "remote_1", Generation: 2, RestartNonce: 1, At: clock.Now(),
+	})
+
+	waitForStatus(t, func() daemonstore.RemoteStatusUpdate {
+		return store.latestStatus("remote_1")
+	}, string(runtimes.PhaseConnected))
+	sup.OnSessionEvent(runtimes.SessionEvent{
+		Kind: runtimes.SessionRemoteControl, Phase: runtimes.PhaseConnecting,
+		RemoteID: "remote_1", Generation: 1, RestartNonce: 1, At: clock.Now(),
+	})
+	assert.Equal(t, string(runtimes.PhaseConnected), sup.Snapshot().Slots[0].Phase)
+	assert.Equal(t, clock.Now(), *store.latestStatus("remote_1").ConnectedAt)
+}
+
+func TestAgentConnectionSupervisorRecordsRunningSessionEvent(t *testing.T) {
+	clock := newFakeClock()
+	store := newFakeAgentStore()
+	store.setDesired([]runtimes.AgentConnectionSpec{agentSpec("conn_1", 3, 2)})
+	factory := &fakeAgentFactory{}
+	sup := NewAgentConnectionSupervisor(AgentConnectionSupervisorOptions{
+		Store: store, Factory: factory, Clock: clock,
+	})
+
+	require.NoError(t, sup.Reconcile(context.Background()))
+	factory.waitSession(t, 0).waitStarted(t)
+	pid := 1234
+	sup.OnSessionEvent(runtimes.SessionEvent{
+		Kind: runtimes.SessionAgentTunnel, Phase: runtimes.PhaseRunning,
+		ConnectionID: "conn_1", Generation: 3, RestartNonce: 2, PID: &pid, At: clock.Now(),
+	})
+
+	waitForAgentStatus(t, store, "conn_1", string(runtimes.PhaseRunning))
+	status := store.latestStatus("conn_1")
+	assert.Equal(t, string(runtimes.PhaseRunning), sup.Snapshot().Slots[0].Phase)
+	assert.Equal(t, pid, *status.PID)
+	assert.Equal(t, clock.Now(), *status.ConnectedAt)
+}
+
 func TestACPSlotSupervisorRestartsWithNewProcessEpochOnCommandFingerprintChange(t *testing.T) {
 	store := newFakeACPSlotStore()
 	initial := acpSlotSpec("slot_1", "conn_1", 1, 0)

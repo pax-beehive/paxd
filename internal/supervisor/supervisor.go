@@ -164,6 +164,12 @@ func NewRemoteSupervisor(opts RemoteSupervisorOptions) *RemoteSupervisor {
 func (s *RemoteSupervisor) Start(ctx context.Context) error { return s.base.Start(ctx) }
 func (s *RemoteSupervisor) Wake()                           { s.base.Wake() }
 func (s *RemoteSupervisor) Snapshot() Snapshot              { return s.base.Snapshot() }
+func (s *RemoteSupervisor) OnSessionEvent(event runtimes.SessionEvent) {
+	if s == nil || s.base == nil || event.Kind != runtimes.SessionRemoteControl || event.RemoteID == "" {
+		return
+	}
+	s.base.handleSessionEvent(event.RemoteID, event)
+}
 func (s *RemoteSupervisor) Reconcile(ctx context.Context) error {
 	return s.base.Reconcile(ctx)
 }
@@ -194,6 +200,12 @@ func NewAgentConnectionSupervisor(opts AgentConnectionSupervisorOptions) *AgentC
 func (s *AgentConnectionSupervisor) Start(ctx context.Context) error { return s.base.Start(ctx) }
 func (s *AgentConnectionSupervisor) Wake()                           { s.base.Wake() }
 func (s *AgentConnectionSupervisor) Snapshot() Snapshot              { return s.base.Snapshot() }
+func (s *AgentConnectionSupervisor) OnSessionEvent(event runtimes.SessionEvent) {
+	if s == nil || s.base == nil || event.Kind != runtimes.SessionAgentTunnel || event.ConnectionID == "" {
+		return
+	}
+	s.base.handleSessionEvent(event.ConnectionID, event)
+}
 func (s *AgentConnectionSupervisor) Reconcile(ctx context.Context) error {
 	return s.base.Reconcile(ctx)
 }
@@ -481,6 +493,15 @@ func (s *baseSupervisor[S]) slot(id string) (*runtimeSlot[S], bool) {
 	return slot, true
 }
 
+func (s *baseSupervisor[S]) handleSessionEvent(id string, event runtimes.SessionEvent) {
+	s.mu.Lock()
+	slot := s.slots[id]
+	s.mu.Unlock()
+	if slot != nil {
+		slot.handleSessionEvent(event)
+	}
+}
+
 func (s *baseSupervisor[S]) stopAll(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -507,6 +528,7 @@ type slotOps[S any] struct {
 
 type statusWrite struct {
 	Phase            string
+	PID              *int
 	Exit             runtimes.Exit
 	ReconnectAttempt int
 	NextRetryAt      *time.Time
@@ -753,6 +775,32 @@ func (s *runtimeSlot[S]) startLocked() {
 	}()
 }
 
+func (s *runtimeSlot[S]) handleSessionEvent(event runtimes.SessionEvent) {
+	if !event.Phase.Valid() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasDesired || !s.hasCurrentSpec || s.currentCancel == nil || s.pending || s.draining {
+		return
+	}
+	spec := s.currentSpec
+	if event.Generation != s.ops.generation(spec) || event.RestartNonce != s.ops.restartNonce(spec) {
+		return
+	}
+	at := event.At
+	if at.IsZero() {
+		at = s.clock.Now()
+	}
+	s.phase = string(event.Phase)
+	s.writeStatusLoggedLocked(spec, statusWrite{
+		Phase:            s.phase,
+		PID:              event.PID,
+		ReconnectAttempt: s.reconnects,
+		At:               at,
+	})
+}
+
 func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -945,6 +993,7 @@ func agentConnectionStatusWriter(store AgentConnectionStore, poke StatusPoke) fu
 			ObservedGeneration:   spec.Generation,
 			ObservedRestartNonce: spec.RestartNonce,
 			Phase:                write.Phase,
+			PID:                  write.PID,
 			LastErrorCode:        write.Exit.Code,
 			LastErrorMessage:     safeExitMessage(write.Exit),
 			FailureClass:         string(write.Exit.Class),

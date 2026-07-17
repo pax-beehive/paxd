@@ -27,7 +27,10 @@ The slot owns the long-lived lifecycle:
 - interruptible backoff timer
 - restart and stop decisions
 
-Sessions only own one concrete connection attempt and must return a classified exit to the slot.
+Sessions only own one concrete connection attempt. They publish non-terminal
+phase events to the supervisor and return a classified exit to the slot. The
+slot persists both forms of observation and rejects events from stale
+generation/restart nonce pairs.
 
 ## Reconcile Triggers
 
