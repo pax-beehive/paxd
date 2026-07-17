@@ -418,8 +418,19 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 	if desired == "" {
 		desired = control.DesiredStateRunning
 	}
+	desiredSlots := 2
+	if cmd.DesiredSlots != nil {
+		desiredSlots = *cmd.DesiredSlots
+	}
+	connectionID := cmd.ID
+	if connectionID == "" {
+		connectionID, err = newAgentConnectionID()
+		if err != nil {
+			return control.AgentConnectionView{}, err
+		}
+	}
 	conn := AgentConnection{
-		ID:              cmd.ID,
+		ID:              connectionID,
 		RemoteID:        cmd.RemoteID,
 		Name:            cmd.Name,
 		CloudAgentID:    stringPtrOrNil(cmd.CloudAgentID),
@@ -431,19 +442,24 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 		EnvJSON:         envJSON,
 		Enabled:         boolDefault(cmd.Enabled, true),
 		DesiredState:    string(desired),
-		DesiredACPSlots: 1,
+		DesiredACPSlots: desiredSlots,
 		Generation:      1,
 		RestartNonce:    0,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	if conn.ID == "" {
-		conn.ID = "conn_" + strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cmd.Name), " ", "_"))
-	}
 	if err := s.db.WithContext(ctx).Select("*").Create(&conn).Error; err != nil {
 		return control.AgentConnectionView{}, mapCreateErr(err)
 	}
 	return agentConnectionView(conn, remote.CloudAPIURL), nil
+}
+
+func newAgentConnectionID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "conn_" + hex.EncodeToString(random[:]), nil
 }
 
 func (s *Store) UpdateAgentConnection(ctx context.Context, cmd control.UpdateAgentConnectionCommand) (control.AgentConnectionView, error) {

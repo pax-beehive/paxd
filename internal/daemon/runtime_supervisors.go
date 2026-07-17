@@ -92,21 +92,26 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		return acpRouteStoreAdapter{store: store}
 	}))
 
-	s.remote = supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
+	remoteFactory := &remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner}
+	remote := supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
 		Store:      store,
-		Factory:    remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner},
+		Factory:    remoteFactory,
 		StatusPoke: s.statusHub,
 	})
+	remoteFactory.eventSink = remote
+	s.remote = remote
+	agentFactory := &agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
+		Headers:               headers,
+		Dialer:                dialer,
+		ACPPoolRegistry:       acpPoolRegistry,
+		ReliableEngineFactory: engineFactory,
+	}}
 	agent := supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
 		Store:      store,
 		StatusPoke: s.statusHub,
-		Factory: agentTunnelSessionFactory{deps: runtimes.AgentTunnelSessionDeps{
-			Headers:               headers,
-			Dialer:                dialer,
-			ACPPoolRegistry:       acpPoolRegistry,
-			ReliableEngineFactory: engineFactory,
-		}},
+		Factory:    agentFactory,
 	})
+	agentFactory.deps.SessionEventSink = agent
 	s.agent = agent
 	s.agentRuntimeSource = agent
 	s.acpSlots = supervisor.NewACPSlotSupervisor(supervisor.ACPSlotSupervisorOptions{
@@ -257,18 +262,20 @@ func startSupervisor(ctx context.Context, name string, sup supervisor.Supervisor
 }
 
 type remoteControlSessionFactory struct {
-	headers auth.HeaderProvider
-	dialer  runtimes.WebSocketDialer
-	runner  runtimes.NodeControlRunner
+	headers   auth.HeaderProvider
+	dialer    runtimes.WebSocketDialer
+	runner    runtimes.NodeControlRunner
+	eventSink runtimes.SessionEventSink
 }
 
 func (f remoteControlSessionFactory) NewRemoteControlSession(spec runtimes.RemoteSpec) runtimes.Session {
 	return runtimes.NewRemoteControlSession(runtimes.RemoteControlSessionConfig{
-		Spec:            spec,
-		Headers:         f.headers,
-		Dialer:          f.dialer,
-		Runner:          f.runner,
-		NodeControlPath: spec.NodeControlPath,
+		Spec:             spec,
+		Headers:          f.headers,
+		Dialer:           f.dialer,
+		Runner:           f.runner,
+		NodeControlPath:  spec.NodeControlPath,
+		SessionEventSink: f.eventSink,
 	})
 }
 

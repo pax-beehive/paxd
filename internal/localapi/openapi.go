@@ -298,6 +298,7 @@ func requestExample(schema string) map[string]any {
 			"env":            map[string]any{"PAX_LOG_LEVEL": "info"},
 			"enabled":        true,
 			"desired_state":  "running",
+			"desired_slots":  2,
 		}
 	case "UpdateAgentConnectionCommand":
 		return map[string]any{
@@ -442,6 +443,7 @@ func openAPISchemas() map[string]any {
 			"env":            stringMap,
 			"enabled":        boolSchema,
 			"desired_state":  enumSchema("running", "stopped", "deleted"),
+			"desired_slots":  map[string]any{"type": "integer", "minimum": 1, "maximum": 16, "default": 2},
 		}, "remote_id", "name", "instance_id", "agent_type", "harness", "command"),
 		"UpdateAgentConnectionCommand": objectSchema(map[string]any{
 			"connection_id":  stringSchema,
@@ -455,6 +457,7 @@ func openAPISchemas() map[string]any {
 			"env":            stringMap,
 			"enabled":        boolSchema,
 			"desired_state":  enumSchema("running", "stopped", "deleted"),
+			"desired_slots":  map[string]any{"type": "integer", "minimum": 1, "maximum": 16},
 		}),
 		"DiscoverHarnessesQuery": objectSchema(map[string]any{
 			"probe": boolSchema,
