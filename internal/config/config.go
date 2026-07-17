@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/machineinfo"
 	"gopkg.in/yaml.v3"
 )
 
@@ -103,7 +104,7 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		Agent: AgentConfig{
-			MachineType: "unknown",
+			MachineType: machineinfo.Name(),
 		},
 		Cloud: CloudConfig{
 			URL:    DefaultCloudAPIURL,
@@ -159,6 +160,7 @@ func Load(path string) (*Config, error) {
 		if os.IsNotExist(err) {
 			applyEnv(&cfg)
 			normalizeAliases(&cfg)
+			cfg.Agent.MachineType = machineinfo.Resolve(cfg.Agent.MachineType)
 			if cfg.Agent.Hostname == "" {
 				host, _ := os.Hostname()
 				cfg.Agent.Hostname = host
@@ -177,6 +179,7 @@ func Load(path string) (*Config, error) {
 
 	applyEnv(&cfg)
 	normalizeAliases(&cfg)
+	cfg.Agent.MachineType = machineinfo.Resolve(cfg.Agent.MachineType)
 
 	// Auto-detect hostname
 	if cfg.Agent.Hostname == "" {

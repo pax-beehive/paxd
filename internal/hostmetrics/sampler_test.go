@@ -41,6 +41,21 @@ func TestSamplerCachesLatestMetrics(t *testing.T) {
 	}
 }
 
+func TestSamplerAppliesConfiguredHostIdentity(t *testing.T) {
+	sampler := NewSamplerWithCollector(time.Hour, func(context.Context) (control.HostMetricsReport, error) {
+		return control.HostMetricsReport{MachineName: "detected", OS: "detected", Arch: "detected"}, nil
+	}).WithIdentity("MacBook Pro", "darwin", "amd64")
+
+	sampler.sample(context.Background())
+	got, err := sampler.CurrentHostMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentHostMetrics() error = %v", err)
+	}
+	if got.MachineName != "MacBook Pro" || got.OS != "darwin" || got.Arch != "amd64" {
+		t.Fatalf("identity = %+v", got)
+	}
+}
+
 func TestSamplerKeepsPreviousSampleAfterCollectionFailure(t *testing.T) {
 	ctx := context.Background()
 	calls := 0
@@ -122,6 +137,9 @@ func TestCollectSystemMetricsReturnsBestEffortSample(t *testing.T) {
 	}
 	if metrics.CollectedAt == "" {
 		t.Fatalf("metrics = %+v, want collected_at", metrics)
+	}
+	if metrics.MachineName == "" || metrics.OS == "" || metrics.Arch == "" {
+		t.Fatalf("metrics = %+v, want host identity", metrics)
 	}
 	if metrics.CPUPercent < 0 || metrics.MemoryPercent < 0 || metrics.UptimeSeconds < 0 {
 		t.Fatalf("metrics = %+v, want non-negative values", metrics)

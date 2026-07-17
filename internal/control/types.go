@@ -263,6 +263,9 @@ type RuntimeSnapshotReport struct {
 }
 
 type HostMetricsReport struct {
+	MachineName   string  `json:"machine_name,omitempty"`
+	OS            string  `json:"os,omitempty"`
+	Arch          string  `json:"arch,omitempty"`
 	CPUPercent    float64 `json:"cpu_percent,omitempty"`
 	MemoryPercent float64 `json:"memory_percent,omitempty"`
 	UptimeSeconds int64   `json:"uptime_seconds,omitempty"`

@@ -20,6 +20,29 @@ func TestLoadDefaultsCloudAPIURL(t *testing.T) {
 	}
 }
 
+func TestLoadDetectsMachineNameAndPreservesOverride(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Agent.MachineType == "" || cfg.Agent.MachineType == "unknown" {
+			t.Fatalf("MachineType = %q, want detected name", cfg.Agent.MachineType)
+		}
+	})
+
+	t.Run("environment override", func(t *testing.T) {
+		t.Setenv("PAX_MACHINE_TYPE", "Build Server")
+		cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Agent.MachineType != "Build Server" {
+			t.Fatalf("MachineType = %q", cfg.Agent.MachineType)
+		}
+	})
+}
+
 func TestLoadAcceptsDeploymentAliases(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "paxd.yaml")
