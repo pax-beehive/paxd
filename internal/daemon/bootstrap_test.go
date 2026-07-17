@@ -22,8 +22,11 @@ import (
 )
 
 func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	ctx := context.Background()
 	store := openTestStore(t)
+	transportDBPath := filepath.Join(home, ".paxd", "transport.db")
 	cfg := config.DefaultConfig()
 	cfg.Cloud.APIURL = "https://app.paxtech.net"
 	cfg.Cloud.APIKey = "pax_key"
@@ -46,10 +49,19 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	assert.NotNil(t, rt.supervisors.remote)
 	assert.NotNil(t, rt.supervisors.agent)
 	assert.IsType(t, &reliablemq.ProducerWriteBehindStore{}, rt.supervisors.transportFlusher)
+	require.FileExists(t, transportDBPath)
+	assert.Equal(t, 4, rt.supervisors.transportDB.Stats().MaxOpenConnections)
+	assert.False(t, store.DB().Migrator().HasTable("transport_journal"))
+	var transportJournalTables int
+	require.NoError(t, rt.supervisors.transportDB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transport_journal'`,
+	).Scan(&transportJournalTables))
+	assert.Equal(t, 1, transportJournalTables)
 	assertNoBusinessRows(t, store)
 }
 
 func TestBootstrapClearsStaleACPSessionBindingsAndPreservesResumeDescriptor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
 	store := openTestStore(t)
 	route, err := store.UpsertACPSessionRoute(ctx, daemonstore.ACPSessionRouteUpsert{
