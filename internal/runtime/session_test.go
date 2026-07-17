@@ -623,6 +623,48 @@ func TestAgentTunnelSocketFailureDisconnectsProducerWithoutFailingAcceptance(t *
 	assert.Empty(t, frame.ErrorMessage)
 }
 
+func TestAgentTunnelRuntimeProducerFailureEndsTunnel(t *testing.T) {
+	baseConn := newFakeWebSocketConn()
+	conn := &failingDataWebSocketConn{
+		fakeWebSocketConn: baseConn,
+		err:               errors.New("write failed"),
+	}
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	t.Cleanup(func() { _ = stdoutWriter.Close() })
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	enqueueAlignedReconcile(t, baseConn, "agent_1:queue_1", 0)
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+	exited := make(chan Exit, 1)
+	go func() { exited <- session.Run(context.Background()) }()
+
+	_, err := stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":1}` + "\n"))
+	require.NoError(t, err)
+
+	select {
+	case exit := <-exited:
+		assert.Equal(t, ExitTransient, exit.Class)
+		assert.Equal(t, "producer_disconnected", exit.Code)
+		assert.Contains(t, exit.Message, "write failed")
+		assert.True(t, exit.ResetBackoff)
+	case <-time.After(time.Second):
+		t.Fatal("agent tunnel did not exit after its producer binding failed")
+	}
+	assert.True(t, baseConn.closed)
+	assert.True(t, proc.terminated)
+}
+
 func TestAgentTunnelDuplicateInboundIsAckedButNotDispatchedTwice(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	store := newSpyStore()
@@ -1005,6 +1047,19 @@ type blockingDataWebSocketConn struct {
 	dataStarted chan struct{}
 	dataRelease chan struct{}
 	startOnce   sync.Once
+}
+
+type failingDataWebSocketConn struct {
+	*fakeWebSocketConn
+	err error
+}
+
+func (c *failingDataWebSocketConn) WriteMessage(messageType int, payload []byte) error {
+	env, err := reliablemq.UnmarshalEnvelope(payload)
+	if err == nil && (env.Type == reliablemq.EnvelopeTypeData || env.Type == reliablemq.EnvelopeTypeTombstone) {
+		return c.err
+	}
+	return c.fakeWebSocketConn.WriteMessage(messageType, payload)
 }
 
 func (c *blockingDataWebSocketConn) WriteMessage(messageType int, payload []byte) error {
