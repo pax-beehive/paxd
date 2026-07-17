@@ -5,7 +5,7 @@ go 1.22
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/pax-beehive/paxkit v0.0.0-20260716221048-b96eed7f4d04
+	github.com/pax-beehive/paxkit v0.0.0-20260717085045-4e8e19d86be8
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v3 v3.10.0

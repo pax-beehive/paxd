@@ -223,9 +223,14 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	go func() { errCh <- proc.Wait() }()
 
 	var result error
+	producerDisconnected := false
 	select {
 	case result = <-errCh:
 		cancel()
+	case <-binding.Done():
+		cancel()
+		producerDisconnected = true
+		result = s.producerBindingFailure(producer, binding)
 	case <-ctx.Done():
 		cancel()
 		result = ctx.Err()
@@ -241,6 +246,9 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	}
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
 		return CanceledExit(result)
+	}
+	if producerDisconnected {
+		return connectedExit(TransientExit("producer_disconnected", result.Error()))
 	}
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
@@ -304,9 +312,14 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 
 	var result error
 	processExited := false
+	producerDisconnected := false
 	select {
 	case result = <-errCh:
 		cancel()
+	case <-binding.Done():
+		cancel()
+		producerDisconnected = true
+		result = s.producerBindingFailure(producer, binding)
 	case <-proc.Done():
 		cancel()
 		processExited = true
@@ -326,6 +339,9 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
 		s.deps.ACPProcessPool.Stop(s.spec)
 		return CanceledExit(result)
+	}
+	if producerDisconnected {
+		return connectedExit(TransientExit("producer_disconnected", result.Error()))
 	}
 	if processExited {
 		msg := "persistent ACP process exited"
@@ -390,9 +406,14 @@ func (s *AgentTunnelSession) runWithACPPool(
 	go func() { errCh <- s.copyWSToStdin(runCtx, conn, engine) }()
 
 	var result error
+	producerDisconnected := false
 	select {
 	case result = <-errCh:
 		cancel()
+	case <-binding.Done():
+		cancel()
+		producerDisconnected = true
+		result = s.producerBindingFailure(producer, binding)
 	case <-ctx.Done():
 		cancel()
 		result = ctx.Err()
@@ -407,6 +428,9 @@ func (s *AgentTunnelSession) runWithACPPool(
 	}
 	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
 		return CanceledExit(result)
+	}
+	if producerDisconnected {
+		return connectedExit(TransientExit("producer_disconnected", result.Error()))
 	}
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
@@ -672,6 +696,30 @@ func (s *AgentTunnelSession) reliableSender(conn WebSocketConn) reliablemq.Sende
 		}
 		return conn.WriteMessage(websocketTextMessage, data)
 	})
+}
+
+func (s *AgentTunnelSession) producerBindingFailure(
+	producer *reliablemq.Producer,
+	binding *reliablemq.ProducerBinding,
+) error {
+	err := binding.Err()
+	if err == nil {
+		err = reliablemq.ErrProducerDisconnected
+	}
+	stats := producer.Stats()
+	log.Printf(
+		"[paxd] agent tunnel id=%s producer binding failed transport_queue_id=%s generation=%d bound=%t acked_through=%d next_to_send=%d tail=%d last_error=%q: %v",
+		s.spec.ConnectionID,
+		s.spec.TransportQueueID,
+		stats.BindingGeneration,
+		stats.Bound,
+		stats.AckedThrough,
+		stats.NextToSend,
+		stats.Tail,
+		stats.LastError,
+		err,
+	)
+	return err
 }
 
 func (s *AgentTunnelSession) terminateProcess(proc LocalACPProcess) {
