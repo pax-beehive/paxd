@@ -2,12 +2,17 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/controlws"
@@ -26,6 +31,7 @@ type runtimeSupervisors struct {
 	statusHub            *statusHub
 	paxdVersion          string
 	acpCapabilityReports *acpCapabilityReports
+	transportDB          *sql.DB
 	transportFlusher     interface {
 		Close(context.Context) error
 		Stats() reliablemq.ProducerWriteBehindStats
@@ -42,14 +48,16 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if service == nil {
 		return errors.New("control service is required")
 	}
-	sqlDB, err := store.DB().DB()
+	sqlDB, err := openTransportDB()
 	if err != nil {
-		return fmt.Errorf("get sqlite handle: %w", err)
+		return fmt.Errorf("open reliable transport database: %w", err)
 	}
 	mqStore, err := sqlstore.NewSQLite(sqlDB, sqlstore.WithTableName("transport_journal"))
 	if err != nil {
+		_ = sqlDB.Close()
 		return fmt.Errorf("open reliable transport journal: %w", err)
 	}
+	s.transportDB = sqlDB
 	transportStore := reliablemq.NewProducerWriteBehindStore(
 		mqStore,
 		reliablemq.WithProducerWriteBehindRequireBatchStore(),
@@ -144,6 +152,33 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	return nil
 }
 
+func openTransportDB() (*sql.DB, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve home directory: %w", err)
+	}
+	path := filepath.Join(home, ".paxd", "transport.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, fmt.Errorf("create transport database directory: %w", err)
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	db, err := sql.Open("sqlite3", path+separator+"_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	log.Printf("[paxd] reliable transport database opened path=%s", path)
+	return db, nil
+}
+
 func (s *runtimeSupervisors) WakeRemotes() {
 	if s == nil || s.remote == nil {
 		log.Printf("[paxd] remote supervisor wake requested before supervisor is configured")
@@ -221,7 +256,7 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}
-	if s.transportFlusher != nil {
+	if s.transportFlusher != nil || s.transportDB != nil {
 		go func() {
 			<-ctx.Done()
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -231,15 +266,22 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 					log.Printf("[paxd] acp transport producer registry close failed: %v", err)
 				}
 			}
-			if err := s.transportFlusher.Close(closeCtx); err != nil {
-				stats := s.transportFlusher.Stats()
-				log.Printf(
-					"[paxd] acp transport producer write-behind close failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d",
-					err,
-					stats.DirtyFrames,
-					stats.DirtyPatches,
-					stats.DirtyBytes,
-				)
+			if s.transportFlusher != nil {
+				if err := s.transportFlusher.Close(closeCtx); err != nil {
+					stats := s.transportFlusher.Stats()
+					log.Printf(
+						"[paxd] acp transport producer write-behind close failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d",
+						err,
+						stats.DirtyFrames,
+						stats.DirtyPatches,
+						stats.DirtyBytes,
+					)
+				}
+			}
+			if s.transportDB != nil {
+				if err := s.transportDB.Close(); err != nil {
+					log.Printf("[paxd] close reliable transport database failed: %v", err)
+				}
 			}
 		}()
 	}
