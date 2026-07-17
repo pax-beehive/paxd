@@ -115,7 +115,7 @@ When the store creates an agent connection under that remote
 Then the connection has generation `1`  
 And restart nonce `0`  
 And desired state `running` or the requested desired state  
-And `(remote_id, name)` is unique
+And `(remote_id, name)` is unique among non-deleted connections
 
 ### Scenario: rejects duplicate agent connection name within a remote
 
@@ -123,6 +123,13 @@ Given remote `remote_prod` has agent connection name `codex-main`
 When the store creates another connection named `codex-main` under `remote_prod`  
 Then the operation fails  
 And the existing connection is unchanged
+
+### Scenario: recreates a deleted agent connection with the same name
+
+Given remote `remote_prod` has a deleted agent connection named `codex-main`
+When the store creates another connection named `codex-main` under `remote_prod`
+Then the operation succeeds with a new connection id
+And the deleted connection remains as history
 
 ### Scenario: allows same agent connection name under different remotes
 
