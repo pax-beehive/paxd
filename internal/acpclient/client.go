@@ -79,6 +79,7 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 	cmd := exec.CommandContext(ctx, l.Command[0], l.Command[1:]...)
 	cmd.Dir = l.WorkingDir
 	cmd.Env = mergedEnv(l.Env)
+	prepareCommandGroup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -101,7 +102,7 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 			_ = stdin.Close()
 			_ = stdout.Close()
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				killCommandGroup(cmd)
 			}
 		case <-done:
 		}
@@ -110,10 +111,7 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 		close(done)
 		_ = stdin.Close()
 		_ = stdout.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
+		waitReapingGroup(cmd)
 	}()
 
 	reader := bufio.NewReader(stdout)
@@ -184,6 +182,7 @@ func (p SessionPrompter) Prompt(ctx context.Context, sessionID string, prompt st
 
 	cmd := exec.CommandContext(ctx, p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.WorkingDir
+	prepareCommandGroup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -206,7 +205,7 @@ func (p SessionPrompter) Prompt(ctx context.Context, sessionID string, prompt st
 			_ = stdin.Close()
 			_ = stdout.Close()
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				killCommandGroup(cmd)
 			}
 		case <-done:
 		}
@@ -215,10 +214,7 @@ func (p SessionPrompter) Prompt(ctx context.Context, sessionID string, prompt st
 		close(done)
 		_ = stdin.Close()
 		_ = stdout.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
+		waitReapingGroup(cmd)
 	}()
 
 	reader := bufio.NewReader(stdout)
@@ -385,6 +381,30 @@ func decodeSession(raw json.RawMessage) model.SessionInfo {
 		Status:         typed.Status,
 		CurrentTask:    typed.CurrentTask,
 		UpdatedAt:      typed.UpdatedAt,
+	}
+}
+
+// waitReapingGroup kills the command's process group and waits for it to
+// exit. A grandchild forked while the first group signal was being delivered
+// survives that signal; such an orphan keeps the copied stdio pipes open and
+// blocks cmd.Wait indefinitely, so the group is killed once more when the
+// wait does not finish promptly.
+func waitReapingGroup(cmd *exec.Cmd) {
+	killCommandGroup(cmd)
+	waitCh := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waitCh)
+	}()
+	select {
+	case <-waitCh:
+		return
+	case <-time.After(2 * time.Second):
+	}
+	killCommandGroup(cmd)
+	select {
+	case <-waitCh:
+	case <-time.After(3 * time.Second):
 	}
 }
 
