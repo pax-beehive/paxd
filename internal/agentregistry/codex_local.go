@@ -25,11 +25,90 @@ type codexIndexEntry struct {
 type codexSessionMetaLine struct {
 	Type    string `json:"type"`
 	Payload struct {
-		ID        string `json:"id"`
-		Timestamp string `json:"timestamp"`
-		CWD       string `json:"cwd"`
-		Source    string `json:"source"`
+		ID           string          `json:"id"`
+		SessionID    string          `json:"session_id"`
+		ForkedFromID string          `json:"forked_from_id"`
+		ThreadSource string          `json:"thread_source"`
+		Timestamp    string          `json:"timestamp"`
+		CWD          string          `json:"cwd"`
+		Source       json.RawMessage `json:"source"`
 	} `json:"payload"`
+}
+
+// sourceText returns the source for plain-string sources. Object sources
+// (for example subagent spawns) have no text form.
+func (m codexSessionMetaLine) sourceText() string {
+	var text string
+	if err := json.Unmarshal(m.Payload.Source, &text); err == nil {
+		return text
+	}
+	return ""
+}
+
+// isSubagent reports whether the rollout belongs to an internal subagent
+// (guardian reviewers, thread spawns) rather than a user conversation.
+func (m codexSessionMetaLine) isSubagent() bool {
+	if m.Payload.ThreadSource == "subagent" {
+		return true
+	}
+	var source struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if err := json.Unmarshal(m.Payload.Source, &source); err == nil && len(source.Subagent) > 0 {
+		return true
+	}
+	return false
+}
+
+// codexRolloutMeta is the parsed session_meta line of one rollout file.
+type codexRolloutMeta struct {
+	path  string
+	mtime time.Time
+	meta  codexSessionMetaLine
+}
+
+// codexLineage resolves codex thread/rollout IDs to the root thread ID of
+// their conversation. Codex assigns a conversation a new thread ID when it
+// forks (for example when resuming after an auto compact); the new rollout
+// records the parent thread in forked_from_id.
+type codexLineage struct {
+	parentOf map[string]string
+}
+
+func newCodexLineage(metas []codexRolloutMeta) codexLineage {
+	parentOf := make(map[string]string, len(metas))
+	for _, rollout := range metas {
+		id := rollout.meta.Payload.ID
+		parent := rollout.meta.Payload.ForkedFromID
+		if id == "" || parent == "" || id == parent {
+			continue
+		}
+		parentOf[id] = parent
+	}
+	return codexLineage{parentOf: parentOf}
+}
+
+func (l codexLineage) rootOf(id string) string {
+	seen := map[string]bool{}
+	for {
+		parent, ok := l.parentOf[id]
+		if !ok || parent == "" || seen[id] {
+			return id
+		}
+		seen[id] = true
+		id = parent
+	}
+}
+
+// conversationKey maps a rollout to the root thread ID of its conversation.
+func (l codexLineage) conversationKey(meta codexSessionMetaLine) string {
+	if meta.Payload.ForkedFromID != "" {
+		return l.rootOf(meta.Payload.ForkedFromID)
+	}
+	if meta.Payload.SessionID != "" {
+		return l.rootOf(meta.Payload.SessionID)
+	}
+	return l.rootOf(meta.Payload.ID)
 }
 
 func codexLocalAvailable() bool {
@@ -51,21 +130,116 @@ func listCodexLocalSessions() ([]model.SessionInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	byID, err := readCodexSessionIndex(filepath.Join(root, "session_index.jsonl"))
+	entries, err := readCodexSessionIndex(filepath.Join(root, "session_index.jsonl"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := readCodexRollouts(filepath.Join(root, "sessions"), byID); err != nil && !errors.Is(err, os.ErrNotExist) {
+	metas, err := readCodexRolloutMetas(filepath.Join(root, "sessions"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	out := make([]model.SessionInfo, 0, len(byID))
-	for _, session := range byID {
+	return mergeCodexSessions(entries, metas), nil
+}
+
+// CodexSessionRoots maps known codex thread and rollout IDs to the root
+// thread ID of their conversation lineage. It returns an empty map when no
+// local codex store is readable.
+func CodexSessionRoots() (map[string]string, error) {
+	root, err := codexRoot()
+	if err != nil {
+		return nil, err
+	}
+	metas, err := readCodexRolloutMetas(filepath.Join(root, "sessions"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	lineage := newCodexLineage(metas)
+	roots := make(map[string]string, len(metas))
+	for _, rollout := range metas {
+		if id := rollout.meta.Payload.ID; id != "" {
+			roots[id] = lineage.conversationKey(rollout.meta)
+		}
+		if id := rollout.meta.Payload.SessionID; id != "" {
+			if _, ok := roots[id]; !ok {
+				roots[id] = lineage.rootOf(id)
+			}
+		}
+	}
+	return roots, nil
+}
+
+func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []model.SessionInfo {
+	lineage := newCodexLineage(metas)
+	byRoot := make(map[string]model.SessionInfo)
+	sessionFor := func(key string) model.SessionInfo {
+		session, ok := byRoot[key]
+		if !ok {
+			session = model.SessionInfo{
+				SessionID: "codex:" + key,
+				AgentType: "codex",
+				NativeID:  key,
+				Status:    "available",
+			}
+		}
+		return session
+	}
+
+	// Index entries provide display names and activity timestamps. Entries
+	// mapping to the same root (for example a thread forked after compact)
+	// collapse into one session; the root's own entry names it.
+	for _, entry := range entries {
+		if entry.ID == "" {
+			continue
+		}
+		key := lineage.rootOf(entry.ID)
+		session := sessionFor(key)
+		if entry.ID == key && session.Name == "" {
+			session.Name = entry.ThreadName
+		}
+		session.UpdatedAt = laterTimeString(session.UpdatedAt, entry.UpdatedAt)
+		session.LastActive = session.UpdatedAt
+		byRoot[key] = session
+	}
+
+	// Rollout metadata covers threads missing from the index and fills in
+	// workspace info. Subagent rollouts are internal to a conversation and
+	// are not reported as sessions of their own.
+	for _, rollout := range metas {
+		meta := rollout.meta
+		if meta.Payload.ID == "" || meta.isSubagent() {
+			continue
+		}
+		key := lineage.conversationKey(meta)
+		session := sessionFor(key)
+		if meta.Payload.ID == key && session.Name == "" {
+			session.Name = firstNonEmpty(meta.sourceText(), filepath.Base(rollout.path))
+		}
+		if session.UpdatedAt == "" {
+			session.UpdatedAt = meta.Payload.Timestamp
+			session.LastActive = session.UpdatedAt
+		}
+		if meta.Payload.CWD != "" && (session.ProjectID == "" || meta.Payload.ID == key) {
+			session.ProjectID = meta.Payload.CWD
+			session.WorkspaceRoots = []string{meta.Payload.CWD}
+		}
+		session.Status = firstNonEmpty(session.Status, "available")
+		byRoot[key] = session
+	}
+
+	out := make([]model.SessionInfo, 0, len(byRoot))
+	for key, session := range byRoot {
+		if session.Name == "" {
+			session.Name = key
+		}
 		out = append(out, session)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].UpdatedAt > out[j].UpdatedAt
 	})
-	return out, nil
+	return out
 }
 
 func codexRoot() (string, error) {
@@ -79,35 +253,28 @@ func codexRoot() (string, error) {
 	return filepath.Join(home, ".codex"), nil
 }
 
-func readCodexSessionIndex(path string) (map[string]model.SessionInfo, error) {
+func readCodexSessionIndex(path string) ([]codexIndexEntry, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return map[string]model.SessionInfo{}, err
+		return nil, err
 	}
 	defer file.Close()
 
-	out := map[string]model.SessionInfo{}
+	var out []codexIndexEntry
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		var entry codexIndexEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil || entry.ID == "" {
 			continue
 		}
-		out[entry.ID] = model.SessionInfo{
-			SessionID:  "codex:" + entry.ID,
-			AgentType:  "codex",
-			NativeID:   entry.ID,
-			Name:       entry.ThreadName,
-			UpdatedAt:  entry.UpdatedAt,
-			LastActive: entry.UpdatedAt,
-			Status:     "available",
-		}
+		out = append(out, entry)
 	}
 	return out, scanner.Err()
 }
 
-func readCodexRollouts(root string, byID map[string]model.SessionInfo) error {
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+func readCodexRolloutMetas(root string) ([]codexRolloutMeta, error) {
+	var out []codexRolloutMeta
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -118,27 +285,40 @@ func readCodexRollouts(root string, byID map[string]model.SessionInfo) error {
 		if err != nil || meta.Payload.ID == "" {
 			return nil
 		}
-		session := byID[meta.Payload.ID]
-		session.SessionID = "codex:" + meta.Payload.ID
-		session.AgentType = "codex"
-		session.NativeID = meta.Payload.ID
-		if session.Name == "" {
-			session.Name = firstNonEmpty(meta.Payload.Source, entry.Name())
+		rollout := codexRolloutMeta{path: path, meta: meta}
+		if info, err := entry.Info(); err == nil {
+			rollout.mtime = info.ModTime()
 		}
-		if session.UpdatedAt == "" {
-			session.UpdatedAt = meta.Payload.Timestamp
-		}
-		if session.LastActive == "" {
-			session.LastActive = session.UpdatedAt
-		}
-		if meta.Payload.CWD != "" {
-			session.ProjectID = meta.Payload.CWD
-			session.WorkspaceRoots = []string{meta.Payload.CWD}
-		}
-		session.Status = firstNonEmpty(session.Status, "available")
-		byID[meta.Payload.ID] = session
+		out = append(out, rollout)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// laterTimeString returns the later of two RFC 3339 timestamps, tolerating
+// empty values and unparseable input.
+func laterTimeString(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	parsedA, errA := time.Parse(time.RFC3339Nano, a)
+	parsedB, errB := time.Parse(time.RFC3339Nano, b)
+	if errA != nil || errB != nil {
+		if b > a {
+			return b
+		}
+		return a
+	}
+	if parsedB.After(parsedA) {
+		return b
+	}
+	return a
 }
 
 func readCodexRolloutMeta(path string) (codexSessionMetaLine, error) {
@@ -197,7 +377,11 @@ func findCodexRollout(nativeID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, dir := range []string{"sessions", "archived_sessions"} {
+	dirs := []string{"sessions", "archived_sessions"}
+	if found := findCodexLineageRollout(root, dirs, nativeID); found != "" {
+		return found, nil
+	}
+	for _, dir := range dirs {
 		found, err := findCodexRolloutInDir(filepath.Join(root, dir), nativeID)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", err
@@ -207,6 +391,45 @@ func findCodexRollout(nativeID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("codex rollout %q not found under ~/.codex/sessions or ~/.codex/archived_sessions", nativeID)
+}
+
+// findCodexLineageRollout resolves nativeID to the most recently modified
+// rollout in its conversation lineage, so sessions reported by conversation
+// root still render content written after a compact/resume fork.
+func findCodexLineageRollout(root string, dirs []string, nativeID string) string {
+	var metas []codexRolloutMeta
+	for _, dir := range dirs {
+		found, err := readCodexRolloutMetas(filepath.Join(root, dir))
+		if err == nil {
+			metas = append(metas, found...)
+		}
+	}
+	if len(metas) == 0 {
+		return ""
+	}
+	// A direct subagent rollout id always renders its own file.
+	for _, rollout := range metas {
+		if rollout.meta.Payload.ID == nativeID && rollout.meta.isSubagent() {
+			return rollout.path
+		}
+	}
+	lineage := newCodexLineage(metas)
+	key := lineage.rootOf(nativeID)
+	best := ""
+	var bestTime time.Time
+	for _, rollout := range metas {
+		if rollout.meta.isSubagent() {
+			continue
+		}
+		if lineage.conversationKey(rollout.meta) != key {
+			continue
+		}
+		if best == "" || rollout.mtime.After(bestTime) {
+			best = rollout.path
+			bestTime = rollout.mtime
+		}
+	}
+	return best
 }
 
 func findCodexRolloutInDir(root, nativeID string) (string, error) {
