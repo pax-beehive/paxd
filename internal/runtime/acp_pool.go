@@ -286,7 +286,11 @@ func (s *ACPSlotSession) Run(ctx context.Context) Exit {
 	}
 	select {
 	case <-slot.Done():
-		return TransientExit("process_ended", "acp slot process ended")
+		exit := TransientExit("process_ended", "acp slot process ended")
+		if tail := slot.StderrTail(stderrStatusTailLimit); tail != "" {
+			exit = exit.WithDetail("stderr_tail", tail)
+		}
+		return exit
 	case <-ctx.Done():
 		slot.Terminate(context.Background())
 		return CanceledExit(ctx.Err())

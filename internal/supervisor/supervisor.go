@@ -1023,7 +1023,7 @@ func acpSlotStatusWriter(store ACPSlotStore) func(context.Context, runtimes.ACPS
 			ProcessEpoch:     spec.ProcessEpoch,
 			Phase:            write.Phase,
 			LastErrorCode:    write.Exit.Code,
-			LastErrorMessage: safeExitMessage(write.Exit),
+			LastErrorMessage: acpSlotErrorMessage(write.Exit),
 			FailureClass:     string(write.Exit.Class),
 			StartedAt:        startedAt(write.Phase, write.At),
 			ReadyAt:          connectedAt(write.Phase, write.At),
@@ -1037,6 +1037,18 @@ func ensureExit(got runtimes.Exit, fallback runtimes.Exit) runtimes.Exit {
 		return fallback
 	}
 	return got
+}
+
+func acpSlotErrorMessage(exit runtimes.Exit) string {
+	message := safeExitMessage(exit)
+	tail := exit.Details["stderr_tail"]
+	if tail == "" {
+		return message
+	}
+	if message == "" {
+		return "stderr tail:\n" + tail
+	}
+	return message + "\nstderr tail:\n" + tail
 }
 
 func safeExitMessage(exit runtimes.Exit) string {

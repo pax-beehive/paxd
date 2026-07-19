@@ -232,7 +232,8 @@ func newPersistentACPProcess(
 	if p.reporter == nil {
 		p.reporter = NoopACPPoolCapabilityReporter{}
 	}
-	go io.Copy(io.Discard, proc.Stderr())
+	go newStderrTail(stderrTailLimit).Consume(proc.Stderr(), fmt.Sprintf(
+		"[harness stderr] connection_id=%s", spec.ConnectionID))
 	go p.copyStdout()
 	go p.wait()
 	if err := p.initialize(ctx); err != nil {

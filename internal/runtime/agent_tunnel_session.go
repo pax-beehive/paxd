@@ -185,7 +185,8 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 		return connectedExit(classifyProcessStartExit(err))
 	}
 	defer s.terminateProcess(proc)
-	go io.Copy(io.Discard, proc.Stderr())
+	go newStderrTail(stderrTailLimit).Consume(proc.Stderr(), fmt.Sprintf(
+		"[harness stderr] connection_id=%s", s.spec.ConnectionID))
 
 	engine, producer, err := s.newReliableEngine(ctx, proc.Stdin())
 	if err != nil {

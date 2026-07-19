@@ -93,6 +93,7 @@ type ACPSlot struct {
 	spec   ACPSlotSpec
 	runner LocalACPProcessRunner
 	sink   ACPSlotEventSink
+	stderr *stderrTail
 
 	mu          sync.Mutex
 	proc        LocalACPProcess
@@ -114,6 +115,7 @@ func NewACPSlot(spec ACPSlotSpec, runner LocalACPProcessRunner, opts ...ACPSlotO
 		spec:       spec,
 		runner:     runner,
 		sink:       NoopACPSlotEventSink{},
+		stderr:     newStderrTail(stderrTailLimit),
 		phase:      ACPSlotPhaseStarting,
 		initWaiter: newACPRPCWaiter(),
 		done:       make(chan struct{}),
@@ -149,7 +151,8 @@ func (s *ACPSlot) Start(ctx context.Context) error {
 	s.proc = proc
 	s.mu.Unlock()
 
-	go io.Copy(io.Discard, proc.Stderr())
+	go s.stderr.Consume(proc.Stderr(), fmt.Sprintf(
+		"[harness stderr] connection_id=%s slot_id=%s", s.spec.ConnectionID, s.spec.SlotID))
 	go s.copyStdout()
 	go s.wait()
 	if err := s.initialize(ctx); err != nil {
@@ -198,6 +201,12 @@ func (s *ACPSlot) ProcessEpoch() string {
 
 func (s *ACPSlot) Ordinal() int {
 	return s.spec.Ordinal
+}
+
+// StderrTail returns up to max bytes of the most recent stderr output from the
+// slot process. max <= 0 returns the full retained tail.
+func (s *ACPSlot) StderrTail(max int) string {
+	return s.stderr.Tail(max)
 }
 
 func (s *ACPSlot) Ready() bool {
