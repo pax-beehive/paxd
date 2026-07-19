@@ -133,7 +133,8 @@ func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
 		names = append(names, detector.Name())
 	}
 
-	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "opencode", "openclaw", "pi"}, names)
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi"}, names)
+	assertDefaultDetectorCommand(t, detectors, "kimi", []string{"kimi", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "opencode", []string{"opencode", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "openclaw", []string{"openclaw", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "pi", []string{"pi-acp"}, []string{"npx", "-y", "pi-acp"})

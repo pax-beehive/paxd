@@ -17,6 +17,8 @@ Initial harnesses:
 - Codex
 - Claude Code
 - Gemini
+- Kimi Code
+- Pi
 - future ACP-compatible adapters
 
 This package must not:

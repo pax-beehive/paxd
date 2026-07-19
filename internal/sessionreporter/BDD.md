@@ -102,6 +102,27 @@ When a report pass runs
 Then the successful agent is still reported
 And the failed scan is logged as best effort
 
+### Scenario: codex sessions collapse onto conversation roots
+
+Given the local codex store links a thread to an earlier thread via `forked_from_id`
+When the scan runs
+Then both threads are reported as one session keyed by the root thread
+And the root thread's own title names the session
+And subagent rollouts are not reported as sessions of their own
+
+### Scenario: kimi ACP sessions are canonicalized with a kimi prefix
+
+Given a kimi runtime lists sessions over ACP
+When the scan runs
+Then each session is reported as `kimi:<nativeId>` with the bare native id
+And no lineage merging is applied because kimi session ids are stable per conversation
+
+### Scenario: pi ACP sessions are canonicalized with a pi prefix
+
+Given a pi runtime lists sessions over ACP
+When the scan runs
+Then each session is reported as `pi:<nativeId>` with the bare native id
+
 ## Reporting
 
 ### Scenario: report sessions per remote and agent

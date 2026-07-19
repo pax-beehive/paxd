@@ -31,7 +31,7 @@ daemon:
 
 acp_forwarder:
   enabled: false
-  # Presets: hermes, codex, claude-code, gemini, custom.
+  # Presets: hermes, codex, claude-code, gemini, kimi, pi, custom.
   # Explicit command wins over harness.
   harness: hermes
   # Example: ["gemini", "--experimental-acp"]

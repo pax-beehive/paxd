@@ -225,6 +225,110 @@ func TestDefaultScannerUsesHermesSQLiteWhenACPFail(t *testing.T) {
 	assert.Equal(t, "SQLite fallback", sessions[0].Name)
 }
 
+func TestCodexSpecDetection(t *testing.T) {
+	assert.True(t, isCodexSpec(SessionScannerSpec{Harness: "codex"}))
+	assert.True(t, isCodexSpec(SessionScannerSpec{AgentType: "codex"}))
+	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"codex-acp"}}))
+	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"/usr/local/bin/codex", "--acp"}}))
+	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"npx", "-y", "@agentclientprotocol/codex-acp"}}))
+	assert.False(t, isCodexSpec(SessionScannerSpec{Harness: "hermes"}))
+	assert.False(t, isCodexSpec(SessionScannerSpec{Command: []string{"hermes", "acp"}}))
+	assert.False(t, isCodexSpec(SessionScannerSpec{Command: []string{"npx", "-y", "@zed-industries/codex-acp"}}))
+}
+
+func TestDefaultScannerCanonicalizesKimiACPSessions(t *testing.T) {
+	command := fakeACPCommand(t, `[{"sessionId":"session_abc-123","title":"hello kimi","cwd":"/tmp/project","updatedAt":"2026-07-19T02:46:15.726Z"}]`)
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}.ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "kimi",
+		Command: command,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "kimi:session_abc-123", sessions[0].SessionID)
+	assert.Equal(t, "session_abc-123", sessions[0].NativeID)
+	assert.Equal(t, "kimi", sessions[0].AgentType)
+	assert.Equal(t, "hello kimi", sessions[0].Name)
+	assert.Equal(t, "/tmp/project", sessions[0].ProjectID)
+	assert.Equal(t, "2026-07-19T02:46:15.726Z", sessions[0].UpdatedAt)
+}
+
+func TestNormalizeKimiSessions(t *testing.T) {
+	sessions := normalizeKimiSessions([]model.SessionInfo{
+		{SessionID: "session_abc", Name: "bare id"},
+		{SessionID: "kimi:session_def", NativeID: "session_def"},
+		{},
+	})
+
+	require.Len(t, sessions, 2)
+	assert.Equal(t, "kimi:session_abc", sessions[0].SessionID)
+	assert.Equal(t, "session_abc", sessions[0].NativeID)
+	assert.Equal(t, "kimi", sessions[0].AgentType)
+	assert.Equal(t, "bare id", sessions[0].Name)
+	assert.Equal(t, "kimi:session_def", sessions[1].SessionID)
+	assert.Equal(t, "session_def", sessions[1].NativeID)
+}
+
+func TestKimiSpecDetection(t *testing.T) {
+	assert.True(t, isKimiSpec(SessionScannerSpec{Harness: "kimi"}))
+	assert.True(t, isKimiSpec(SessionScannerSpec{AgentType: "kimi-code"}))
+	assert.True(t, isKimiSpec(SessionScannerSpec{AgentType: "kimi_code"}))
+	assert.True(t, isKimiSpec(SessionScannerSpec{Command: []string{"kimi", "acp"}}))
+	assert.True(t, isKimiSpec(SessionScannerSpec{Command: []string{"/home/user/.kimi-code/bin/kimi", "acp"}}))
+	assert.False(t, isKimiSpec(SessionScannerSpec{Harness: "codex"}))
+	assert.False(t, isKimiSpec(SessionScannerSpec{Command: []string{"codex-acp"}}))
+	assert.False(t, isKimiSpec(SessionScannerSpec{Command: []string{"hermes", "acp"}}))
+}
+
+func TestDefaultScannerCanonicalizesPiACPSessions(t *testing.T) {
+	command := fakeACPCommand(t, `[{"sessionId":"019f5007-733c-710e-a114-16a50fdf3fe7","title":"hello pi","cwd":"/tmp/project","updatedAt":"2026-07-11T07:16:57.296Z"}]`)
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}.ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "pi",
+		Command: command,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "pi:019f5007-733c-710e-a114-16a50fdf3fe7", sessions[0].SessionID)
+	assert.Equal(t, "019f5007-733c-710e-a114-16a50fdf3fe7", sessions[0].NativeID)
+	assert.Equal(t, "pi", sessions[0].AgentType)
+	assert.Equal(t, "hello pi", sessions[0].Name)
+	assert.Equal(t, "/tmp/project", sessions[0].ProjectID)
+}
+
+func TestNormalizePiSessions(t *testing.T) {
+	sessions := normalizePiSessions([]model.SessionInfo{
+		{SessionID: "abc", Name: "bare id"},
+		{SessionID: "pi:def", NativeID: "def"},
+		{},
+	})
+
+	require.Len(t, sessions, 2)
+	assert.Equal(t, "pi:abc", sessions[0].SessionID)
+	assert.Equal(t, "abc", sessions[0].NativeID)
+	assert.Equal(t, "pi", sessions[0].AgentType)
+	assert.Equal(t, "pi:def", sessions[1].SessionID)
+	assert.Equal(t, "def", sessions[1].NativeID)
+}
+
+func TestPiSpecDetection(t *testing.T) {
+	assert.True(t, isPiSpec(SessionScannerSpec{Harness: "pi"}))
+	assert.True(t, isPiSpec(SessionScannerSpec{AgentType: "pi-agent"}))
+	assert.True(t, isPiSpec(SessionScannerSpec{Command: []string{"pi-acp"}}))
+	assert.True(t, isPiSpec(SessionScannerSpec{Command: []string{"/usr/local/bin/pi-acp"}}))
+	assert.False(t, isPiSpec(SessionScannerSpec{Harness: "kimi"}))
+	assert.False(t, isPiSpec(SessionScannerSpec{Command: []string{"kimi", "acp"}}))
+	assert.False(t, isPiSpec(SessionScannerSpec{Command: []string{"npx", "-y", "pi-acp"}}))
+}
+
 func TestMergeSessionInfosCombinesDuplicateHermesMetadata(t *testing.T) {
 	merged := mergeSessionInfos(
 		[]model.SessionInfo{{

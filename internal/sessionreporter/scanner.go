@@ -57,6 +57,12 @@ func (s DefaultScanner) ListSessions(
 			if isHermesSpec(spec) {
 				return mergeHermesLocalSessions(ctx, spec, sessions)
 			}
+			if isKimiSpec(spec) {
+				return limitSessions(normalizeKimiSessions(sessions), spec.Limit), nil
+			}
+			if isPiSpec(spec) {
+				return limitSessions(normalizePiSessions(sessions), spec.Limit), nil
+			}
 			return limitSessions(sessions, spec.Limit), nil
 		}
 		errs = append(errs, err)
@@ -181,6 +187,65 @@ func isGeminiSpec(spec SessionScannerSpec) bool {
 		return false
 	}
 	return filepath.Base(spec.Command[0]) == "gemini"
+}
+
+func isKimiSpec(spec SessionScannerSpec) bool {
+	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if name == "kimi" || name == "kimi-code" || name == "kimi_code" {
+		return true
+	}
+	if len(spec.Command) == 0 {
+		return false
+	}
+	return filepath.Base(spec.Command[0]) == "kimi"
+}
+
+func isPiSpec(spec SessionScannerSpec) bool {
+	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if name == "pi" || name == "pi-agent" || name == "pi_agent" {
+		return true
+	}
+	if len(spec.Command) == 0 {
+		return false
+	}
+	return filepath.Base(spec.Command[0]) == "pi-acp"
+}
+
+// normalizePiSessions canonicalizes ACP-listed pi sessions so they report the
+// same identity as other pi session sources.
+func normalizePiSessions(sessions []model.SessionInfo) []model.SessionInfo {
+	out := make([]model.SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		if session.SessionID == "" && session.NativeID == "" {
+			continue
+		}
+		session.AgentType = firstNonEmpty(session.AgentType, "pi")
+		if session.NativeID == "" {
+			session.NativeID = strings.TrimPrefix(session.SessionID, "pi:")
+		}
+		session.SessionID = agentregistry.CanonicalSessionID("pi", session.NativeID)
+		out = append(out, session)
+	}
+	return out
+}
+
+// normalizeKimiSessions canonicalizes ACP-listed Kimi Code sessions so they
+// report the same identity as other kimi session sources. Kimi session IDs
+// are stable per conversation, so no lineage handling is needed.
+func normalizeKimiSessions(sessions []model.SessionInfo) []model.SessionInfo {
+	out := make([]model.SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		if session.SessionID == "" && session.NativeID == "" {
+			continue
+		}
+		session.AgentType = firstNonEmpty(session.AgentType, "kimi")
+		if session.NativeID == "" {
+			session.NativeID = strings.TrimPrefix(session.SessionID, "kimi:")
+		}
+		session.SessionID = agentregistry.CanonicalSessionID("kimi", session.NativeID)
+		out = append(out, session)
+	}
+	return out
 }
 
 func mergeHermesLocalSessions(

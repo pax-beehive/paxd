@@ -174,6 +174,13 @@ func DefaultDetectors() []Detector {
 			InstallHint: "install gemini with ACP support",
 		},
 		CommandDetector{
+			Harness:     "kimi",
+			DisplayName: "Kimi Code",
+			Command:     []string{"kimi", "acp"},
+			Source:      "native",
+			InstallHint: "install Kimi Code CLI and run kimi login",
+		},
+		CommandDetector{
 			Harness:     "opencode",
 			DisplayName: "OpenCode",
 			Command:     []string{"opencode", "acp"},

@@ -14,7 +14,7 @@ Upstream callers:
 
 Downstream dependencies:
 
-- detector implementations for Codex, Claude Code, Gemini, and future adapters.
+- detector implementations for Codex, Claude Code, Gemini, Kimi Code, Pi, and future adapters.
 - daemonstore harness inventory repository.
 - process/command lookup abstraction for probing.
 
