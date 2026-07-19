@@ -92,6 +92,7 @@ type ServiceOptions struct {
 	LocalSessions       LocalSessions
 	HostMetrics         HostMetricsProvider
 	ACPPoolCapabilities ACPPoolCapabilitySource
+	Diagnostics         DiagnosticsProvider
 }
 
 type ControlService struct {
@@ -101,6 +102,7 @@ type ControlService struct {
 	localSessions       LocalSessions
 	hostMetrics         HostMetricsProvider
 	acpPoolCapabilities ACPPoolCapabilitySource
+	diagnostics         DiagnosticsProvider
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -111,6 +113,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		localSessions:       opts.LocalSessions,
 		hostMetrics:         opts.HostMetrics,
 		acpPoolCapabilities: opts.ACPPoolCapabilities,
+		diagnostics:         opts.Diagnostics,
 	}
 }
 
@@ -221,6 +224,8 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	switch query.Type {
 	case QueryStatusGet:
 		return s.handleStatusQuery(ctx)
+	case QueryDiagnosticsGet:
+		return s.handleDiagnosticsQuery(ctx)
 	case QueryRemotesList:
 		items, err := s.store.ListRemotes(ctx, *query.ListRemotes)
 		return QueryResult{Type: query.Type, Remotes: &ListRemotesResult{Items: items}, Error: errorPtr(err)}, nil
@@ -311,6 +316,39 @@ func (s *ControlService) handleStatusQuery(ctx context.Context) (QueryResult, er
 		}
 	}
 	return QueryResult{Type: QueryStatusGet, Status: &status}, nil
+}
+
+func (s *ControlService) handleDiagnosticsQuery(ctx context.Context) (QueryResult, error) {
+	view := DiagnosticsView{}
+	if s.diagnostics != nil {
+		view.RuntimeDiagnostics = s.diagnostics.RuntimeDiagnostics(ctx)
+	}
+	remotes, err := s.store.ListRemotes(ctx, ListRemotesQuery{IncludeDisabled: true})
+	if err != nil {
+		return QueryResult{Type: QueryDiagnosticsGet, Error: ptr(errorToControlError(err))}, nil
+	}
+	for _, remote := range remotes {
+		if remote.Status != nil {
+			view.Remotes = append(view.Remotes, *remote.Status)
+		}
+	}
+	conns, err := s.store.ListAgentConnections(ctx, ListAgentConnectionsQuery{IncludeDisabled: true})
+	if err != nil {
+		return QueryResult{Type: QueryDiagnosticsGet, Error: ptr(errorToControlError(err))}, nil
+	}
+	for _, conn := range conns {
+		if conn.Status != nil {
+			view.AgentConnections = append(view.AgentConnections, *conn.Status)
+		}
+	}
+	if slots, ok := s.store.(ACPSlotStatusSource); ok {
+		items, err := slots.ListACPSlotStatuses(ctx)
+		if err != nil {
+			return QueryResult{Type: QueryDiagnosticsGet, Error: ptr(errorToControlError(err))}, nil
+		}
+		view.ACPSlots = items
+	}
+	return QueryResult{Type: QueryDiagnosticsGet, Diagnostics: &view}, nil
 }
 
 func (s *ControlService) BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (RuntimeSnapshotReport, error) {

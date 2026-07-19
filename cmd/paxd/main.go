@@ -389,6 +389,12 @@ func cmdRun(args []string) {
 		log.Fatalf("load runtime config: %v", err)
 	}
 
+	closeLog, err := setupLogging(cfg.Daemon)
+	if err != nil {
+		log.Printf("[paxd] rolling log unavailable, keeping stderr only: %v", err)
+	}
+	defer closeLog()
+
 	log.Printf("[paxd] starting v%s on %s/%s", version, runtime.GOOS, runtime.GOARCH)
 
 	sm := state.NewMachine()
@@ -801,13 +807,11 @@ func generateLaunchdPlist(target serviceTarget, opts serviceInstallOptions) stri
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>%s</string>
     <key>StandardErrorPath</key>
     <string>%s</string>
 </dict>
 </plist>
-`, paxdLaunchdLabel, programArgs.String(), xmlEscape(target.Home), xmlEscape(servicePATH(target.Home)), xmlEscape(filepath.Join(logDir, "paxd.log")), xmlEscape(filepath.Join(logDir, "paxd.error.log")))
+`, paxdLaunchdLabel, programArgs.String(), xmlEscape(target.Home), xmlEscape(servicePATH(target.Home)), xmlEscape(filepath.Join(logDir, "paxd.error.log")))
 }
 
 func generateSystemdUnit(target serviceTarget, opts serviceInstallOptions) string {

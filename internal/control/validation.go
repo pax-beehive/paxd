@@ -278,6 +278,7 @@ func (query Query) Validate() error {
 		err error
 	}{
 		{QueryStatusGet, query.GetStatus != nil, validatePtr(query.GetStatus)},
+		{QueryDiagnosticsGet, query.GetDiagnostics != nil, validatePtr(query.GetDiagnostics)},
 		{QueryRemotesList, query.ListRemotes != nil, validatePtr(query.ListRemotes)},
 		{QueryRemoteGet, query.GetRemote != nil, validatePtr(query.GetRemote)},
 		{QueryAgentConnectionsList, query.ListAgentConnections != nil, validatePtr(query.ListAgentConnections)},
@@ -321,6 +322,10 @@ func (query Query) Validate() error {
 }
 
 func (query GetStatusQuery) Validate() error {
+	return nil
+}
+
+func (query GetDiagnosticsQuery) Validate() error {
 	return nil
 }
 
@@ -449,6 +454,7 @@ func knownCommandType(typ CommandType) bool {
 func knownQueryType(typ QueryType) bool {
 	switch typ {
 	case QueryStatusGet,
+		QueryDiagnosticsGet,
 		QueryRemotesList,
 		QueryRemoteGet,
 		QueryAgentConnectionsList,

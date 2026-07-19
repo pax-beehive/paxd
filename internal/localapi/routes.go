@@ -25,6 +25,7 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /openapi.json", h.routeOpenAPIGet)
 
 	h.mux.HandleFunc("GET /v1/status", h.routeStatusGet)
+	h.mux.HandleFunc("GET /v1/diagnostics", h.routeDiagnosticsGet)
 	h.mux.HandleFunc("GET /v1/remotes", h.routeRemotesList)
 	h.mux.HandleFunc("POST /v1/remotes", h.routeRemoteCreate)
 	h.mux.HandleFunc("GET /v1/remotes/{id}", h.routeRemoteGet)

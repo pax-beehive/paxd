@@ -24,6 +24,10 @@ func (h *Handler) routeStatusGet(w http.ResponseWriter, r *http.Request) {
 	h.handleQuery(w, r, control.Query{Type: control.QueryStatusGet, GetStatus: &control.GetStatusQuery{}})
 }
 
+func (h *Handler) routeDiagnosticsGet(w http.ResponseWriter, r *http.Request) {
+	h.handleQuery(w, r, control.Query{Type: control.QueryDiagnosticsGet, GetDiagnostics: &control.GetDiagnosticsQuery{}})
+}
+
 func (h *Handler) routeRemotesList(w http.ResponseWriter, r *http.Request) {
 	h.handleQuery(w, r, control.Query{Type: control.QueryRemotesList, ListRemotes: &control.ListRemotesQuery{IncludeDisabled: boolQuery(r, "include_disabled")}})
 }

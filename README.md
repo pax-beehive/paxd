@@ -291,6 +291,9 @@ daemon:
   status_interval: 10s
   reconcile_interval: 30s
   log_level: info
+  log_file: ~/.paxd/logs/paxd.log   # 滚动日志路径，留空则只写 stderr
+  log_max_size_mb: 20               # 超过后轮转 paxd.log.1..N
+  log_max_backups: 3                # 保留的轮转备份数
   db_path: ~/.paxd/paxd.db
 
 acp_forwarder:
@@ -394,6 +397,16 @@ Environment overrides:
 | `PAX_ACP_COMMAND` | Space-separated local ACP command |
 | `PAX_ACP_WORKING_DIR` | Working directory for the ACP command |
 | `PAX_ACP_TUNNEL_PATH` | pax-manager tunnel path |
+
+## 日志与诊断
+
+paxd 自己维护滚动日志 `~/.paxd/logs/paxd.log`（大小与备份数见上面 `daemon` 配置；前台运行时同时输出到终端）。ACP harness 子进程的 stderr 会逐行带前缀写入该日志，进程异常退出时最后 2KB stderr 会写进 slot status 的 `last_error_message`，`paxl daemon agent list` 与云端上报均可见。
+
+本机诊断快照（transport 队列积压/未 ack 帧、重连状态、slot 阶段、日志文件大小）：
+
+```bash
+curl -s --unix-socket ~/.paxd/paxd.sock http://paxd/v1/diagnostics
+```
 
 ## 本地 SQLite
 

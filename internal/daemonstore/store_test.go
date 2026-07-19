@@ -1228,3 +1228,25 @@ func assertTableCount(t *testing.T, store *Store, model any, want int64) {
 	require.NoError(t, store.db.Model(model).Count(&got).Error)
 	assert.Equal(t, want, got)
 }
+
+func TestListACPSlotStatuses(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	require.NoError(t, store.UpsertACPSlotStatus(ctx, ACPSlotStatusUpdate{
+		SlotID: "slot-2", ConnectionID: "conn-1", Ordinal: 1, Phase: "failed",
+		LastErrorCode: "process_ended", LastErrorMessage: "boom\nstderr tail:\ncrash",
+	}))
+	require.NoError(t, store.UpsertACPSlotStatus(ctx, ACPSlotStatusUpdate{
+		SlotID: "slot-1", ConnectionID: "conn-1", Ordinal: 0, Phase: "ready",
+	}))
+
+	items, err := store.ListACPSlotStatuses(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	assert.Equal(t, "slot-1", items[0].SlotID)
+	assert.Equal(t, "ready", items[0].Phase)
+	assert.Equal(t, "slot-2", items[1].SlotID)
+	assert.Equal(t, "failed", items[1].Phase)
+	assert.Contains(t, items[1].LastErrorMessage, "crash")
+	assert.NotEmpty(t, items[1].UpdatedAt)
+}

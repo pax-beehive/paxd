@@ -162,3 +162,17 @@ agents:
 		t.Fatalf("claude reconnect = %s", agents[1].ACPForwarder.ReconnectInterval)
 	}
 }
+
+func TestDefaultConfigLogSettings(t *testing.T) {
+	cfg := DefaultConfig()
+	home, _ := os.UserHomeDir()
+	if got, want := cfg.Daemon.LogFile, filepath.Join(home, ".paxd", "logs", "paxd.log"); got != want {
+		t.Fatalf("Daemon.LogFile = %q, want %q", got, want)
+	}
+	if cfg.Daemon.LogMaxSizeMB != 20 {
+		t.Fatalf("Daemon.LogMaxSizeMB = %d, want 20", cfg.Daemon.LogMaxSizeMB)
+	}
+	if cfg.Daemon.LogMaxBackups != 3 {
+		t.Fatalf("Daemon.LogMaxBackups = %d, want 3", cfg.Daemon.LogMaxBackups)
+	}
+}

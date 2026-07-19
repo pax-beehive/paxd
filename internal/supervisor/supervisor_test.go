@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1389,5 +1390,25 @@ func waitForAgentStatusMatch(t *testing.T, store *fakeAgentStore, id string, mat
 		default:
 			time.Sleep(time.Millisecond)
 		}
+	}
+}
+
+func TestACPSlotStatusWriterAppendsStderrTail(t *testing.T) {
+	store := newFakeACPSlotStore()
+	write := statusWrite{
+		Phase: PhaseStopped,
+		Exit: runtimes.TransientExit("process_ended", "acp slot process ended").
+			WithDetail("stderr_tail", "boom: harness crashed"),
+		At: time.Now(),
+	}
+	err := acpSlotStatusWriter(store)(context.Background(), runtimes.ACPSlotSpec{
+		SlotID: "slot-1", ConnectionID: "conn-1",
+	}, write)
+	if err != nil {
+		t.Fatalf("writer error = %v", err)
+	}
+	got := store.latestStatus("slot-1").LastErrorMessage
+	if !strings.Contains(got, "acp slot process ended") || !strings.Contains(got, "boom: harness crashed") {
+		t.Fatalf("LastErrorMessage = %q, want exit message and stderr tail", got)
 	}
 }

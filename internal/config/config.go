@@ -74,6 +74,9 @@ type DaemonConfig struct {
 	StatusInterval    time.Duration `yaml:"status_interval"`    // status report interval (default 10s)
 	ReconcileInterval time.Duration `yaml:"reconcile_interval"` // orphan reconciliation interval (default 15s)
 	LogLevel          string        `yaml:"log_level"`          // debug, info, warn, error
+	LogFile           string        `yaml:"log_file"`           // rolling log path (default ~/.paxd/logs/paxd.log, empty keeps stderr only)
+	LogMaxSizeMB      int           `yaml:"log_max_size_mb"`    // rotate threshold in MB (default 20)
+	LogMaxBackups     int           `yaml:"log_max_backups"`    // rotated files to keep (default 3)
 	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
 	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
 	SessionBatchSize  int           `yaml:"session_batch_size"` // max sessions per status report
@@ -119,6 +122,9 @@ func DefaultConfig() Config {
 			PollInterval:      5 * time.Second,
 			SessionBatchSize:  100,
 			LogLevel:          "info",
+			LogFile:           filepath.Join(home, ".paxd", "logs", "paxd.log"),
+			LogMaxSizeMB:      20,
+			LogMaxBackups:     3,
 			DBPath:            filepath.Join(home, ".paxd", "paxd.db"),
 		},
 		ACPForwarder: ACPForwarderConfig{

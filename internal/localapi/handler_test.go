@@ -594,3 +594,38 @@ func equalJSON(t *testing.T, got, want any) bool {
 	wantJSON := mustJSON(t, want)
 	return bytes.Equal(gotJSON, wantJSON)
 }
+
+type diagnosticsQueryService struct {
+	lastQuery control.Query
+}
+
+func (s *diagnosticsQueryService) HandleCommand(ctx context.Context, src control.Source, cmd control.Command) (control.CommandAck, error) {
+	_ = ctx
+	_ = src
+	return control.CommandAck{CommandID: cmd.CommandID, OK: true, Status: control.CommandStatusReceived}, nil
+}
+
+func (s *diagnosticsQueryService) HandleQuery(ctx context.Context, src control.Source, query control.Query) (control.QueryResult, error) {
+	_ = ctx
+	_ = src
+	s.lastQuery = query
+	return control.QueryResult{
+		Type:        query.Type,
+		Diagnostics: &control.DiagnosticsView{RuntimeDiagnostics: control.RuntimeDiagnostics{PaxdVersion: "v-test"}},
+	}, nil
+}
+
+func TestRouteDiagnosticsGet(t *testing.T) {
+	service := &diagnosticsQueryService{}
+	handler := NewHandler(service)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/diagnostics", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var result control.QueryResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	require.NotNil(t, result.Diagnostics)
+	assert.Equal(t, "v-test", result.Diagnostics.PaxdVersion)
+	assert.Equal(t, control.QueryDiagnosticsGet, service.lastQuery.Type)
+	assert.NotNil(t, service.lastQuery.GetDiagnostics)
+}

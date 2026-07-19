@@ -3,7 +3,9 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -147,6 +149,43 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 	}
 }
 
+func TestACPSlotCapturesStderrTail(t *testing.T) {
+	ctx := context.Background()
+	proc := newSlotFakeLocalACPProcess()
+	proc.stderr = strings.NewReader("boom: harness crashed\n")
+	runner := slotFakeLocalACPProcessRunner{proc: proc}
+	slot := NewACPSlot(ACPSlotSpec{
+		ConnectionID: "conn_1",
+		SlotID:       "slot_a",
+		Ordinal:      0,
+		ProcessEpoch: "epoch_a",
+		Command:      []string{"fake-acp"},
+		PaxdVersion:  "test",
+	}, runner)
+
+	started := make(chan error, 1)
+	go func() { started <- slot.Start(ctx) }()
+	require.Eventually(t, func() bool {
+		return bytes.Contains(proc.stdinBytes(), []byte(`"method":"initialize"`))
+	}, eventuallyWait, eventuallyTick)
+	proc.writeStdout([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1}}` + "\n"))
+	require.NoError(t, <-started)
+
+	proc.finish(errors.New("exit status 1"))
+	require.Eventually(t, func() bool {
+		select {
+		case <-slot.Done():
+			return true
+		default:
+			return false
+		}
+	}, eventuallyWait, eventuallyTick)
+	require.Eventually(t, func() bool {
+		return strings.Contains(slot.StderrTail(0), "boom: harness crashed")
+	}, eventuallyWait, eventuallyTick)
+	assert.Contains(t, slot.StderrTail(stderrStatusTailLimit), "boom: harness crashed")
+}
+
 type slotFakeLocalACPProcessRunner struct {
 	proc *slotFakeLocalACPProcess
 }
@@ -159,6 +198,7 @@ type slotFakeLocalACPProcess struct {
 	stdin  *bytes.Buffer
 	stdout *io.PipeReader
 	outw   *io.PipeWriter
+	stderr io.Reader
 	done   chan error
 	mu     sync.Mutex
 }
@@ -186,6 +226,9 @@ func (p *slotFakeLocalACPProcess) Stdout() io.Reader {
 }
 
 func (p *slotFakeLocalACPProcess) Stderr() io.Reader {
+	if p.stderr != nil {
+		return p.stderr
+	}
 	return bytes.NewReader(nil)
 }
 

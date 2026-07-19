@@ -87,7 +87,7 @@ func TestGenerateLaunchdPlistRunsPaxdInForegroundUnderLaunchd(t *testing.T) {
 	assert.Contains(t, plist, "/Users/dev/.local/share/fnm/aliases/default/bin")
 	assert.Contains(t, plist, "<string>--debug-http</string>")
 	assert.Contains(t, plist, "<string>127.0.0.1:8765</string>")
-	assert.Contains(t, plist, "<string>/Users/dev/.paxd/logs/paxd.log</string>")
+	assert.NotContains(t, plist, "StandardOutPath")
 	assert.Contains(t, plist, "<string>/Users/dev/.paxd/logs/paxd.error.log</string>")
 }
 

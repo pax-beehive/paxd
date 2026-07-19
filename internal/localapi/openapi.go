@@ -159,6 +159,7 @@ func localAPIEndpoints() []apiEndpoint {
 
 	return []apiEndpoint{
 		{Method: "GET", Path: "/v1/status", Summary: "Get daemon, remote, agent, harness, and local session status.", OperationID: "getStatus", Response: "QueryResult", Tags: []string{"status"}},
+		{Method: "GET", Path: "/v1/diagnostics", Summary: "Get runtime diagnostics: transport queue stats, reconnects, slot phases, log file info.", OperationID: "getDiagnostics", Response: "QueryResult", Tags: []string{"status"}},
 
 		{Method: "GET", Path: "/v1/remotes", Summary: "List configured remotes.", OperationID: "listRemotes", Parameters: []apiParameter{includeDisabled}, Response: "QueryResult", Tags: []string{"remotes"}},
 		{Method: "POST", Path: "/v1/remotes", Summary: "Create a remote.", OperationID: "createRemote", Parameters: []apiParameter{commandID}, RequestBody: "CreateRemoteCommand", Response: "CommandAck", Tags: []string{"remotes"}},

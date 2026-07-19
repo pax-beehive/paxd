@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,6 +40,9 @@ type runtimeSupervisors struct {
 	transportProducers interface {
 		Close(context.Context) error
 	}
+	transportStats *runtimes.TransportStatsTracker
+	startedAt      time.Time
+	logFilePath    string
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -74,15 +78,14 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		}),
 	)
 	s.transportFlusher = transportStore
-	engineFactory := runtimes.ReliableEngineFromStoreWithProducerConfig(
+	engineFactory := runtimes.NewTransportStatsTracker(runtimes.ReliableEngineFromStoreWithProducerConfig(
 		transportStore,
 		reliablemq.ProducerConfig{OnError: func(err error) {
 			log.Printf("[paxd] FATAL acp transport producer stopped accepting output: %v", err)
 		}},
-	)
-	if closer, ok := engineFactory.(interface{ Close(context.Context) error }); ok {
-		s.transportProducers = closer
-	}
+	))
+	s.transportStats = engineFactory
+	s.transportProducers = engineFactory
 
 	headers := auth.NewProvider(store, nil)
 	dialer := runtimes.GorillaWebSocketDialer{}
@@ -177,6 +180,54 @@ func openTransportDB() (*sql.DB, error) {
 	}
 	log.Printf("[paxd] reliable transport database opened path=%s", path)
 	return db, nil
+}
+
+func (s *runtimeSupervisors) RuntimeDiagnostics(ctx context.Context) control.RuntimeDiagnostics {
+	_ = ctx
+	out := control.RuntimeDiagnostics{PaxdVersion: s.paxdVersion}
+	if !s.startedAt.IsZero() {
+		startedAt := s.startedAt
+		out.StartedAt = &startedAt
+	}
+	if s.logFilePath != "" {
+		info := control.LogFileInfo{Path: s.logFilePath}
+		if stat, err := os.Stat(s.logFilePath); err == nil {
+			info.SizeBytes = stat.Size()
+		}
+		out.LogFile = &info
+	}
+	if s.transportStats != nil {
+		stats := s.transportStats.Stats()
+		queueIDs := make([]string, 0, len(stats))
+		for queueID := range stats {
+			queueIDs = append(queueIDs, queueID)
+		}
+		sort.Strings(queueIDs)
+		for _, queueID := range queueIDs {
+			stat := stats[queueID]
+			out.TransportQueues = append(out.TransportQueues, control.TransportQueueDiagnostics{
+				QueueID:      queueID,
+				Bound:        stat.Bound,
+				Tail:         stat.Tail,
+				AckedThrough: stat.AckedThrough,
+				NextToSend:   stat.NextToSend,
+				Unacked:      stat.Tail - stat.AckedThrough,
+				LastError:    stat.LastError,
+			})
+		}
+	}
+	if s.transportFlusher != nil {
+		stats := s.transportFlusher.Stats()
+		out.TransportWriteBehind = &control.TransportWriteBehindStats{
+			DirtyFrames:              stats.DirtyFrames,
+			DirtyPatches:             stats.DirtyPatches,
+			DirtyBytes:               stats.DirtyBytes,
+			Degraded:                 stats.Degraded,
+			ConsecutiveFlushFailures: stats.ConsecutiveFlushFailures,
+			LastFlushError:           stats.LastFlushError,
+		}
+	}
+	return out
 }
 
 func (s *runtimeSupervisors) WakeRemotes() {

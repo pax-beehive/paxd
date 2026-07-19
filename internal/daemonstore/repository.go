@@ -961,6 +961,29 @@ func (s *Store) UpsertACPSlotStatus(ctx context.Context, update ACPSlotStatusUpd
 	}).Create(&status).Error
 }
 
+func (s *Store) ListACPSlotStatuses(ctx context.Context) ([]control.ACPSlotStatusInfo, error) {
+	var statuses []ACPSlotStatus
+	if err := s.db.WithContext(ctx).
+		Order("connection_id, ordinal").
+		Find(&statuses).Error; err != nil {
+		return nil, mapGormErr(err)
+	}
+	out := make([]control.ACPSlotStatusInfo, 0, len(statuses))
+	for _, status := range statuses {
+		out = append(out, control.ACPSlotStatusInfo{
+			SlotID:           status.SlotID,
+			ConnectionID:     status.ConnectionID,
+			Ordinal:          status.Ordinal,
+			Phase:            status.Phase,
+			FailureClass:     status.FailureClass,
+			LastErrorCode:    status.LastErrorCode,
+			LastErrorMessage: status.LastErrorMessage,
+			UpdatedAt:        status.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out, nil
+}
+
 func (s *Store) GetACPSlotStatus(ctx context.Context, slotID string) (*ACPSlotStatusView, error) {
 	var status ACPSlotStatus
 	if err := s.db.WithContext(ctx).Where("slot_id = ?", slotID).First(&status).Error; err != nil {
