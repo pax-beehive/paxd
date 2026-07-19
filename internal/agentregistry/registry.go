@@ -112,6 +112,14 @@ func Default() Registry {
 			Source:      "native",
 			InstallHint: "install hermes with ACP support",
 		},
+		{
+			Name:        "kimi",
+			Aliases:     []string{"kimi-code", "kimi_code"},
+			Kind:        "acp",
+			Command:     []string{"kimi", "acp"},
+			Source:      "native",
+			InstallHint: "install Kimi Code CLI and run kimi login",
+		},
 	}}
 }
 

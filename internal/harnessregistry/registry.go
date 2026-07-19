@@ -173,6 +173,21 @@ func DefaultDetectors() []Detector {
 			Source:      "native",
 			InstallHint: "install gemini with ACP support",
 		},
+		CommandDetector{
+			Harness:     "kimi",
+			DisplayName: "Kimi Code",
+			Command:     []string{"kimi", "acp"},
+			Source:      "native",
+			InstallHint: "install Kimi Code CLI and run kimi login",
+		},
+		CommandDetector{
+			Harness:         "pi",
+			DisplayName:     "Pi",
+			Command:         []string{"pi-acp"},
+			FallbackCommand: []string{"npx", "-y", "pi-acp"},
+			Source:          "community",
+			InstallHint:     "install pi-acp and @earendil-works/pi-coding-agent",
+		},
 	}
 }
 

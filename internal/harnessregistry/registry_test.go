@@ -133,7 +133,7 @@ func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
 		names = append(names, detector.Name())
 	}
 
-	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini"}, names)
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "pi"}, names)
 }
 
 type fakeStore struct {

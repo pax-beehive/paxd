@@ -23,6 +23,27 @@ func TestRegistryAgentsRejectsUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestRegistryIncludesKimiCodeACP(t *testing.T) {
+	agents, err := Default().Agents([]string{"kimi", "kimi-code", "kimi_code"})
+	if err != nil {
+		t.Fatalf("Agents(kimi aliases) error = %v", err)
+	}
+	if len(agents) != 3 {
+		t.Fatalf("Agents(kimi aliases) = %d agents, want 3", len(agents))
+	}
+	for _, agent := range agents {
+		if agent.Name != "kimi" {
+			t.Fatalf("agent.Name = %q, want kimi", agent.Name)
+		}
+		if agent.Kind != "acp" || agent.Source != "native" {
+			t.Fatalf("kimi kind/source = %s/%s, want acp/native", agent.Kind, agent.Source)
+		}
+		if got := agent.Command; len(got) != 2 || got[0] != "kimi" || got[1] != "acp" {
+			t.Fatalf("kimi command = %#v, want [kimi acp]", got)
+		}
+	}
+}
+
 func TestRegistryIncludesPiACP(t *testing.T) {
 	agents, err := Default().Agents([]string{"pi"})
 	if err != nil {

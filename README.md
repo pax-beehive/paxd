@@ -244,6 +244,8 @@ ACP harness 预设：
 | `codex` | `codex-acp`，若未安装则 `npx -y @zed-industries/codex-acp` |
 | `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp` |
 | `gemini` | `gemini --acp` |
+| `kimi` | `kimi acp`（需先在本机 `kimi login`） |
+| `pi` | `pi-acp`，若未安装则 `npx -y pi-acp` |
 | `custom` | 必须显式配置 `command` |
 
 `agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [zed-industries/codex-acp](https://github.com/zed-industries/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
