@@ -3,10 +3,12 @@ package hostmetrics
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/machineinfo"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -19,6 +21,7 @@ type Collector func(ctx context.Context) (control.HostMetricsReport, error)
 type Sampler struct {
 	interval time.Duration
 	collect  Collector
+	identity control.HostMetricsReport
 
 	mu     sync.RWMutex
 	latest *control.HostMetricsReport
@@ -36,6 +39,18 @@ func NewSamplerWithCollector(interval time.Duration, collect Collector) *Sampler
 		collect = collectSystemMetrics
 	}
 	return &Sampler{interval: interval, collect: collect}
+}
+
+// WithIdentity overrides detected host identity fields while preserving the
+// periodically sampled utilization metrics.
+func (s *Sampler) WithIdentity(machineName, osName, arch string) *Sampler {
+	if s == nil {
+		return s
+	}
+	s.identity.MachineName = machineName
+	s.identity.OS = osName
+	s.identity.Arch = arch
+	return s
 }
 
 func (s *Sampler) Start(ctx context.Context) {
@@ -79,6 +94,15 @@ func (s *Sampler) sample(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	if s.identity.MachineName != "" {
+		metrics.MachineName = s.identity.MachineName
+	}
+	if s.identity.OS != "" {
+		metrics.OS = s.identity.OS
+	}
+	if s.identity.Arch != "" {
+		metrics.Arch = s.identity.Arch
+	}
 	s.mu.Lock()
 	s.latest = &metrics
 	s.mu.Unlock()
@@ -86,7 +110,11 @@ func (s *Sampler) sample(ctx context.Context) {
 
 func collectSystemMetrics(ctx context.Context) (control.HostMetricsReport, error) {
 	_ = ctx
-	var metrics control.HostMetricsReport
+	metrics := control.HostMetricsReport{
+		MachineName: machineinfo.Name(),
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+	}
 	var firstErr error
 	if cpuPercent, err := cpu.Percent(time.Second, false); err == nil && len(cpuPercent) > 0 {
 		metrics.CPUPercent = cpuPercent[0]

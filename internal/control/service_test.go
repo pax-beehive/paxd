@@ -8,6 +8,8 @@ import (
 
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServiceRejectsInvalidCommandWithoutWake(t *testing.T) {
@@ -327,6 +329,33 @@ func TestServiceAgentConnectionMutationCommands(t *testing.T) {
 	if wakes.agent != 3 {
 		t.Fatalf("agent wakes = %d, want 3", wakes.agent)
 	}
+	assert.Equal(t, 3, wakes.acpSlots)
+}
+
+func TestServiceDesiredSlotOnlyUpdateWakesOnlyACPSlotSupervisor(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	_, err := store.CreateRemote(ctx, *createRemoteCommand("seed_remote", "remote_prod", "https://api.example.test").CreateRemote)
+	require.NoError(t, err)
+	_, err = store.CreateAgentConnection(ctx, *createAgentConnectionCommand("seed_conn", "remote_prod", "conn_codex").CreateAgentConnection)
+	require.NoError(t, err)
+	wakes := &fakeSupervisors{}
+	service := control.NewService(control.ServiceOptions{Store: store, Supervisors: wakes})
+	desiredSlots := 3
+
+	ack, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceLocal}, control.Command{
+		CommandID: "cmd_conn_scale",
+		Type:      control.CommandAgentConnectionUpdate,
+		UpdateAgentConnection: &control.UpdateAgentConnectionCommand{
+			ConnectionID: "conn_codex",
+			DesiredSlots: &desiredSlots,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.True(t, ack.OK)
+	assert.Zero(t, wakes.agent)
+	assert.Equal(t, 1, wakes.acpSlots)
 }
 
 func TestServiceRemoteAuthWakesBothSupervisors(t *testing.T) {
@@ -759,6 +788,47 @@ func TestBuildRuntimeSnapshotFiltersRemoteAndIncludesHostMetrics(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeSnapshotIncludesACPPoolCapabilityReport(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	if _, err := store.CreateRemote(ctx, *createRemoteCommand("seed_remote", "remote_prod", "https://remote.example.test").CreateRemote); err != nil {
+		t.Fatalf("CreateRemote() error = %v", err)
+	}
+	conn := createAgentConnectionCommand("seed_conn", "remote_prod", "conn_codex").CreateAgentConnection
+	conn.CloudAgentID = "agent_codex"
+	if _, err := store.CreateAgentConnection(ctx, *conn); err != nil {
+		t.Fatalf("CreateAgentConnection() error = %v", err)
+	}
+	service := control.NewService(control.ServiceOptions{
+		Store: store,
+		ACPPoolCapabilities: fakeACPPoolCapabilitySource{
+			reports: map[string]control.ACPPoolCapabilityReport{
+				"conn_codex": {
+					SchemaVersion:      1,
+					ConnectionID:       "conn_codex",
+					PaxdVersion:        "dev",
+					CommandFingerprint: "fingerprint_1",
+					ClientProfileHash:  "profile_hash_1",
+					WorkerResultHash:   "worker_hash_1",
+					ProtocolVersion:    1,
+					InitPhase:          "ready",
+				},
+			},
+		},
+	})
+
+	snapshot, err := service.BuildRuntimeSnapshot(ctx, "remote_prod", "node_123")
+
+	require.NoError(t, err)
+	require.Len(t, snapshot.Agents, 1)
+	report := snapshot.Agents[0].ACPPoolCapabilityReport
+	require.NotNil(t, report)
+	require.Equal(t, "conn_codex", report.ConnectionID)
+	require.Equal(t, "dev", report.PaxdVersion)
+	require.Equal(t, "worker_hash_1", report.WorkerResultHash)
+	require.Equal(t, "ready", report.InitPhase)
+}
+
 func TestBuildRuntimeSnapshotOmitHostMetricsOnProviderFailure(t *testing.T) {
 	ctx := context.Background()
 	store := openControlTestStore(t)
@@ -797,8 +867,9 @@ func (s *failingCommandRecordStore) GetCommandRecord(ctx context.Context, comman
 }
 
 type fakeSupervisors struct {
-	remote int
-	agent  int
+	remote   int
+	agent    int
+	acpSlots int
 }
 
 func (f *fakeSupervisors) WakeRemotes() {
@@ -807,6 +878,10 @@ func (f *fakeSupervisors) WakeRemotes() {
 
 func (f *fakeSupervisors) WakeAgentConnections() {
 	f.agent++
+}
+
+func (f *fakeSupervisors) WakeACPSlots() {
+	f.acpSlots++
 }
 
 type fakeHarnessRegistry struct {
@@ -885,6 +960,19 @@ func (f fakeHostMetricsProvider) CurrentHostMetrics(ctx context.Context) (*contr
 		return nil, f.err
 	}
 	return f.metrics, nil
+}
+
+type fakeACPPoolCapabilitySource struct {
+	reports map[string]control.ACPPoolCapabilityReport
+}
+
+func (f fakeACPPoolCapabilitySource) ACPPoolCapabilityReport(ctx context.Context, connectionID string) (*control.ACPPoolCapabilityReport, bool) {
+	_ = ctx
+	report, ok := f.reports[connectionID]
+	if !ok {
+		return nil, false
+	}
+	return &report, true
 }
 
 func openControlTestStore(t *testing.T) *daemonstore.Store {

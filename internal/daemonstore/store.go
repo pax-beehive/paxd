@@ -119,12 +119,17 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.dropRemoteIsDefaultColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.dropLegacyAgentConnectionUniqueIndexes(ctx); err != nil {
+		return err
+	}
 	return s.db.WithContext(ctx).AutoMigrate(
 		&Remote{},
 		&RemoteAuth{},
 		&RemoteStatus{},
 		&AgentConnection{},
 		&AgentConnectionStatus{},
+		&ACPSlotStatus{},
+		&ACPSessionRoute{},
 		&ControlCommand{},
 		&HarnessInventory{},
 		&LocalSession{},
@@ -133,6 +138,41 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&MessagePart{},
 		&Setting{},
 	)
+}
+
+func (s *Store) dropLegacyAgentConnectionUniqueIndexes(ctx context.Context) error {
+	migrator := s.db.WithContext(ctx).Migrator()
+	if !migrator.HasTable(&AgentConnection{}) {
+		return nil
+	}
+	for _, name := range []string{
+		"idx_agent_connection_remote_name",
+		"idx_agent_connection_remote_cloud_agent",
+	} {
+		var definition struct {
+			SQL string
+		}
+		result := s.db.WithContext(ctx).
+			Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", name).
+			Scan(&definition)
+		if result.Error != nil {
+			return fmt.Errorf("inspect agent connection index %s: %w", name, result.Error)
+		}
+		if result.RowsAffected == 0 || isActiveAgentConnectionIndex(definition.SQL) {
+			continue
+		}
+		if err := migrator.DropIndex(&AgentConnection{}, name); err != nil {
+			return fmt.Errorf("drop legacy agent connection index %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func isActiveAgentConnectionIndex(definition string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(definition), " "))
+	return strings.Contains(normalized, " where ") &&
+		strings.Contains(normalized, "deleted_at") &&
+		strings.Contains(normalized, "is null")
 }
 
 func (s *Store) dropRemoteCloudAPIURLUniqueIndex(ctx context.Context) error {

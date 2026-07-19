@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,13 +16,17 @@ import (
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
+	"github.com/pax-beehive/paxkit/reliablemq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	ctx := context.Background()
 	store := openTestStore(t)
+	transportDBPath := filepath.Join(home, ".paxd", "transport.db")
 	cfg := config.DefaultConfig()
 	cfg.Cloud.APIURL = "https://app.paxtech.net"
 	cfg.Cloud.APIKey = "pax_key"
@@ -43,7 +48,49 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	require.NotNil(t, rt.supervisors)
 	assert.NotNil(t, rt.supervisors.remote)
 	assert.NotNil(t, rt.supervisors.agent)
+	assert.IsType(t, &reliablemq.ProducerWriteBehindStore{}, rt.supervisors.transportFlusher)
+	require.FileExists(t, transportDBPath)
+	assert.Equal(t, 4, rt.supervisors.transportDB.Stats().MaxOpenConnections)
+	assert.False(t, store.DB().Migrator().HasTable("transport_journal"))
+	var transportJournalTables int
+	require.NoError(t, rt.supervisors.transportDB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transport_journal'`,
+	).Scan(&transportJournalTables))
+	assert.Equal(t, 1, transportJournalTables)
 	assertNoBusinessRows(t, store)
+}
+
+func TestBootstrapClearsStaleACPSessionBindingsAndPreservesResumeDescriptor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	store := openTestStore(t)
+	route, err := store.UpsertACPSessionRoute(ctx, daemonstore.ACPSessionRouteUpsert{
+		ConnectionID:     "conn_codex",
+		NativeSessionID:  "session_1",
+		ResumeParamsJSON: `{"cwd":"/work","mcpServers":[]}`,
+	})
+	require.NoError(t, err)
+	_, bound, err := store.BindACPSessionRoute(ctx, daemonstore.ACPSessionRouteBindingUpdate{
+		ConnectionID:    "conn_codex",
+		NativeSessionID: "session_1",
+		SlotID:          "slot_a",
+		ProcessEpoch:    "epoch_stale",
+		ExpectedVersion: route.Version,
+	})
+	require.NoError(t, err)
+	require.True(t, bound)
+
+	cfg := config.DefaultConfig()
+	runtime, err := Bootstrap(ctx, Options{Config: &cfg, Store: store})
+
+	require.NoError(t, err)
+	require.NotNil(t, runtime)
+	route, err = store.GetACPSessionRoute(ctx, "conn_codex", "session_1")
+	require.NoError(t, err)
+	assert.Empty(t, route.BoundSlotID)
+	assert.Empty(t, route.BoundProcessEpoch)
+	assert.Equal(t, "slot_a", route.LastSlotID)
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[]}`, route.ResumeParamsJSON)
 }
 
 func TestBootstrapRequiresConfig(t *testing.T) {
@@ -122,6 +169,7 @@ func TestRuntimeSupervisorValidationAndNilBranches(t *testing.T) {
 	empty := &runtimeSupervisors{}
 	empty.WakeRemotes()
 	empty.WakeAgentConnections()
+	empty.WakeACPSlots()
 	empty.Start(context.Background())
 
 	if err := empty.Configure(nil, nil); err == nil {
@@ -140,12 +188,14 @@ func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	harnesses := &fakeDaemonHarnessRegistry{}
 	remote := &fakeDaemonSupervisor{}
 	agent := &fakeDaemonSupervisor{}
+	acpSlots := &fakeDaemonSupervisor{}
 	rt := &Runtime{
 		hostMetrics: metrics,
 		harnesses:   harnesses,
 		supervisors: &runtimeSupervisors{
-			remote: remote,
-			agent:  agent,
+			remote:   remote,
+			agent:    agent,
+			acpSlots: acpSlots,
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,12 +204,14 @@ func TestRuntimeSupervisorsHelpers(t *testing.T) {
 	rt.StartSupervisors(ctx)
 
 	require.Eventually(t, func() bool {
-		return metrics.started && harnesses.discovered && remote.started && agent.started
+		return metrics.isStarted() && harnesses.isDiscovered() && remote.isStarted() && agent.isStarted() && acpSlots.isStarted()
 	}, time.Second, 10*time.Millisecond)
 	rt.supervisors.WakeRemotes()
 	rt.supervisors.WakeAgentConnections()
-	assert.Equal(t, 1, remote.wakes)
-	assert.Equal(t, 1, agent.wakes)
+	rt.supervisors.WakeACPSlots()
+	assert.Equal(t, 1, remote.wakeCount())
+	assert.Equal(t, 1, agent.wakeCount())
+	assert.Equal(t, 1, acpSlots.wakeCount())
 	cancel()
 }
 
@@ -212,14 +264,24 @@ func openTestStore(t *testing.T) *daemonstore.Store {
 }
 
 type fakeMetricsStarter struct {
+	mu      sync.Mutex
 	started bool
 }
 
 func (f *fakeMetricsStarter) Start(context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = true
 }
 
+func (f *fakeMetricsStarter) isStarted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
+}
+
 type fakeDaemonHarnessRegistry struct {
+	mu         sync.Mutex
 	discovered bool
 }
 
@@ -228,11 +290,20 @@ func (f *fakeDaemonHarnessRegistry) ListCached(context.Context) ([]control.Harne
 }
 
 func (f *fakeDaemonHarnessRegistry) Discover(context.Context, control.DiscoverHarnessesQuery) ([]control.HarnessView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.discovered = true
 	return nil, nil
 }
 
+func (f *fakeDaemonHarnessRegistry) isDiscovered() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.discovered
+}
+
 type fakeDaemonSupervisor struct {
+	mu       sync.Mutex
 	wakes    int
 	started  bool
 	starts   int
@@ -240,12 +311,16 @@ type fakeDaemonSupervisor struct {
 }
 
 func (f *fakeDaemonSupervisor) Start(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = true
 	f.starts++
 	return f.startErr
 }
 
 func (f *fakeDaemonSupervisor) Wake() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.wakes++
 }
 
@@ -254,7 +329,21 @@ func (f *fakeDaemonSupervisor) Snapshot() supervisor.Snapshot {
 }
 
 func (f *fakeDaemonSupervisor) startedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.starts
+}
+
+func (f *fakeDaemonSupervisor) isStarted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
+}
+
+func (f *fakeDaemonSupervisor) wakeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.wakes
 }
 
 type fakeHeaderProvider struct{}

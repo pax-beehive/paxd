@@ -3,17 +3,21 @@ package sessionreporter
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/agentregistry"
+	"github.com/pax-beehive/paxd/internal/paxlclient"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
 type DefaultScanner struct {
-	Timeout time.Duration
+	Timeout     time.Duration
+	PaxlCommand []string
 }
 
 func (s DefaultScanner) ListSessions(
@@ -24,9 +28,17 @@ func (s DefaultScanner) ListSessions(
 	if timeout <= 0 {
 		timeout = defaultScanTimeout
 	}
+	if sessions, err := s.listPaxlSessions(ctx, spec); err == nil {
+		return sessions, nil
+	}
 	var errs []error
+	if isCodexSpec(spec) {
+		// Codex sessions are local rollout logs. Starting codex-acp from the
+		// daemon can trigger browser OAuth with a short-lived localhost callback.
+		return listCodexLocalSessions(ctx, timeout)
+	}
 	if isGeminiSpec(spec) {
-		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, 0)
+		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, spec.Limit)
 		if err == nil && len(sessions) > 0 {
 			return sessions, nil
 		}
@@ -45,21 +57,18 @@ func (s DefaultScanner) ListSessions(
 			if isHermesSpec(spec) {
 				return mergeHermesLocalSessions(ctx, spec, sessions)
 			}
-			if isCodexSpec(spec) {
-				return normalizeCodexSessions(sessions), nil
-			}
 			if isKimiSpec(spec) {
-				return normalizeKimiSessions(sessions), nil
+				return limitSessions(normalizeKimiSessions(sessions), spec.Limit), nil
 			}
 			if isPiSpec(spec) {
-				return normalizePiSessions(sessions), nil
+				return limitSessions(normalizePiSessions(sessions), spec.Limit), nil
 			}
-			return sessions, nil
+			return limitSessions(sessions, spec.Limit), nil
 		}
 		errs = append(errs, err)
 	}
 	if isHermesSpec(spec) {
-		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+		sessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 		if err == nil {
 			return sessions, nil
 		}
@@ -73,10 +82,80 @@ func (s DefaultScanner) ListSessions(
 	}
 	sessions, err := agentregistry.ListSessions(ctx, status, timeout)
 	if err == nil {
-		return sessions, nil
+		return limitSessions(sessions, spec.Limit), nil
 	}
 	errs = append(errs, err)
 	return nil, joinErrors(errs)
+}
+
+func isCodexSpec(spec SessionScannerSpec) bool {
+	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if name == "codex" {
+		return true
+	}
+	if len(spec.Command) == 0 {
+		return false
+	}
+	commandName := filepath.Base(spec.Command[0])
+	if commandName == "codex" || commandName == "codex-acp" {
+		return true
+	}
+	return strings.Contains(strings.Join(spec.Command, " "), "@agentclientprotocol/codex-acp")
+}
+
+func listCodexLocalSessions(ctx context.Context, timeout time.Duration) ([]model.SessionInfo, error) {
+	status, err := fallbackStatus(SessionScannerSpec{Harness: "codex"})
+	if err != nil {
+		return nil, err
+	}
+	return agentregistry.ListSessions(ctx, status, timeout)
+}
+
+func (s DefaultScanner) listPaxlSessions(
+	ctx context.Context,
+	spec SessionScannerSpec,
+) ([]model.SessionInfo, error) {
+	command, ok := resolvePaxlCommand(s.PaxlCommand)
+	if !ok {
+		return nil, fmt.Errorf("paxl command is unavailable")
+	}
+	client := paxlclient.Client{Command: command}
+	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	sessions, err := client.ListSessions(ctx, agent, spec.Limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		messages, err := client.GetSessionMessages(ctx, sessions[i].SessionID, sessions[i].AgentType)
+		if err != nil {
+			continue
+		}
+		sessions[i].Messages = messages
+	}
+	return sessions, nil
+}
+
+func resolvePaxlCommand(command []string) ([]string, bool) {
+	if len(command) == 0 {
+		if envCommand := strings.Fields(os.Getenv("PAXD_PAXL_COMMAND")); len(envCommand) > 0 {
+			return resolvePaxlCommand(envCommand)
+		}
+		if path, err := exec.LookPath("paxl"); err == nil {
+			return []string{path}, true
+		}
+		if executable, err := os.Executable(); err == nil {
+			candidate := filepath.Join(filepath.Dir(executable), "paxl")
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				return []string{candidate}, true
+			}
+		}
+		return nil, false
+	}
+	if path, err := exec.LookPath(command[0]); err == nil {
+		out := append([]string{path}, command[1:]...)
+		return out, true
+	}
+	return nil, false
 }
 
 func isHermesSpec(spec SessionScannerSpec) bool {
@@ -108,18 +187,6 @@ func isGeminiSpec(spec SessionScannerSpec) bool {
 		return false
 	}
 	return filepath.Base(spec.Command[0]) == "gemini"
-}
-
-func isCodexSpec(spec SessionScannerSpec) bool {
-	name := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
-	if name == "codex" {
-		return true
-	}
-	if len(spec.Command) == 0 {
-		return false
-	}
-	base := filepath.Base(spec.Command[0])
-	return base == "codex-acp" || base == "codex"
 }
 
 func isKimiSpec(spec SessionScannerSpec) bool {
@@ -181,88 +248,23 @@ func normalizeKimiSessions(sessions []model.SessionInfo) []model.SessionInfo {
 	return out
 }
 
-// normalizeCodexSessions rewrites ACP-listed codex sessions onto stable
-// conversation identities. Codex mints a new thread ID when it forks a
-// conversation (for example when resuming after an auto compact); without a
-// stable native ID the cloud stores each fork as a separate session with the
-// same title. Sessions sharing a conversation root collapse into the most
-// recently updated entry, named by the root thread's own entry when present.
-func normalizeCodexSessions(sessions []model.SessionInfo) []model.SessionInfo {
-	roots, err := agentregistry.CodexSessionRoots()
-	if err != nil {
-		roots = nil
-	}
-	type codexSessionEntry struct {
-		session  model.SessionInfo
-		selfRoot bool
-	}
-	byRoot := make(map[string]int, len(sessions))
-	out := make([]codexSessionEntry, 0, len(sessions))
-	for _, session := range sessions {
-		if session.SessionID == "" && session.NativeID == "" {
-			continue
-		}
-		session.AgentType = firstNonEmpty(session.AgentType, "codex")
-		nativeID := session.NativeID
-		if nativeID == "" {
-			nativeID = strings.TrimPrefix(session.SessionID, "codex:")
-		}
-		root := nativeID
-		if mapped := roots[nativeID]; mapped != "" {
-			root = mapped
-		}
-		selfRoot := root == nativeID
-		session.NativeID = root
-		session.SessionID = agentregistry.CanonicalSessionID("codex", root)
-		index, ok := byRoot[root]
-		if !ok {
-			byRoot[root] = len(out)
-			out = append(out, codexSessionEntry{session: session, selfRoot: selfRoot})
-			continue
-		}
-		entry := out[index]
-		// ACP results arrive sorted by recency, so the first entry for a root
-		// is the most recently updated one; older duplicates only fill gaps.
-		base := entry.session
-		base.Name = firstNonEmpty(base.Name, session.Name)
-		base.ProjectID = firstNonEmpty(base.ProjectID, session.ProjectID)
-		base.LastActive = firstNonEmpty(base.LastActive, session.LastActive)
-		base.Preview = firstNonEmpty(base.Preview, session.Preview)
-		if len(base.WorkspaceRoots) == 0 {
-			base.WorkspaceRoots = append([]string(nil), session.WorkspaceRoots...)
-		}
-		base.Source = firstNonEmpty(base.Source, session.Source)
-		base.Status = firstNonEmpty(base.Status, session.Status)
-		base.CurrentTask = firstNonEmpty(base.CurrentTask, session.CurrentTask)
-		if base.TokenUsage == 0 {
-			base.TokenUsage = session.TokenUsage
-		}
-		base.UpdatedAt = firstNonEmpty(base.UpdatedAt, session.UpdatedAt)
-		// The conversation's own thread provides the display title.
-		if session.Name != "" && selfRoot && !entry.selfRoot {
-			base.Name = session.Name
-			entry.selfRoot = true
-		}
-		entry.session = base
-		out[index] = entry
-	}
-	result := make([]model.SessionInfo, 0, len(out))
-	for _, entry := range out {
-		result = append(result, entry.session)
-	}
-	return result
-}
-
 func mergeHermesLocalSessions(
 	ctx context.Context,
 	spec SessionScannerSpec,
 	acpSessions []model.SessionInfo,
 ) ([]model.SessionInfo, error) {
-	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, 0)
+	localSessions, err := agentregistry.ListHermesLocalSessions(ctx, spec.Command, spec.Limit)
 	if err != nil {
-		return normalizeHermesSessions(acpSessions), nil
+		return limitSessions(normalizeHermesSessions(acpSessions), spec.Limit), nil
 	}
-	return mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), nil
+	return limitSessions(mergeSessionInfos(localSessions, normalizeHermesSessions(acpSessions)), spec.Limit), nil
+}
+
+func limitSessions(sessions []model.SessionInfo, limit int) []model.SessionInfo {
+	if limit <= 0 || len(sessions) <= limit {
+		return sessions
+	}
+	return sessions[:limit]
 }
 
 func normalizeHermesSessions(sessions []model.SessionInfo) []model.SessionInfo {

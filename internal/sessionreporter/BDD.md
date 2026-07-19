@@ -102,14 +102,13 @@ When a report pass runs
 Then the successful agent is still reported
 And the failed scan is logged as best effort
 
-### Scenario: codex ACP sessions collapse onto conversation roots
+### Scenario: codex sessions collapse onto conversation roots
 
-Given a codex runtime lists sessions over ACP
-And the local codex store links a thread to an earlier thread via `forked_from_id`
+Given the local codex store links a thread to an earlier thread via `forked_from_id`
 When the scan runs
 Then both threads are reported as one session keyed by the root thread
 And the root thread's own title names the session
-And sessions unknown to the local store keep their ACP identity with a `codex:` prefix
+And subagent rollouts are not reported as sessions of their own
 
 ### Scenario: kimi ACP sessions are canonicalized with a kimi prefix
 

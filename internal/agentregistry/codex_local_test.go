@@ -86,32 +86,6 @@ func TestListCodexLocalSessionsCollapsesForkLineage(t *testing.T) {
 	}
 }
 
-func TestCodexSessionRoots(t *testing.T) {
-	writeCodexLineageFixture(t)
-
-	roots, err := CodexSessionRoots()
-	if err != nil {
-		t.Fatalf("CodexSessionRoots() error = %v", err)
-	}
-	for id, want := range map[string]string{"aaa": "aaa", "bbb": "aaa", "ddd": "aaa"} {
-		if got := roots[id]; got != want {
-			t.Fatalf("roots[%q] = %q, want %q", id, got, want)
-		}
-	}
-}
-
-func TestCodexSessionRootsEmptyWhenStoreMissing(t *testing.T) {
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing"))
-
-	roots, err := CodexSessionRoots()
-	if err != nil {
-		t.Fatalf("CodexSessionRoots() error = %v", err)
-	}
-	if len(roots) != 0 {
-		t.Fatalf("len(roots) = %d, want 0", len(roots))
-	}
-}
-
 func TestListCodexLocalSessionsMergesResumeRollout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)

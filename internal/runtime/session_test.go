@@ -175,13 +175,14 @@ func TestAgentTunnelSessionRunDialsStartsProcessAndCleansUp(t *testing.T) {
 			events = append(events, event)
 		}),
 	})
+	enqueueAlignedReconcile(t, conn, "agent_1:queue_1", 0)
 
 	exit := session.Run(context.Background())
 	assert.Equal(t, ExitTransient, exit.Class)
 	assert.Equal(t, "session_ended", exit.Code)
 	assert.True(t, exit.ResetBackoff)
-	assert.True(t, store.hasOp("AppendOutboundData"), "store ops = %+v", store.ops)
-	assert.True(t, store.hasOp("MarkSent"), "store ops = %+v", store.ops)
+	require.Eventually(t, func() bool { return store.hasOp("AppendOutboundData") }, time.Second, 10*time.Millisecond)
+	assert.False(t, store.hasOp("MarkSent"), "store ops = %+v", store.ops)
 	assert.True(t, proc.terminated)
 	assert.True(t, conn.closed)
 	require.GreaterOrEqual(t, len(events), 4)
@@ -189,7 +190,7 @@ func TestAgentTunnelSessionRunDialsStartsProcessAndCleansUp(t *testing.T) {
 	assert.Equal(t, PhaseStopping, events[len(events)-1].Phase)
 }
 
-func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
+func TestAgentTunnelSendOutboundUsesAsynchronousProducer(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	store := newSpyStore()
 	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
@@ -198,10 +199,16 @@ func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
 		ReliableEngineFactory: ReliableEngineFromStore(store),
 	})
 
-	engine := session.newReliableEngine(conn, io.Discard)
+	engine, producer := newTestAgentEngine(t, session, io.Discard)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 	require.NoError(t, session.sendOutbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":1}`), engine))
-	require.GreaterOrEqual(t, len(store.ops), 2)
-	assert.Equal(t, []string{"AppendOutboundData", "MarkSent"}, store.ops[:2])
+	require.Eventually(t, func() bool {
+		return len(conn.writes()) == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.True(t, store.hasOp("AppendOutboundData"))
+	assert.False(t, store.hasOp("MarkSent"))
 	writes := conn.writes()
 	require.Len(t, writes, 1)
 	env, err := reliablemq.UnmarshalEnvelope(writes[0].payload)
@@ -212,9 +219,236 @@ func TestAgentTunnelSendOutboundJournalsBeforeWebSocketSend(t *testing.T) {
 	assert.Equal(t, "agent_1", env.Metadata["agent_id"])
 }
 
+func TestAgentTunnelPersistentProcessJournalsStdoutAfterTunnelDisconnect(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = errors.New("network down")
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdoutWriter.Close()
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ACPProcessPool:        pool,
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+	go writePersistentInitializeResponse(t, stdoutWriter, `{"protocolVersion":1,"agentCapabilities":{}}`)
+	enqueueAlignedReconcile(t, conn, "agent_1:queue_1", 0)
+
+	exit := session.Run(context.Background())
+
+	assert.Equal(t, ExitTransient, exit.Class)
+	assert.Equal(t, "session_error", exit.Code)
+	assert.False(t, proc.terminated)
+
+	_, err := stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":9}` + "\n"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		frame, ok := store.Get(reliablemq.FrameKey{
+			QueueID:   "agent_1:queue_1",
+			Stream:    reliablemq.StreamACP,
+			Seq:       1,
+			Direction: reliablemq.DirectionOutbound,
+		})
+		return ok && assert.ObjectsAreEqual([]byte(`{"jsonrpc":"2.0","id":9}`), []byte(frame.Payload))
+	}, time.Second, 10*time.Millisecond)
+	assert.False(t, proc.terminated)
+
+	pool.Stop(validAgentSpec())
+	assert.True(t, proc.terminated)
+}
+
+func TestPersistentACPProcessInitializesOnceAndSuppressesInternalResponse(t *testing.T) {
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	t.Cleanup(func() { _ = stdoutWriter.Close() })
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+	go writePersistentInitializeResponse(t, stdoutWriter, `{"protocolVersion":1,"agentCapabilities":{"prompt":true}}`)
+
+	acquired, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.NotNil(t, acquired)
+	assert.Contains(t, proc.stdin.String(), `"method":"initialize"`)
+	assert.Contains(t, proc.stdin.String(), `"id":"paxd.initialize"`)
+	assert.Contains(t, proc.stdin.String(), `"method":"notifications/initialized"`)
+	assert.Less(t,
+		strings.Index(proc.stdin.String(), `"method":"initialize"`),
+		strings.Index(proc.stdin.String(), `"method":"notifications/initialized"`),
+	)
+	factory := ReliableEngineFromStore(store)
+	producer, err := factory.Producer(context.Background(), "agent_1:queue_1", reliablemq.StreamACP)
+	require.NoError(t, err)
+	engine := factory.NewReliableEngine(producer, nil)
+	acquired.AttachOutputSink(func(ctx context.Context, payload []byte) error {
+		return engine.Send(ctx, reliablemq.OutboundMessage{
+			QueueID: "agent_1:queue_1",
+			Stream:  reliablemq.StreamACP,
+			Payload: payload,
+		})
+	})
+	_, err = stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"ok":true}}` + "\n"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, ok := store.Get(reliablemq.FrameKey{
+			QueueID:   "agent_1:queue_1",
+			Stream:    reliablemq.StreamACP,
+			Seq:       1,
+			Direction: reliablemq.DirectionOutbound,
+		})
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	frame, ok := store.Get(reliablemq.FrameKey{
+		QueueID:   "agent_1:queue_1",
+		Stream:    reliablemq.StreamACP,
+		Seq:       1,
+		Direction: reliablemq.DirectionOutbound,
+	})
+	require.True(t, ok)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":2,"result":{"ok":true}}`, string(frame.Payload))
+	assert.NotContains(t, string(frame.Payload), "paxd.initialize")
+}
+
+func TestPersistentACPProcessCapabilityReportDefaultsToDevVersion(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{"prompt":true,"tools":{}}}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.Len(t, reporter.reports, 1)
+	report := reporter.reports[0]
+	assert.Equal(t, ACPPoolCapabilityReportSchemaVersion, report.SchemaVersion)
+	assert.Equal(t, "dev", report.PaxdVersion)
+	assert.Equal(t, ACPPoolInitPhaseReady, report.InitPhase)
+	assert.Equal(t, "conn_1", report.ConnectionID)
+	assert.Equal(t, 1, report.ProtocolVersion)
+	assert.Equal(t, []string{"prompt", "tools"}, report.WorkerCapabilityKeys)
+	assert.NotEmpty(t, report.ClientProfileHash)
+	assert.NotEmpty(t, report.WorkerResultHash)
+}
+
+func TestPersistentACPProcessCapabilityReportUsesProvidedPaxdVersion(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{}}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithPaxdVersionProvider(StaticPaxdVersionProvider("1.2.3")),
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.NoError(t, err)
+	require.Len(t, reporter.reports, 1)
+	assert.Equal(t, "1.2.3", reporter.reports[0].PaxdVersion)
+	assert.Contains(t, proc.stdin.String(), `"version":"1.2.3"`)
+}
+
+func TestPersistentACPProcessCapabilityReportRecordsInitializeFailure(t *testing.T) {
+	store := newSpyStore()
+	reporter := &recordingCapabilityReporter{}
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","error":{"code":-32000,"message":"no auth"}}` + "\n")
+	pool := NewPersistentACPProcessPool(
+		fakeLocalACPProcessRunner{proc: proc},
+		store,
+		WithACPPoolCapabilityReporter(reporter),
+	)
+
+	_, err := pool.Acquire(context.Background(), validAgentSpec())
+
+	require.ErrorContains(t, err, "no auth")
+	require.Len(t, reporter.reports, 1)
+	report := reporter.reports[0]
+	assert.Equal(t, "dev", report.PaxdVersion)
+	assert.Equal(t, ACPPoolInitPhaseFailed, report.InitPhase)
+	assert.Equal(t, "initialize_failed", report.LastErrorCode)
+	assert.Contains(t, report.LastErrorMessage, "no auth")
+	assert.NotEmpty(t, report.ClientProfileHash)
+	assert.Empty(t, report.WorkerResultHash)
+}
+
+func TestAgentTunnelManagerInitializeAnsweredFromCachedPersistentResult(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = errors.New("network down")
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdoutWriter.Close()
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	pool := NewPersistentACPProcessPool(fakeLocalACPProcessRunner{proc: proc}, store)
+	initializeEnvelope, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:    reliablemq.EnvelopeTypeData,
+		QueueID: "agent_1:queue_1",
+		Stream:  reliablemq.StreamACP,
+		Seq:     1,
+		Payload: []byte(`{"jsonrpc":"2.0","id":99,"method":"initialize","params":{"clientInfo":{"name":"manager"}}}`),
+	})
+	require.NoError(t, err)
+	enqueueAlignedReconcile(t, conn, "agent_1:queue_1", 0)
+	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: initializeEnvelope}
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ACPProcessPool:        pool,
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+	go writePersistentInitializeResponse(t, stdoutWriter, `{"protocolVersion":1,"agentCapabilities":{"prompt":true}}`)
+
+	exit := session.Run(context.Background())
+
+	assert.Equal(t, ExitTransient, exit.Class)
+	assert.Equal(t, "session_error", exit.Code)
+	assert.Contains(t, proc.stdin.String(), `"id":"paxd.initialize"`)
+	assert.NotContains(t, proc.stdin.String(), `"id":99`)
+	var responsePayload []byte
+	require.Eventually(t, func() bool {
+		frame, ok := store.Get(reliablemq.FrameKey{
+			QueueID:   "agent_1:queue_1",
+			Stream:    reliablemq.StreamACP,
+			Seq:       1,
+			Direction: reliablemq.DirectionOutbound,
+		})
+		if ok {
+			responsePayload = append([]byte(nil), frame.Payload...)
+		}
+		return ok
+	}, time.Second, 10*time.Millisecond)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":99,"result":{"agentCapabilities":{"prompt":true},"protocolVersion":1}}`, string(responsePayload))
+}
+
 func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 	store := newSpyStore()
-	inboundKey := reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 4, Direction: reliablemq.DirectionInbound}
+	inboundKey := reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 1, Direction: reliablemq.DirectionInbound}
 	_, _, err := store.SaveInboundIfAbsent(context.Background(), reliablemq.Frame{
 		Key:     inboundKey,
 		Kind:    reliablemq.FrameKindData,
@@ -224,7 +458,7 @@ func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 	require.NoError(t, err)
 	session := testAgentTunnelSession(store, newFakeWebSocketConn())
 	stdin := &bytes.Buffer{}
-	engine := session.newReliableEngine(newFakeWebSocketConn(), stdin)
+	engine, _ := newTestAgentEngine(t, session, stdin)
 
 	require.NoError(t, session.replayInbound(context.Background(), engine))
 	assert.Contains(t, stdin.String(), `"id":4`)
@@ -233,19 +467,80 @@ func TestAgentTunnelReplayInboundAppliesReceivedFrames(t *testing.T) {
 	assert.Equal(t, reliablemq.StatusApplied, frame.Status)
 }
 
-func TestAgentTunnelReplayOutboundSendsPendingFrames(t *testing.T) {
+func TestAgentTunnelProducerBindingReplaysPendingFrames(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	store := newSpyStore()
 	frame, err := store.AppendOutboundData(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":2}`), reliablemq.Metadata{"agent_id": "agent_1"})
 	require.NoError(t, err)
 	session := testAgentTunnelSession(store, conn)
-	engine := session.newReliableEngine(conn, io.Discard)
+	_, producer := newTestAgentEngine(t, session, io.Discard)
 
-	require.NoError(t, session.replayOutbound(context.Background(), engine))
-	assert.Len(t, conn.writes(), 1)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
+	require.NoError(t, binding.WaitCaughtUp(context.Background()))
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 	got, ok := store.Get(frame.Key)
 	require.True(t, ok)
-	assert.Equal(t, reliablemq.StatusSent, got.Status)
+	assert.Equal(t, reliablemq.StatusPending, got.Status)
+}
+
+func TestAgentTunnelRecoveryBarrierCompletesBeforePromptReadLoop(t *testing.T) {
+	baseConn := newFakeWebSocketConn()
+	conn := &blockingDataWebSocketConn{
+		fakeWebSocketConn: baseConn,
+		dataStarted:       make(chan struct{}),
+		dataRelease:       make(chan struct{}),
+	}
+	store := newSpyStore()
+	session := testAgentTunnelSession(store, baseConn)
+	stdin := &bytes.Buffer{}
+	engine, producer := newTestAgentEngine(t, session, stdin)
+	require.NoError(t, engine.Send(context.Background(), reliablemq.OutboundMessage{
+		QueueID: "agent_1:queue_1",
+		Stream:  reliablemq.StreamACP,
+		Payload: []byte(`{"jsonrpc":"2.0","id":1,"result":{"queued":true}}`),
+	}))
+	_, err := producer.Checkpoint(context.Background())
+	require.NoError(t, err)
+
+	enqueueAlignedReconcile(t, baseConn, "agent_1:queue_1", 0)
+	prompt, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:    reliablemq.EnvelopeTypeData,
+		QueueID: "agent_1:queue_1",
+		Stream:  reliablemq.StreamACP,
+		Seq:     1,
+		Payload: []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt"}`),
+	})
+	require.NoError(t, err)
+	baseConn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: prompt}
+
+	type recoveryResult struct {
+		binding *reliablemq.ProducerBinding
+		err     error
+	}
+	recovered := make(chan recoveryResult, 1)
+	go func() {
+		binding, recoverErr := session.recoverReliableTransport(context.Background(), conn, engine, producer)
+		recovered <- recoveryResult{binding: binding, err: recoverErr}
+	}()
+	select {
+	case <-conn.dataStarted:
+	case <-time.After(time.Second):
+		t.Fatal("producer backlog write did not start")
+	}
+	assert.Empty(t, stdin.String())
+	assert.Len(t, baseConn.readCh, 1)
+
+	close(conn.dataRelease)
+	result := <-recovered
+	require.NoError(t, result.err)
+	require.NotNil(t, result.binding)
+	t.Cleanup(result.binding.Close)
+	baseConn.readErrWhenDrained = errors.New("read stopped")
+	err = session.copyWSToStdin(context.Background(), conn, engine)
+	require.ErrorContains(t, err, "read tunnel")
+	assert.Contains(t, stdin.String(), `"method":"session/prompt"`)
 }
 
 func TestAgentTunnelCopyWSToStdinHandlesAck(t *testing.T) {
@@ -254,18 +549,19 @@ func TestAgentTunnelCopyWSToStdinHandlesAck(t *testing.T) {
 	frame, err := store.AppendOutboundData(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, []byte(`{"jsonrpc":"2.0","id":3}`), nil)
 	require.NoError(t, err)
 	require.NoError(t, store.MarkSent(context.Background(), frame.Key))
-	ack, err := reliablemq.MarshalEnvelope(reliablemq.AckEnvelope("agent_1:queue_1", reliablemq.StreamACP, 3))
+	ack, err := reliablemq.MarshalEnvelope(reliablemq.AckEnvelope("agent_1:queue_1", reliablemq.StreamACP, 1))
 	require.NoError(t, err)
 	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: ack}
 	conn.Close()
 
 	session := testAgentTunnelSession(store, conn)
-	engine := session.newReliableEngine(conn, &bytes.Buffer{})
+	engine, _ := newTestAgentEngine(t, session, &bytes.Buffer{})
 	err = session.copyWSToStdin(context.Background(), conn, engine)
 	require.ErrorContains(t, err, "read tunnel")
-	got, ok := store.Get(frame.Key)
-	require.True(t, ok)
-	assert.Equal(t, reliablemq.StatusAcked, got.Status)
+	require.Eventually(t, func() bool {
+		got, ok := store.Get(frame.Key)
+		return ok && got.Status == reliablemq.StatusAcked
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestAgentTunnelCopyWSToStdinReceivesDataFrame(t *testing.T) {
@@ -275,7 +571,7 @@ func TestAgentTunnelCopyWSToStdinReceivesDataFrame(t *testing.T) {
 		Type:    reliablemq.EnvelopeTypeData,
 		QueueID: "agent_1:queue_1",
 		Stream:  reliablemq.StreamACP,
-		Seq:     8,
+		Seq:     1,
 		Payload: []byte(`{"jsonrpc":"2.0","id":8}`),
 	})
 	require.NoError(t, err)
@@ -284,37 +580,89 @@ func TestAgentTunnelCopyWSToStdinReceivesDataFrame(t *testing.T) {
 
 	stdin := &bytes.Buffer{}
 	session := testAgentTunnelSession(store, conn)
-	engine := session.newReliableEngine(conn, stdin)
+	engine, producer := newTestAgentEngine(t, session, stdin)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 	err = session.copyWSToStdin(context.Background(), conn, engine)
 	require.ErrorContains(t, err, "read tunnel")
 	assert.Contains(t, stdin.String(), `"id":8`)
-	assert.Len(t, conn.writes(), 1)
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 }
 
 func TestAgentTunnelCopyStdoutToWSSendsLinesAndRejectsInvalidJSON(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	session := testAgentTunnelSession(newSpyStore(), conn)
-	engine := session.newReliableEngine(conn, io.Discard)
+	engine, producer := newTestAgentEngine(t, session, io.Discard)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 
 	require.NoError(t, session.copyStdoutToWS(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1}`+"\n"), engine))
-	assert.Len(t, conn.writes(), 1)
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 
-	err := session.copyStdoutToWS(context.Background(), strings.NewReader("not-json\n"), engine)
+	err = session.copyStdoutToWS(context.Background(), strings.NewReader("not-json\n"), engine)
 	require.ErrorContains(t, err, "must be JSON")
 }
 
-func TestAgentTunnelSendOutboundMarksFailedOnWriteError(t *testing.T) {
+func TestAgentTunnelSocketFailureDisconnectsProducerWithoutFailingAcceptance(t *testing.T) {
 	conn := newFakeWebSocketConn()
 	conn.writeErr = errors.New("write failed")
 	store := newSpyStore()
 	session := testAgentTunnelSession(store, conn)
-	engine := session.newReliableEngine(conn, io.Discard)
+	engine, producer := newTestAgentEngine(t, session, io.Discard)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 
-	err := session.sendOutbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":1}`), engine)
-	require.ErrorContains(t, err, "write failed")
+	require.NoError(t, session.sendOutbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":1}`), engine))
+	require.Eventually(t, func() bool { return !producer.Stats().Bound }, time.Second, 10*time.Millisecond)
 	frame, ok := store.Get(reliablemq.FrameKey{QueueID: "agent_1:queue_1", Stream: reliablemq.StreamACP, Seq: 1, Direction: reliablemq.DirectionOutbound})
 	require.True(t, ok)
-	assert.Equal(t, "write failed", frame.ErrorMessage)
+	assert.Equal(t, reliablemq.StatusPending, frame.Status)
+	assert.Empty(t, frame.ErrorMessage)
+}
+
+func TestAgentTunnelRuntimeProducerFailureEndsTunnel(t *testing.T) {
+	baseConn := newFakeWebSocketConn()
+	conn := &failingDataWebSocketConn{
+		fakeWebSocketConn: baseConn,
+		err:               errors.New("write failed"),
+	}
+	store := newSpyStore()
+	stdoutReader, stdoutWriter := io.Pipe()
+	t.Cleanup(func() { _ = stdoutWriter.Close() })
+	proc := &fakeProcess{
+		stdin:  &bufferWriteCloser{},
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		waitCh: make(chan error),
+	}
+	enqueueAlignedReconcile(t, baseConn, "agent_1:queue_1", 0)
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		LocalACPProcessRunner: fakeLocalACPProcessRunner{proc: proc},
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+		Heartbeat:             HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+	})
+	exited := make(chan Exit, 1)
+	go func() { exited <- session.Run(context.Background()) }()
+
+	_, err := stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":1}` + "\n"))
+	require.NoError(t, err)
+
+	select {
+	case exit := <-exited:
+		assert.Equal(t, ExitTransient, exit.Class)
+		assert.Equal(t, "producer_disconnected", exit.Code)
+		assert.Contains(t, exit.Message, "write failed")
+		assert.True(t, exit.ResetBackoff)
+	case <-time.After(time.Second):
+		t.Fatal("agent tunnel did not exit after its producer binding failed")
+	}
+	assert.True(t, baseConn.closed)
+	assert.True(t, proc.terminated)
 }
 
 func TestAgentTunnelDuplicateInboundIsAckedButNotDispatchedTwice(t *testing.T) {
@@ -330,15 +678,25 @@ func TestAgentTunnelDuplicateInboundIsAckedButNotDispatchedTwice(t *testing.T) {
 		Type:    reliablemq.EnvelopeTypeData,
 		QueueID: "agent_1:queue_1",
 		Stream:  reliablemq.StreamACP,
-		Seq:     7,
+		Seq:     1,
 		Payload: []byte(`{"jsonrpc":"2.0","id":1}`),
 	}
-	engine := session.newReliableEngine(conn, stdin)
+	engine, producer := newTestAgentEngine(t, session, stdin)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 
 	require.NoError(t, engine.Receive(context.Background(), env))
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 	require.NoError(t, engine.Receive(context.Background(), env))
 	assert.Equal(t, 1, strings.Count(stdin.String(), `"jsonrpc"`))
-	assert.Len(t, conn.writes(), 2)
+	require.Eventually(t, func() bool { return len(conn.writes()) == 2 }, time.Second, 10*time.Millisecond)
+	for _, write := range conn.writes() {
+		ack, err := reliablemq.UnmarshalEnvelope(write.payload)
+		require.NoError(t, err)
+		assert.Equal(t, reliablemq.EnvelopeTypeAck, ack.Type)
+		assert.Equal(t, int64(1), ack.Seq)
+	}
 }
 
 func TestAgentTunnelInboundTombstoneIsAckedWithoutDispatch(t *testing.T) {
@@ -348,16 +706,19 @@ func TestAgentTunnelInboundTombstoneIsAckedWithoutDispatch(t *testing.T) {
 	session := testAgentTunnelSession(store, conn)
 	env := reliablemq.Envelope{
 		Type:         reliablemq.EnvelopeTypeTombstone,
-		QueueID:      "conn_1",
+		QueueID:      "agent_1:queue_1",
 		Stream:       reliablemq.StreamACP,
-		Seq:          9,
+		Seq:          1,
 		ErrorMessage: "remote rejected frame",
 	}
-	engine := session.newReliableEngine(conn, stdin)
+	engine, producer := newTestAgentEngine(t, session, stdin)
+	binding, err := producer.Bind(context.Background(), session.reliableSender(conn), 0)
+	require.NoError(t, err)
+	t.Cleanup(binding.Close)
 
 	require.NoError(t, engine.Receive(context.Background(), env))
 	assert.Zero(t, stdin.Len())
-	assert.Len(t, conn.writes(), 1)
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 }
 
 func TestAgentTunnelValidationHelpers(t *testing.T) {
@@ -473,6 +834,65 @@ func TestRuntimeURLAndEnvelopeHelpers(t *testing.T) {
 
 }
 
+func TestAgentTunnelReconcilePaxdProducerSendsCheckpointAndAdvancesCursor(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	store := newSpyStore()
+	for i := 0; i < 3; i++ {
+		_, err := store.AppendOutboundData(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, []byte(`{}`), nil)
+		require.NoError(t, err)
+	}
+	require.NoError(t, store.AckOutboundThrough(context.Background(), "agent_1:queue_1", reliablemq.StreamACP, 1))
+	response, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:                   reliablemq.EnvelopeTypeReconcileResponse,
+		QueueID:                "agent_1:queue_1",
+		Stream:                 reliablemq.StreamACP,
+		Action:                 reliablemq.ReconcileActionAdvanceProducer,
+		ConsumerAckedThrough:   8,
+		AdvanceProducerNextSeq: 9,
+	})
+	require.NoError(t, err)
+	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: response}
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+	})
+	_, producer := newTestAgentEngine(t, session, io.Discard)
+
+	gotResponse, err := session.reconcilePaxdProducer(context.Background(), conn, producer)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8), gotResponse.ConsumerAckedThrough)
+
+	writes := conn.writes()
+	require.Len(t, writes, 1)
+	request, err := reliablemq.UnmarshalEnvelope(writes[0].payload)
+	require.NoError(t, err)
+	assert.Equal(t, reliablemq.EnvelopeTypeReconcileRequest, request.Type)
+	assert.Equal(t, int64(4), request.ProducerNextSeq)
+	assert.Equal(t, int64(2), request.ReplayFrom)
+	assert.Equal(t, int64(3), request.ReplayThrough)
+	checkpoint, err := producer.Checkpoint(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(9), checkpoint.ProducerNextSeq)
+}
+
+func TestAgentTunnelReconcilePaxdProducerTreatsEarlyCloseAsRotate(t *testing.T) {
+	conn := newFakeWebSocketConn()
+	conn.readErrWhenDrained = io.ErrUnexpectedEOF
+	store := newSpyStore()
+	session := NewAgentTunnelSession(validAgentSpec(), AgentTunnelSessionDeps{
+		Headers:               fakeHeaderProvider{header: http.Header{}},
+		Dialer:                &fakeDialer{conn: conn},
+		ReliableEngineFactory: ReliableEngineFromStore(store),
+	})
+	_, producer := newTestAgentEngine(t, session, io.Discard)
+
+	_, err := session.reconcilePaxdProducer(context.Background(), conn, producer)
+
+	require.ErrorIs(t, err, ErrTransportQueueRotate)
+	require.Len(t, conn.writes(), 1)
+}
+
 func TestNodeControlRunnerFuncNilReturnsConfigExit(t *testing.T) {
 	exit := (NodeControlRunnerFunc(nil)).RunNodeControl(context.Background(), newFakeWebSocketConn(), RemoteSpec{})
 	assert.Equal(t, ExitConfig, exit.Class)
@@ -488,6 +908,30 @@ func testAgentTunnelSession(store reliablemq.DurableStore, conn *fakeWebSocketCo
 	})
 }
 
+func newTestAgentEngine(
+	t *testing.T,
+	session *AgentTunnelSession,
+	stdin io.Writer,
+) (ReliableEngine, *reliablemq.Producer) {
+	t.Helper()
+	engine, producer, err := session.newReliableEngine(context.Background(), stdin)
+	require.NoError(t, err)
+	return engine, producer
+}
+
+func enqueueAlignedReconcile(t *testing.T, conn *fakeWebSocketConn, queueID string, ackedThrough int64) {
+	t.Helper()
+	payload, err := reliablemq.MarshalEnvelope(reliablemq.Envelope{
+		Type:                 reliablemq.EnvelopeTypeReconcileResponse,
+		QueueID:              queueID,
+		Stream:               reliablemq.StreamACP,
+		Action:               reliablemq.ReconcileActionAligned,
+		ConsumerAckedThrough: ackedThrough,
+	})
+	require.NoError(t, err)
+	conn.readCh <- fakeWSMessage{messageType: websocketTextMessage, payload: payload}
+}
+
 type fakeHeaderProvider struct {
 	header http.Header
 	err    error
@@ -500,6 +944,15 @@ type fakeLocalACPProcessRunner struct {
 
 func (r fakeLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProcessSpec) (LocalACPProcess, error) {
 	return r.proc, r.err
+}
+
+type recordingCapabilityReporter struct {
+	reports []ACPPoolCapabilityReport
+}
+
+func (r *recordingCapabilityReporter) ReportACPPoolCapability(ctx context.Context, report ACPPoolCapabilityReport) error {
+	r.reports = append(r.reports, report)
+	return nil
 }
 
 type fakeProcess struct {
@@ -517,6 +970,12 @@ func newFakeProcess(stdout string) *fakeProcess {
 		stderr: strings.NewReader(""),
 		waitCh: make(chan error),
 	}
+}
+
+func writePersistentInitializeResponse(t *testing.T, writer io.Writer, result string) {
+	t.Helper()
+	_, err := writer.Write([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":` + result + "}\n"))
+	assert.NoError(t, err)
 }
 
 func (p *fakeProcess) Stdin() io.WriteCloser { return p.stdin }
@@ -581,6 +1040,35 @@ type fakeWebSocketConn struct {
 	readErrWhenDrained error
 	writeLog           []fakeWSWrite
 	pongHandler        func(string) error
+}
+
+type blockingDataWebSocketConn struct {
+	*fakeWebSocketConn
+	dataStarted chan struct{}
+	dataRelease chan struct{}
+	startOnce   sync.Once
+}
+
+type failingDataWebSocketConn struct {
+	*fakeWebSocketConn
+	err error
+}
+
+func (c *failingDataWebSocketConn) WriteMessage(messageType int, payload []byte) error {
+	env, err := reliablemq.UnmarshalEnvelope(payload)
+	if err == nil && (env.Type == reliablemq.EnvelopeTypeData || env.Type == reliablemq.EnvelopeTypeTombstone) {
+		return c.err
+	}
+	return c.fakeWebSocketConn.WriteMessage(messageType, payload)
+}
+
+func (c *blockingDataWebSocketConn) WriteMessage(messageType int, payload []byte) error {
+	env, err := reliablemq.UnmarshalEnvelope(payload)
+	if err == nil && env.Type == reliablemq.EnvelopeTypeData {
+		c.startOnce.Do(func() { close(c.dataStarted) })
+		<-c.dataRelease
+	}
+	return c.fakeWebSocketConn.WriteMessage(messageType, payload)
 }
 
 func newFakeWebSocketConn() *fakeWebSocketConn {
@@ -736,4 +1224,33 @@ func (s *spyStore) RecordDispatchFailure(ctx context.Context, key reliablemq.Fra
 func (s *spyStore) UpdateMetadata(ctx context.Context, key reliablemq.FrameKey, metadata reliablemq.Metadata) error {
 	s.record("UpdateMetadata")
 	return s.Store.UpdateMetadata(ctx, key, metadata)
+}
+
+type spyReconcileProducerStore struct {
+	checkpoint      reliablemq.ProducerReconcileCheckpoint
+	advancedNextSeq int64
+}
+
+func (s *spyReconcileProducerStore) LoadProducerReconcileCheckpoint(
+	ctx context.Context,
+	queueID string,
+	stream reliablemq.Stream,
+) (reliablemq.ProducerReconcileCheckpoint, error) {
+	_ = ctx
+	s.checkpoint.QueueID = queueID
+	s.checkpoint.Stream = stream
+	return s.checkpoint, nil
+}
+
+func (s *spyReconcileProducerStore) AdvanceProducerNextSeq(
+	ctx context.Context,
+	queueID string,
+	stream reliablemq.Stream,
+	nextSeq int64,
+) error {
+	_ = ctx
+	_ = queueID
+	_ = stream
+	s.advancedNextSeq = nextSeq
+	return nil
 }

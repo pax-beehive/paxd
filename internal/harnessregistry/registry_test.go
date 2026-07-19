@@ -133,7 +133,26 @@ func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
 		names = append(names, detector.Name())
 	}
 
-	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "pi"}, names)
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi"}, names)
+	assertDefaultDetectorCommand(t, detectors, "kimi", []string{"kimi", "acp"}, nil)
+	assertDefaultDetectorCommand(t, detectors, "opencode", []string{"opencode", "acp"}, nil)
+	assertDefaultDetectorCommand(t, detectors, "openclaw", []string{"openclaw", "acp"}, nil)
+	assertDefaultDetectorCommand(t, detectors, "pi", []string{"pi-acp"}, []string{"npx", "-y", "pi-acp"})
+}
+
+func assertDefaultDetectorCommand(t *testing.T, detectors []Detector, name string, command []string, fallback []string) {
+	t.Helper()
+	for _, detector := range detectors {
+		if detector.Name() != name {
+			continue
+		}
+		commandDetector, ok := detector.(CommandDetector)
+		require.True(t, ok, "%s detector type = %T, want CommandDetector", name, detector)
+		assert.Equal(t, command, commandDetector.Command)
+		assert.Equal(t, fallback, commandDetector.FallbackCommand)
+		return
+	}
+	t.Fatalf("default detector %q not found", name)
 }
 
 type fakeStore struct {

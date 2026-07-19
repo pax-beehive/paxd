@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ type Options struct {
 	Harnesses     control.HarnessRegistry
 	LocalSessions control.LocalSessions
 	HostMetrics   control.HostMetricsProvider
+	PaxdVersion   string
 }
 
 func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
@@ -62,6 +64,9 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := store.Migrate(ctx); err != nil {
 		return nil, fmt.Errorf("migrate daemonstore: %w", err)
 	}
+	if _, err := store.ClearAllACPSessionRouteBindings(ctx); err != nil {
+		return nil, fmt.Errorf("clear stale ACP session route bindings: %w", err)
+	}
 	harnesses := opts.Harnesses
 	if harnesses == nil {
 		harnesses = harnessregistry.New(store, harnessregistry.DefaultDetectors()...)
@@ -73,17 +78,26 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	metrics := opts.HostMetrics
 	var metricsStarter interface{ Start(context.Context) }
 	if metrics == nil {
-		sampler := hostmetrics.NewSampler(10 * time.Second)
+		sampler := hostmetrics.NewSampler(10*time.Second).WithIdentity(
+			cfg.Agent.MachineType,
+			runtime.GOOS,
+			runtime.GOARCH,
+		)
 		metrics = sampler
 		metricsStarter = sampler
 	}
-	supervisors := &runtimeSupervisors{statusHub: newStatusHub()}
+	supervisors := &runtimeSupervisors{
+		statusHub:            newStatusHub(),
+		paxdVersion:          opts.PaxdVersion,
+		acpCapabilityReports: newACPCapabilityReports(),
+	}
 	service := control.NewService(control.ServiceOptions{
-		Store:         store,
-		Supervisors:   supervisors,
-		Harnesses:     harnesses,
-		LocalSessions: localSessions,
-		HostMetrics:   metrics,
+		Store:               store,
+		Supervisors:         supervisors,
+		Harnesses:           harnesses,
+		LocalSessions:       localSessions,
+		HostMetrics:         metrics,
+		ACPPoolCapabilities: supervisors.acpCapabilityReports,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
@@ -94,6 +108,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 			RuntimeSource: supervisors.agentRuntimeSource,
 			Scanner:       sessionreporter.DefaultScanner{},
 			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+			BatchSize:     cfg.Daemon.SessionBatchSize,
 		})
 	}
 	return &Runtime{

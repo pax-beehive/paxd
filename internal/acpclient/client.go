@@ -333,11 +333,19 @@ func firstNonTerminalAuthMethod(methods []authMethod) string {
 }
 
 func interactiveAuthMethod(method authMethod) bool {
-	if method.Type == "terminal" || method.Type == "oauth" {
+	switch method.Type {
+	case "terminal", "oauth", "browser", "external":
 		return true
 	}
 	text := strings.ToLower(method.ID + " " + method.Name)
 	return strings.Contains(text, "oauth") ||
+		strings.Contains(text, "openai") ||
+		strings.Contains(text, "chatgpt") ||
+		strings.Contains(text, "sign in") ||
+		strings.Contains(text, "signin") ||
+		strings.Contains(text, "browser") ||
+		strings.Contains(text, "account") ||
+		strings.Contains(text, "authorize") ||
 		strings.Contains(text, "api-key") ||
 		strings.Contains(text, "api key") ||
 		strings.Contains(text, "gateway") ||

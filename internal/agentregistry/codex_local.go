@@ -25,13 +25,14 @@ type codexIndexEntry struct {
 type codexSessionMetaLine struct {
 	Type    string `json:"type"`
 	Payload struct {
-		ID           string          `json:"id"`
-		SessionID    string          `json:"session_id"`
-		ForkedFromID string          `json:"forked_from_id"`
-		ThreadSource string          `json:"thread_source"`
-		Timestamp    string          `json:"timestamp"`
-		CWD          string          `json:"cwd"`
-		Source       json.RawMessage `json:"source"`
+		ID             string          `json:"id"`
+		SessionID      string          `json:"session_id"`
+		ForkedFromID   string          `json:"forked_from_id"`
+		ParentThreadID string          `json:"parent_thread_id"`
+		ThreadSource   string          `json:"thread_source"`
+		Timestamp      string          `json:"timestamp"`
+		CWD            string          `json:"cwd"`
+		Source         json.RawMessage `json:"source"`
 	} `json:"payload"`
 }
 
@@ -79,7 +80,7 @@ func newCodexLineage(metas []codexRolloutMeta) codexLineage {
 	parentOf := make(map[string]string, len(metas))
 	for _, rollout := range metas {
 		id := rollout.meta.Payload.ID
-		parent := rollout.meta.Payload.ForkedFromID
+		parent := firstNonEmpty(rollout.meta.Payload.ForkedFromID, rollout.meta.Payload.ParentThreadID)
 		if id == "" || parent == "" || id == parent {
 			continue
 		}
@@ -139,36 +140,6 @@ func listCodexLocalSessions() ([]model.SessionInfo, error) {
 		return nil, err
 	}
 	return mergeCodexSessions(entries, metas), nil
-}
-
-// CodexSessionRoots maps known codex thread and rollout IDs to the root
-// thread ID of their conversation lineage. It returns an empty map when no
-// local codex store is readable.
-func CodexSessionRoots() (map[string]string, error) {
-	root, err := codexRoot()
-	if err != nil {
-		return nil, err
-	}
-	metas, err := readCodexRolloutMetas(filepath.Join(root, "sessions"))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return map[string]string{}, nil
-		}
-		return nil, err
-	}
-	lineage := newCodexLineage(metas)
-	roots := make(map[string]string, len(metas))
-	for _, rollout := range metas {
-		if id := rollout.meta.Payload.ID; id != "" {
-			roots[id] = lineage.conversationKey(rollout.meta)
-		}
-		if id := rollout.meta.Payload.SessionID; id != "" {
-			if _, ok := roots[id]; !ok {
-				roots[id] = lineage.rootOf(id)
-			}
-		}
-	}
-	return roots, nil
 }
 
 func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []model.SessionInfo {

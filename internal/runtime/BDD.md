@@ -258,6 +258,46 @@ When `AgentTunnelSession.Run` observes the exit
 Then it returns exit class `config` or `transient` according to exit classification policy  
 And includes safe process exit diagnostics
 
+## ACP slot and router core
+
+### Scenario: ACP slot initializes before becoming ready
+
+Given an `ACPSlot` starts a local ACP stdio process
+When the process replies to paxd's internal `initialize` request
+Then the slot enters ready phase
+And subsequent stdout JSON-RPC frames are emitted through the slot event sink
+And the internal initialize response is consumed locally
+
+### Scenario: process exit closes the slot epoch
+
+Given an `ACPSlot` has a process epoch
+When that process exits
+Then all internal waiters for that epoch are closed
+And exactly one terminal event is emitted for the slot and process epoch
+
+### Scenario: new session route is committed before response emission
+
+Given the router forwards `session/new` to a selected ready slot
+And the request contains the session lifecycle descriptor
+When that slot returns a successful response containing only the native session ID
+Then the route is persisted and bound to `(slot_id, process_epoch)`
+And the route preserves the lifecycle descriptor from the request
+And only then is the original response emitted toward the manager
+
+### Scenario: cold route resumes before prompt
+
+Given a native session route is cold
+When the manager sends `session/prompt` for that session
+Then the router sends internal `session/resume` with the stored lifecycle descriptor
+And only forwards the original prompt after resume succeeds
+And resume failure does not create a replacement session
+
+### Scenario: worker request response uses session-scoped source validation
+
+Given two slots issue worker-originated requests with the same raw JSON-RPC id
+When manager responses arrive with native session context
+Then each unchanged response is written back only to the slot/process epoch that originated that session-scoped request
+
 ### Scenario: context cancellation kills or waits for local process
 
 Given `AgentTunnelSession.Run` has started a local ACP process  

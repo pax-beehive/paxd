@@ -2,7 +2,8 @@
 # See README.md for full documentation.
 
 agent:
-  machine_type: unknown
+  # Empty means auto-detect a friendly hardware name.
+  machine_type: ""
   hostname: ""
 
 cloud:

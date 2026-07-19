@@ -49,9 +49,9 @@ func (RemoteStatus) TableName() string { return "remote_status" }
 
 type AgentConnection struct {
 	ID               string     `gorm:"primaryKey;type:text"`
-	RemoteID         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
-	Name             string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name"`
-	CloudAgentID     *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent"`
+	RemoteID         string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name,where:deleted_at IS NULL;uniqueIndex:idx_agent_connection_remote_cloud_agent,where:deleted_at IS NULL"`
+	Name             string     `gorm:"type:text;not null;uniqueIndex:idx_agent_connection_remote_name,where:deleted_at IS NULL"`
+	CloudAgentID     *string    `gorm:"type:text;uniqueIndex:idx_agent_connection_remote_cloud_agent,where:deleted_at IS NULL"`
 	TransportQueueID string     `gorm:"type:text;not null;default:''"`
 	InstanceID       string     `gorm:"type:text;not null"`
 	AgentType        string     `gorm:"type:text;not null"`
@@ -61,6 +61,7 @@ type AgentConnection struct {
 	EnvJSON          string     `gorm:"type:text;not null;default:'{}'"`
 	Enabled          bool       `gorm:"not null"`
 	DesiredState     string     `gorm:"type:text;not null"`
+	DesiredACPSlots  int        `gorm:"column:desired_acp_slots;not null;default:2"`
 	Generation       int64      `gorm:"not null;default:1"`
 	RestartNonce     int64      `gorm:"not null;default:0"`
 	CreatedAt        time.Time  `gorm:"column:created_at;not null"`
@@ -89,6 +90,42 @@ type AgentConnectionStatus struct {
 }
 
 func (AgentConnectionStatus) TableName() string { return "agent_connection_status" }
+
+type ACPSlotStatus struct {
+	SlotID            string     `gorm:"column:slot_id;primaryKey;type:text"`
+	ConnectionID      string     `gorm:"type:text;not null;uniqueIndex:idx_acp_slot_status_connection_ordinal"`
+	Ordinal           int        `gorm:"not null;uniqueIndex:idx_acp_slot_status_connection_ordinal"`
+	ProcessEpoch      string     `gorm:"type:text"`
+	PID               *int       `gorm:"column:pid"`
+	ProcessGroupID    *int       `gorm:"column:process_group_id"`
+	ProcessStartToken string     `gorm:"type:text"`
+	Phase             string     `gorm:"type:text;not null"`
+	FailureClass      string     `gorm:"type:text;not null;default:''"`
+	LastErrorCode     string     `gorm:"type:text;not null;default:''"`
+	LastErrorMessage  string     `gorm:"type:text;not null;default:''"`
+	StartedAt         *time.Time `gorm:"column:started_at"`
+	ReadyAt           *time.Time `gorm:"column:ready_at"`
+	ActiveSince       *time.Time `gorm:"column:active_since"`
+	StoppedAt         *time.Time `gorm:"column:stopped_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at;not null"`
+}
+
+func (ACPSlotStatus) TableName() string { return "acp_slot_status" }
+
+type ACPSessionRoute struct {
+	ConnectionID      string    `gorm:"primaryKey;type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL"`
+	NativeSessionID   string    `gorm:"primaryKey;type:text"`
+	BoundSlotID       *string   `gorm:"type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL"`
+	BoundProcessEpoch *string   `gorm:"type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL;check:chk_acp_session_route_binding_pair,(bound_slot_id IS NULL) = (bound_process_epoch IS NULL)"`
+	LastSlotID        string    `gorm:"type:text;not null;default:''"`
+	ResumeParamsJSON  string    `gorm:"type:text;not null"`
+	CreatedAt         time.Time `gorm:"column:created_at;not null"`
+	LastUsedAt        time.Time `gorm:"column:last_used_at;not null"`
+	UpdatedAt         time.Time `gorm:"column:updated_at;not null"`
+	Version           int64     `gorm:"not null;default:1"`
+}
+
+func (ACPSessionRoute) TableName() string { return "acp_session_route" }
 
 type ControlCommand struct {
 	CommandID         string     `gorm:"primaryKey;type:text"`

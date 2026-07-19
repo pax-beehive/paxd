@@ -71,6 +71,7 @@ type CommandCompletion struct {
 type Supervisors interface {
 	WakeRemotes()
 	WakeAgentConnections()
+	WakeACPSlots()
 }
 
 type HarnessRegistry interface {
@@ -85,28 +86,31 @@ type LocalSessions interface {
 }
 
 type ServiceOptions struct {
-	Store         Store
-	Supervisors   Supervisors
-	Harnesses     HarnessRegistry
-	LocalSessions LocalSessions
-	HostMetrics   HostMetricsProvider
+	Store               Store
+	Supervisors         Supervisors
+	Harnesses           HarnessRegistry
+	LocalSessions       LocalSessions
+	HostMetrics         HostMetricsProvider
+	ACPPoolCapabilities ACPPoolCapabilitySource
 }
 
 type ControlService struct {
-	store         Store
-	supervisors   Supervisors
-	harnesses     HarnessRegistry
-	localSessions LocalSessions
-	hostMetrics   HostMetricsProvider
+	store               Store
+	supervisors         Supervisors
+	harnesses           HarnessRegistry
+	localSessions       LocalSessions
+	hostMetrics         HostMetricsProvider
+	acpPoolCapabilities ACPPoolCapabilitySource
 }
 
 func NewService(opts ServiceOptions) *ControlService {
 	return &ControlService{
-		store:         opts.Store,
-		supervisors:   opts.Supervisors,
-		harnesses:     opts.Harnesses,
-		localSessions: opts.LocalSessions,
-		hostMetrics:   opts.HostMetrics,
+		store:               opts.Store,
+		supervisors:         opts.Supervisors,
+		harnesses:           opts.Harnesses,
+		localSessions:       opts.LocalSessions,
+		hostMetrics:         opts.HostMetrics,
+		acpPoolCapabilities: opts.ACPPoolCapabilities,
 	}
 }
 
@@ -165,6 +169,10 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 		}
 		return failedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
 	}
+	wakeACPSlots := wakeAgents
+	if isDesiredSlotsOnlyUpdate(cmd) {
+		wakeAgents = false
+	}
 
 	if wakeRemotes {
 		if s.supervisors != nil {
@@ -182,7 +190,23 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 			log.Printf("[paxd] control command=%s type=%s needs agent connection reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
 		}
 	}
+	if wakeACPSlots {
+		if s.supervisors != nil {
+			log.Printf("[paxd] control command=%s type=%s waking acp slot supervisor", cmd.CommandID, cmd.Type)
+			s.supervisors.WakeACPSlots()
+		} else {
+			log.Printf("[paxd] control command=%s type=%s needs acp slot reconcile but no supervisors are configured", cmd.CommandID, cmd.Type)
+		}
+	}
 	return ack, nil
+}
+
+func isDesiredSlotsOnlyUpdate(cmd Command) bool {
+	update := cmd.UpdateAgentConnection
+	return cmd.Type == CommandAgentConnectionUpdate && update != nil && update.DesiredSlots != nil &&
+		update.Name == nil && update.CloudAgentID == nil && update.InstanceID == nil &&
+		update.AgentType == nil && update.Harness == nil && update.Command == nil &&
+		update.WorkingDir == nil && update.Env == nil && update.Enabled == nil && update.DesiredState == nil
 }
 
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {
@@ -325,6 +349,12 @@ func (s *ControlService) BuildRuntimeSnapshot(ctx context.Context, remoteID stri
 			report.FailureClass = conn.Status.FailureClass
 			report.LastErrorCode = conn.Status.LastErrorCode
 			report.LastErrorMessage = conn.Status.LastErrorMessage
+		}
+		if s.acpPoolCapabilities != nil {
+			if capabilityReport, ok := s.acpPoolCapabilities.ACPPoolCapabilityReport(ctx, conn.ID); ok && capabilityReport != nil {
+				reportCopy := *capabilityReport
+				report.ACPPoolCapabilityReport = &reportCopy
+			}
 		}
 		snapshot.Agents = append(snapshot.Agents, report)
 	}

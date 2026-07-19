@@ -13,6 +13,80 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultScannerUsesPaxlBinaryWhenAvailable(t *testing.T) {
+	command := fakePaxlCommand(t)
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{command},
+	}.ListSessions(context.Background(), SessionScannerSpec{Harness: "codex"})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess_paxl", sessions[0].SessionID)
+	assert.Equal(t, "codex", sessions[0].AgentType)
+	assert.Equal(t, "sess_paxl", sessions[0].NativeID)
+	assert.Equal(t, "From paxl", sessions[0].Name)
+	assert.Equal(t, "paxl", sessions[0].Source)
+	require.Len(t, sessions[0].Messages, 1)
+	assert.Equal(t, "assistant", sessions[0].Messages[0].Role)
+	assert.Equal(t, "hello from paxl", sessions[0].Messages[0].Text)
+}
+
+func TestDefaultScannerPassesLimitToPaxl(t *testing.T) {
+	command := fakePaxlCommandRequiringLimit(t, "2")
+
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{command},
+	}.ListSessions(context.Background(), SessionScannerSpec{Harness: "codex", Limit: 2})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess_limited", sessions[0].SessionID)
+}
+
+func TestDefaultScannerUsesCodexLocalIndexBeforeACP(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(codexHome, "session_index.jsonl"),
+		[]byte(`{"id":"sess-local","thread_name":"Correct Codex thread","updated_at":"2026-07-08T23:01:50Z"}`+"\n"),
+		0o644,
+	))
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "08")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(rolloutDir, "rollout-2026-07-08T23-01-50-sess-local.jsonl"),
+		[]byte(`{"type":"session_meta","payload":{"id":"sess-local","timestamp":"2026-07-08T23:01:50Z","cwd":"/tmp/project"}}`+"\n"),
+		0o644,
+	))
+	command := fakeACPCommand(
+		t,
+		`[{"sessionId":"codex:sess-local","nativeId":"sess-local","title":"# AGENTS.md instructions <INSTRUCTIONS> system prompt"}]`,
+	)
+
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "codex",
+		Command: command,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
+	assert.Equal(t, "Correct Codex thread", sessions[0].Name)
+}
+
+func TestResolvePaxlCommandReadsEnvironmentOverride(t *testing.T) {
+	command := fakePaxlCommand(t)
+	t.Setenv("PAXD_PAXL_COMMAND", command+" --profile local")
+
+	resolved, ok := resolvePaxlCommand(nil)
+
+	require.True(t, ok)
+	assert.Equal(t, []string{command, "--profile", "local"}, resolved)
+}
+
 func TestDefaultScannerUsesGeminiLocalSessionsBeforeACP(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GEMINI_HOME", home)
@@ -32,7 +106,7 @@ func TestDefaultScannerUsesGeminiLocalSessionsBeforeACP(t *testing.T) {
 		0o644,
 	))
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "gemini",
 		Command: []string{"definitely-missing-gemini-acp-test-binary", "--acp"},
 	})
@@ -51,7 +125,7 @@ func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testin
 	t.Setenv("GEMINI_HOME", filepath.Join(t.TempDir(), "missing"))
 	command := fakeACPCommand(t, `[{"sessionId":"gemini-acp","nativeId":"gemini-acp","title":"ACP Gemini"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "gemini",
 		Command: command,
 	})
@@ -62,6 +136,38 @@ func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testin
 	assert.Equal(t, "ACP Gemini", sessions[0].Name)
 }
 
+func TestDefaultScannerUsesCodexLocalSessionsWithoutStartingACP(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(codexHome, "session_index.jsonl"),
+		[]byte(`{"id":"sess-local","thread_name":"Local Codex","updated_at":"2026-06-20T05:32:20Z"}`+"\n"),
+		0o644,
+	))
+	markerPath := filepath.Join(t.TempDir(), "started")
+	scriptPath := filepath.Join(t.TempDir(), "fake-codex-acp.sh")
+	script := `#!/bin/sh
+printf started > "$1"
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"sessions":[]}}\n'
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+
+	sessions, err := legacyDefaultScanner(time.Second).ListSessions(context.Background(), SessionScannerSpec{
+		Harness: "codex",
+		Command: []string{scriptPath, markerPath},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("codex ACP command was started; marker stat error = %v", err)
+	}
+}
+
 func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -69,7 +175,7 @@ func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
 	insertReporterHermesSession(t, filepath.Join(home, ".hermes", "state.db"), "sess-local", "SQLite only", 1_780_000_010)
 	command := fakeHermesACPCommand(t, `[{"sessionId":"sess-acp","nativeId":"sess-acp","title":"ACP only","updatedAt":"2026-06-01T20:26:40Z"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "hermes",
 		Command: command,
 	})
@@ -92,7 +198,7 @@ func TestDefaultScannerReadsHermesProfileStateDBFromCommand(t *testing.T) {
 	insertReporterHermesSession(t, filepath.Join(root, "state.db"), "sess-default", "Default profile", 1_780_000_010)
 	insertReporterHermesSession(t, profileDB, "sess-profile", "ABC profile", 1_780_000_020)
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Command: []string{filepath.Join(t.TempDir(), "hermes"), "--profile", "ABC", "acp"},
 	})
 
@@ -108,7 +214,7 @@ func TestDefaultScannerUsesHermesSQLiteWhenACPFail(t *testing.T) {
 	createReporterHermesStateDB(t, filepath.Join(home, ".hermes", "state.db"))
 	insertReporterHermesSession(t, filepath.Join(home, ".hermes", "state.db"), "sess-local", "SQLite fallback", 1_780_000_010)
 
-	sessions, err := DefaultScanner{Timeout: 50 * time.Millisecond}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := legacyDefaultScanner(50*time.Millisecond).ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "hermes",
 		Command: []string{"definitely-missing-hermes-acp-test-binary"},
 	})
@@ -119,78 +225,12 @@ func TestDefaultScannerUsesHermesSQLiteWhenACPFail(t *testing.T) {
 	assert.Equal(t, "SQLite fallback", sessions[0].Name)
 }
 
-func TestNormalizeCodexSessionsCollapsesForkLineage(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	dir := filepath.Join(home, "sessions", "2026", "07", "19")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "rollout-2026-07-18T01-00-00-aaa.jsonl"), []byte(
-		`{"type":"session_meta","payload":{"id":"aaa","session_id":"aaa","timestamp":"2026-07-18T01:00:00Z","cwd":"/tmp/project","source":"vscode"}}`+"\n",
-	), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "rollout-2026-07-19T01-00-00-bbb.jsonl"), []byte(
-		`{"type":"session_meta","payload":{"id":"bbb","session_id":"bbb","forked_from_id":"aaa","timestamp":"2026-07-19T01:00:00Z","cwd":"/tmp/project","source":"vscode"}}`+"\n",
-	), 0o644))
-
-	sessions := normalizeCodexSessions([]model.SessionInfo{
-		{SessionID: "bbb", Name: "forked thread", UpdatedAt: "2026-07-19T03:00:00Z"},
-		{SessionID: "aaa", Name: "original thread", UpdatedAt: "2026-07-18T02:00:00Z"},
-	})
-
-	require.Len(t, sessions, 1)
-	assert.Equal(t, "codex:aaa", sessions[0].SessionID)
-	assert.Equal(t, "aaa", sessions[0].NativeID)
-	assert.Equal(t, "codex", sessions[0].AgentType)
-	// The root thread names the conversation even when its entry is older.
-	assert.Equal(t, "original thread", sessions[0].Name)
-	// The newest entry provides the activity timestamp.
-	assert.Equal(t, "2026-07-19T03:00:00Z", sessions[0].UpdatedAt)
-}
-
-func TestNormalizeCodexSessionsWithoutLocalStore(t *testing.T) {
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing"))
-
-	sessions := normalizeCodexSessions([]model.SessionInfo{
-		{SessionID: "xxx", Name: "standalone"},
-		{SessionID: "codex:yyy", NativeID: "yyy"},
-		{},
-	})
-
-	require.Len(t, sessions, 2)
-	assert.Equal(t, "codex:xxx", sessions[0].SessionID)
-	assert.Equal(t, "xxx", sessions[0].NativeID)
-	assert.Equal(t, "codex", sessions[0].AgentType)
-	assert.Equal(t, "standalone", sessions[0].Name)
-	assert.Equal(t, "codex:yyy", sessions[1].SessionID)
-	assert.Equal(t, "yyy", sessions[1].NativeID)
-}
-
-func TestDefaultScannerNormalizesCodexACPSessions(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	dir := filepath.Join(home, "sessions", "2026", "07", "19")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "rollout-2026-07-19T01-00-00-bbb.jsonl"), []byte(
-		`{"type":"session_meta","payload":{"id":"bbb","session_id":"bbb","forked_from_id":"aaa","timestamp":"2026-07-19T01:00:00Z","cwd":"/tmp/project","source":"vscode"}}`+"\n",
-	), 0o644))
-	command := fakeACPCommand(t, `[{"sessionId":"bbb","title":"same title","updatedAt":"2026-07-19T03:00:00Z"},{"sessionId":"aaa","title":"same title","updatedAt":"2026-07-18T02:00:00Z"}]`)
-
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
-		Harness: "codex",
-		Command: command,
-	})
-
-	require.NoError(t, err)
-	require.Len(t, sessions, 1)
-	assert.Equal(t, "codex:aaa", sessions[0].SessionID)
-	assert.Equal(t, "aaa", sessions[0].NativeID)
-	assert.Equal(t, "same title", sessions[0].Name)
-}
-
 func TestCodexSpecDetection(t *testing.T) {
 	assert.True(t, isCodexSpec(SessionScannerSpec{Harness: "codex"}))
 	assert.True(t, isCodexSpec(SessionScannerSpec{AgentType: "codex"}))
 	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"codex-acp"}}))
 	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"/usr/local/bin/codex", "--acp"}}))
+	assert.True(t, isCodexSpec(SessionScannerSpec{Command: []string{"npx", "-y", "@agentclientprotocol/codex-acp"}}))
 	assert.False(t, isCodexSpec(SessionScannerSpec{Harness: "hermes"}))
 	assert.False(t, isCodexSpec(SessionScannerSpec{Command: []string{"hermes", "acp"}}))
 	assert.False(t, isCodexSpec(SessionScannerSpec{Command: []string{"npx", "-y", "@zed-industries/codex-acp"}}))
@@ -199,7 +239,10 @@ func TestCodexSpecDetection(t *testing.T) {
 func TestDefaultScannerCanonicalizesKimiACPSessions(t *testing.T) {
 	command := fakeACPCommand(t, `[{"sessionId":"session_abc-123","title":"hello kimi","cwd":"/tmp/project","updatedAt":"2026-07-19T02:46:15.726Z"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}.ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "kimi",
 		Command: command,
 	})
@@ -244,7 +287,10 @@ func TestKimiSpecDetection(t *testing.T) {
 func TestDefaultScannerCanonicalizesPiACPSessions(t *testing.T) {
 	command := fakeACPCommand(t, `[{"sessionId":"019f5007-733c-710e-a114-16a50fdf3fe7","title":"hello pi","cwd":"/tmp/project","updatedAt":"2026-07-11T07:16:57.296Z"}]`)
 
-	sessions, err := DefaultScanner{Timeout: 5 * time.Second}.ListSessions(context.Background(), SessionScannerSpec{
+	sessions, err := DefaultScanner{
+		Timeout:     5 * time.Second,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}.ListSessions(context.Background(), SessionScannerSpec{
 		Harness: "pi",
 		Command: command,
 	})
@@ -417,4 +463,52 @@ func insertReporterHermesSession(t *testing.T, path string, id string, title str
 		VALUES (?, 'cli', ?, ?)
 	`, id, title, startedAt)
 	require.NoError(t, err)
+}
+
+func legacyDefaultScanner(timeout time.Duration) DefaultScanner {
+	return DefaultScanner{
+		Timeout:     timeout,
+		PaxlCommand: []string{"definitely-missing-paxl-test-binary"},
+	}
+}
+
+func fakePaxlCommand(t *testing.T) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+  printf '{"schemaVersion":"paxl.session.metadata.v1","id":"codex:sess_paxl","agent":"codex","nativeId":"sess_paxl","title":"From paxl","status":"available","updatedAt":"2026-07-07T01:02:03Z"}\n'
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "get" ]; then
+  printf '{"schemaVersion":"paxl.session.element.v1","sessionId":"codex:sess_paxl","seq":1,"type":"message","role":"assistant","completedAt":"2026-07-07T01:02:04Z","contentText":"hello from paxl"}\n'
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 2
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	return scriptPath
+}
+
+func fakePaxlCommandRequiringLimit(t *testing.T, limit string) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+  if [ "$7" != "--limit" ] || [ "$8" != "` + limit + `" ]; then
+    echo missing expected limit "$@" >&2
+    exit 3
+  fi
+  printf '{"schemaVersion":"paxl.session.metadata.v1","id":"codex:sess_limited","agent":"codex","nativeId":"sess_limited","title":"Limited","status":"available","updatedAt":"2026-07-07T01:02:03Z"}\n'
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "get" ]; then
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 2
+`
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	return scriptPath
 }

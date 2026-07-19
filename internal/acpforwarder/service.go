@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -211,15 +212,31 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	log.Printf("[acp-forwarder] connected %s -> %s", tunnelURL.Redacted(), s.cfg.Command[0])
 
 	var wsWriteMu sync.Mutex
-	engine, err := s.newReliableEngine(conn, stdin, &wsWriteMu)
+	engine, producer, closeEngine, err := s.newReliableEngine(stdin)
 	if err != nil {
 		return true, err
+	}
+	defer func() {
+		closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelClose()
+		if err := closeEngine(closeCtx); err != nil {
+			log.Printf("[acp-forwarder] producer write-behind close failed: %v", err)
+		}
+	}()
+	response, err := s.reconcilePaxdProducer(runCtx, conn, producer, &wsWriteMu)
+	if err != nil {
+		return true, fmt.Errorf("reconcile producer: %w", err)
 	}
 	if err := engine.ReplayInbound(runCtx, s.cfg.ConnectionID, reliablemq.StreamACP, 1000); err != nil {
 		return true, fmt.Errorf("replay inbound frames: %w", err)
 	}
-	if err := engine.ReplayOutbound(runCtx, s.cfg.ConnectionID, reliablemq.StreamACP, 1000); err != nil {
-		return true, fmt.Errorf("replay outbound frames: %w", err)
+	binding, err := producer.Bind(runCtx, s.reliableSender(conn, &wsWriteMu), response.ConsumerAckedThrough)
+	if err != nil {
+		return true, fmt.Errorf("bind producer: %w", err)
+	}
+	defer binding.Close()
+	if err := binding.WaitCaughtUp(runCtx); err != nil {
+		return true, fmt.Errorf("producer recovery barrier: %w", err)
 	}
 
 	errCh := make(chan error, 3)
@@ -262,10 +279,18 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 }
 
 func (s *Service) copyWSToStdin(conn *websocket.Conn, stdin io.WriteCloser, wsWriteMu *sync.Mutex) error {
-	engine, err := s.newReliableEngine(conn, stdin, wsWriteMu)
+	engine, producer, closeEngine, err := s.newReliableEngine(stdin)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = closeEngine(context.Background())
+	}()
+	binding, err := producer.Bind(context.Background(), s.reliableSender(conn, wsWriteMu), 0)
+	if err != nil {
+		return err
+	}
+	defer binding.Close()
 	return s.copyWSToStdinWithEngine(conn, engine)
 }
 
@@ -292,10 +317,18 @@ func (s *Service) copyWSToStdinWithEngine(conn *websocket.Conn, engine *reliable
 }
 
 func (s *Service) copyStdoutToWS(stdout io.Reader, conn *websocket.Conn, wsWriteMu *sync.Mutex) error {
-	engine, err := s.newReliableEngine(conn, io.Discard, wsWriteMu)
+	engine, producer, closeEngine, err := s.newReliableEngine(io.Discard)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = closeEngine(context.Background())
+	}()
+	binding, err := producer.Bind(context.Background(), s.reliableSender(conn, wsWriteMu), 0)
+	if err != nil {
+		return err
+	}
+	defer binding.Close()
 	return s.copyStdoutToWSWithEngine(stdout, engine)
 }
 
@@ -307,7 +340,7 @@ func (s *Service) copyStdoutToWSWithEngine(stdout io.Reader, engine *reliablemq.
 		if len(line) > 0 {
 			line = trimLineDelimiter(line)
 			if len(line) > 0 {
-				if _, err := engine.Send(context.Background(), reliablemq.OutboundMessage{
+				if err := engine.Send(context.Background(), reliablemq.OutboundMessage{
 					QueueID: s.cfg.ConnectionID,
 					Stream:  reliablemq.StreamACP,
 					Payload: append([]byte(nil), line...),
@@ -334,12 +367,58 @@ func trimLineDelimiter(line []byte) []byte {
 	return line
 }
 
-func (s *Service) newReliableEngine(conn *websocket.Conn, stdin io.Writer, wsWriteMu *sync.Mutex) (*reliablemq.Engine, error) {
+func (s *Service) newReliableEngine(
+	stdin io.Writer,
+) (*reliablemq.Engine, *reliablemq.Producer, func(context.Context) error, error) {
 	mqStore, err := sqlstore.NewSQLite(s.cfg.Journal.DB(), sqlstore.WithTableName("transport_journal"))
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	sender := reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
+	transportStore := reliablemq.NewProducerWriteBehindStore(
+		mqStore,
+		reliablemq.WithProducerWriteBehindRequireBatchStore(),
+		reliablemq.WithProducerWriteBehindFlushFailureHandler(func(err error, stats reliablemq.ProducerWriteBehindStats) {
+			log.Printf(
+				"[acp-forwarder] producer write-behind flush failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d consecutive_failures=%d last_error=%q",
+				err,
+				stats.DirtyFrames,
+				stats.DirtyPatches,
+				stats.DirtyBytes,
+				stats.ConsecutiveFlushFailures,
+				stats.LastFlushError,
+			)
+		}),
+	)
+	producer, err := reliablemq.NewProducer(context.Background(), reliablemq.ProducerConfig{
+		QueueID: s.cfg.ConnectionID,
+		Stream:  reliablemq.StreamACP,
+		OnError: func(err error) {
+			log.Printf("[acp-forwarder] FATAL transport producer stopped accepting output: %v", err)
+		},
+	}, transportStore)
+	if err != nil {
+		_ = transportStore.Close(context.Background())
+		return nil, nil, nil, err
+	}
+	dispatcher := reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		if err := writeACPStdin(stdin, frame.Payload); err != nil {
+			return err
+		}
+		return nil
+	})
+	closeEngine := func(ctx context.Context) error {
+		return errors.Join(producer.Close(ctx), transportStore.Close(ctx))
+	}
+	return reliablemq.NewEngine(
+		reliablemq.Config{},
+		transportStore,
+		producer,
+		dispatcher,
+	), producer, closeEngine, nil
+}
+
+func (s *Service) reliableSender(conn *websocket.Conn, wsWriteMu *sync.Mutex) reliablemq.Sender {
+	return reliablemq.SenderFunc(func(ctx context.Context, env reliablemq.Envelope) error {
 		if env.Type == reliablemq.EnvelopeTypeData {
 			if err := acphistory.ProjectOutbound(
 				ctx,
@@ -362,18 +441,86 @@ func (s *Service) newReliableEngine(conn *websocket.Conn, stdin io.Writer, wsWri
 		}
 		return nil
 	})
-	dispatcher := reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
-		if err := writeACPStdin(stdin, frame.Payload); err != nil {
-			return err
+}
+
+func (s *Service) reconcilePaxdProducer(
+	ctx context.Context,
+	conn *websocket.Conn,
+	producer *reliablemq.Producer,
+	wsWriteMu *sync.Mutex,
+) (reliablemq.Envelope, error) {
+	checkpoint, err := producer.Checkpoint(ctx)
+	if err != nil {
+		return reliablemq.Envelope{}, fmt.Errorf("load producer checkpoint: %w", err)
+	}
+	request, err := reliablemq.MarshalEnvelope(reliablemq.ReconcileRequestEnvelope(checkpoint))
+	if err != nil {
+		return reliablemq.Envelope{}, err
+	}
+	wsWriteMu.Lock()
+	err = conn.WriteMessage(websocket.TextMessage, request)
+	wsWriteMu.Unlock()
+	if err != nil {
+		return reliablemq.Envelope{}, fmt.Errorf("write reconcile request: %w", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		if isReconcileResponseClose(err) {
+			return reliablemq.Envelope{}, fmt.Errorf("manager requested queue rotation")
 		}
-		return nil
-	})
-	return reliablemq.NewEngine(
-		reliablemq.Config{},
-		mqStore,
-		sender,
-		dispatcher,
-	), nil
+		return reliablemq.Envelope{}, fmt.Errorf("read reconcile response: %w", err)
+	}
+	if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
+		return reliablemq.Envelope{}, fmt.Errorf("unexpected reconcile message type %d", messageType)
+	}
+	response, err := reliablemq.UnmarshalEnvelope(payload)
+	if err != nil {
+		return reliablemq.Envelope{}, fmt.Errorf("decode reconcile response: %w", err)
+	}
+	if response.Type != reliablemq.EnvelopeTypeReconcileResponse {
+		return reliablemq.Envelope{}, fmt.Errorf("expected reconcile_response, got %q", response.Type)
+	}
+	if response.QueueID != s.cfg.ConnectionID {
+		return reliablemq.Envelope{}, fmt.Errorf("unexpected reconcile queue_id %q", response.QueueID)
+	}
+	if response.Stream != reliablemq.StreamACP {
+		return reliablemq.Envelope{}, fmt.Errorf("unexpected reconcile stream %q", response.Stream)
+	}
+	log.Printf(
+		"[acp-forwarder] reconciled action=%s producer_next_seq=%d consumer_acked_through=%d replay_from=%d replay_through=%d advance_producer_next_seq=%d",
+		response.Action,
+		checkpoint.ProducerNextSeq,
+		response.ConsumerAckedThrough,
+		response.From,
+		response.Through,
+		response.AdvanceProducerNextSeq,
+	)
+	switch response.Action {
+	case reliablemq.ReconcileActionAligned, reliablemq.ReconcileActionReplay:
+		return response, nil
+	case reliablemq.ReconcileActionAdvanceProducer:
+		if err := producer.AdvanceProducerNextSeq(ctx, response.AdvanceProducerNextSeq); err != nil {
+			return reliablemq.Envelope{}, err
+		}
+		return response, nil
+	case reliablemq.ReconcileActionRotate:
+		return reliablemq.Envelope{}, fmt.Errorf("manager requested queue rotation")
+	default:
+		return reliablemq.Envelope{}, fmt.Errorf("unsupported reconcile action %q", response.Action)
+	}
+}
+
+func isReconcileResponseClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "unexpected EOF") ||
+		strings.Contains(message, "websocket: close") ||
+		message == "closed"
 }
 
 func writeACPStdin(stdin io.Writer, payload []byte) error {

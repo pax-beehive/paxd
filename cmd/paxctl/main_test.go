@@ -366,7 +366,7 @@ func TestPaxctlHarnessesListAndDiscoverUseLocalAPI(t *testing.T) {
 			Harness:     "codex",
 			DisplayName: "Codex",
 			State:       "available",
-			InstallHint: "install codex-acp or use fallback: npx -y @zed-industries/codex-acp",
+			InstallHint: "install codex-acp or use fallback: npx -y @agentclientprotocol/codex-acp",
 		}}}},
 		discovered: control.QueryResult{Harnesses: &control.ListHarnessesResult{Items: []control.HarnessView{{
 			Harness: "claude",
@@ -379,7 +379,7 @@ func TestPaxctlHarnessesListAndDiscoverUseLocalAPI(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	require.NoError(t, run(context.Background(), []string{"harnesses", "list"}, &stdout, &stderr))
 	assert.Contains(t, stdout.String(), "codex")
-	assert.Contains(t, stdout.String(), "npx -y @zed-industries/codex-acp")
+	assert.Contains(t, stdout.String(), "npx -y @agentclientprotocol/codex-acp")
 
 	stdout.Reset()
 	require.NoError(t, run(context.Background(), []string{"harnesses", "discover", "--probe", "claude"}, &stdout, &stderr))
@@ -802,7 +802,7 @@ func TestCapsulesInjectRendersSystemHandoffAndRecordsInjection(t *testing.T) {
 func TestAgentsSetupDryRunPrintsInstallCommands(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := runAgentSetupCommands(context.Background(), &stdout, &stderr, "test", [][]string{
-		{"npm", "install", "-g", "@zed-industries/codex-acp"},
+		{"npm", "install", "-g", "@agentclientprotocol/codex-acp"},
 		{"npm", "install", "-g", "pi-acp", "@earendil-works/pi-coding-agent"},
 		{"npm", "install", "-g", "@qwen-code/qwen-code"},
 	}, true)
@@ -810,7 +810,7 @@ func TestAgentsSetupDryRunPrintsInstallCommands(t *testing.T) {
 		t.Fatalf("run() error = %v stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "$ npm install -g @zed-industries/codex-acp") {
+	if !strings.Contains(out, "$ npm install -g @agentclientprotocol/codex-acp") {
 		t.Fatalf("stdout missing codex install command: %s", out)
 	}
 	if !strings.Contains(out, "$ npm install -g pi-acp @earendil-works/pi-coding-agent") {
