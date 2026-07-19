@@ -39,6 +39,9 @@ type runtimeSupervisors struct {
 	transportProducers interface {
 		Close(context.Context) error
 	}
+	transportStats *runtimes.TransportStatsTracker
+	startedAt      time.Time
+	logFilePath    string
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -74,15 +77,14 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		}),
 	)
 	s.transportFlusher = transportStore
-	engineFactory := runtimes.ReliableEngineFromStoreWithProducerConfig(
+	engineFactory := runtimes.NewTransportStatsTracker(runtimes.ReliableEngineFromStoreWithProducerConfig(
 		transportStore,
 		reliablemq.ProducerConfig{OnError: func(err error) {
 			log.Printf("[paxd] FATAL acp transport producer stopped accepting output: %v", err)
 		}},
-	)
-	if closer, ok := engineFactory.(interface{ Close(context.Context) error }); ok {
-		s.transportProducers = closer
-	}
+	))
+	s.transportStats = engineFactory
+	s.transportProducers = engineFactory
 
 	headers := auth.NewProvider(store, nil)
 	dialer := runtimes.GorillaWebSocketDialer{}
