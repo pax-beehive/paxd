@@ -311,6 +311,7 @@ type QueryType string
 
 const (
 	QueryStatusGet            QueryType = "status.get"
+	QueryDiagnosticsGet       QueryType = "diagnostics.get"
 	QueryRemotesList          QueryType = "remotes.list"
 	QueryRemoteGet            QueryType = "remote.get"
 	QueryAgentConnectionsList QueryType = "agent_connections.list"
@@ -328,6 +329,7 @@ type Query struct {
 	Type QueryType `json:"type"`
 
 	GetStatus            *GetStatusQuery            `json:"get_status,omitempty"`
+	GetDiagnostics       *GetDiagnosticsQuery       `json:"get_diagnostics,omitempty"`
 	ListRemotes          *ListRemotesQuery          `json:"list_remotes,omitempty"`
 	GetRemote            *GetRemoteQuery            `json:"get_remote,omitempty"`
 	ListAgentConnections *ListAgentConnectionsQuery `json:"list_agent_connections,omitempty"`
@@ -342,6 +344,70 @@ type Query struct {
 }
 
 type GetStatusQuery struct{}
+
+type GetDiagnosticsQuery struct{}
+
+// DiagnosticsProvider supplies live runtime diagnostics that are not persisted
+// in the daemon store, such as transport producer stats and process metadata.
+type DiagnosticsProvider interface {
+	RuntimeDiagnostics(ctx context.Context) RuntimeDiagnostics
+}
+
+type RuntimeDiagnostics struct {
+	PaxdVersion          string                      `json:"paxd_version,omitempty"`
+	StartedAt            *time.Time                  `json:"started_at,omitempty"`
+	LogFile              *LogFileInfo                `json:"log_file,omitempty"`
+	TransportQueues      []TransportQueueDiagnostics `json:"transport_queues,omitempty"`
+	TransportWriteBehind *TransportWriteBehindStats  `json:"transport_write_behind,omitempty"`
+}
+
+type LogFileInfo struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type TransportQueueDiagnostics struct {
+	QueueID      string `json:"queue_id"`
+	Bound        bool   `json:"bound"`
+	Tail         int64  `json:"tail"`
+	AckedThrough int64  `json:"acked_through"`
+	NextToSend   int64  `json:"next_to_send"`
+	Unacked      int64  `json:"unacked"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
+type TransportWriteBehindStats struct {
+	DirtyFrames              int    `json:"dirty_frames"`
+	DirtyPatches             int    `json:"dirty_patches"`
+	DirtyBytes               int64  `json:"dirty_bytes"`
+	Degraded                 bool   `json:"degraded"`
+	ConsecutiveFlushFailures int    `json:"consecutive_flush_failures"`
+	LastFlushError           string `json:"last_flush_error,omitempty"`
+}
+
+type ACPSlotStatusInfo struct {
+	SlotID           string `json:"slot_id"`
+	ConnectionID     string `json:"connection_id"`
+	Ordinal          int    `json:"ordinal"`
+	Phase            string `json:"phase"`
+	FailureClass     string `json:"failure_class,omitempty"`
+	LastErrorCode    string `json:"last_error_code,omitempty"`
+	LastErrorMessage string `json:"last_error_message,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+}
+
+// ACPSlotStatusSource is an optional store capability used by the diagnostics
+// query; stores that do not implement it simply omit slot statuses.
+type ACPSlotStatusSource interface {
+	ListACPSlotStatuses(ctx context.Context) ([]ACPSlotStatusInfo, error)
+}
+
+type DiagnosticsView struct {
+	RuntimeDiagnostics
+	Remotes          []RemoteStatusView  `json:"remotes,omitempty"`
+	AgentConnections []AgentStatusView   `json:"agent_connections,omitempty"`
+	ACPSlots         []ACPSlotStatusInfo `json:"acp_slots,omitempty"`
+}
 
 type ListRemotesQuery struct {
 	IncludeDisabled bool `json:"include_disabled,omitempty"`
@@ -395,6 +461,7 @@ type QueryResult struct {
 	Error *ControlError `json:"error,omitempty"`
 
 	Status           *DaemonStatus               `json:"status,omitempty"`
+	Diagnostics      *DiagnosticsView            `json:"diagnostics,omitempty"`
 	Remotes          *ListRemotesResult          `json:"remotes,omitempty"`
 	Remote           *RemoteView                 `json:"remote,omitempty"`
 	AgentConnections *ListAgentConnectionsResult `json:"agent_connections,omitempty"`

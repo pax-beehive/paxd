@@ -90,6 +90,8 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		statusHub:            newStatusHub(),
 		paxdVersion:          opts.PaxdVersion,
 		acpCapabilityReports: newACPCapabilityReports(),
+		startedAt:            time.Now().UTC(),
+		logFilePath:          cfg.Daemon.LogFile,
 	}
 	service := control.NewService(control.ServiceOptions{
 		Store:               store,
@@ -98,6 +100,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		LocalSessions:       localSessions,
 		HostMetrics:         metrics,
 		ACPPoolCapabilities: supervisors.acpCapabilityReports,
+		Diagnostics:         supervisors,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)

@@ -1028,3 +1028,31 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+type fakeDiagnosticsProvider struct{}
+
+func (fakeDiagnosticsProvider) RuntimeDiagnostics(ctx context.Context) control.RuntimeDiagnostics {
+	return control.RuntimeDiagnostics{
+		PaxdVersion: "test-version",
+		TransportQueues: []control.TransportQueueDiagnostics{
+			{QueueID: "queue-1", Tail: 10, AckedThrough: 7, Unacked: 3},
+		},
+	}
+}
+
+func TestHandleDiagnosticsQuery(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	service := control.NewService(control.ServiceOptions{Store: store, Diagnostics: fakeDiagnosticsProvider{}})
+
+	result, err := service.HandleQuery(ctx, control.Source{Kind: control.SourceLocal}, control.Query{
+		Type:           control.QueryDiagnosticsGet,
+		GetDiagnostics: &control.GetDiagnosticsQuery{},
+	})
+	require.NoError(t, err)
+	require.Nil(t, result.Error)
+	require.NotNil(t, result.Diagnostics)
+	assert.Equal(t, "test-version", result.Diagnostics.PaxdVersion)
+	require.Len(t, result.Diagnostics.TransportQueues, 1)
+	assert.Equal(t, int64(3), result.Diagnostics.TransportQueues[0].Unacked)
+}
