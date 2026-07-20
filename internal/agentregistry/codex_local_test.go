@@ -86,6 +86,42 @@ func TestListCodexLocalSessionsCollapsesForkLineage(t *testing.T) {
 	}
 }
 
+func TestListCodexLocalSessionsUsesLatestRolloutEventTime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	dir := filepath.Join(home, "sessions", "2026", "07", "20")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(
+		`{"id":"active","thread_name":"Active","updated_at":"2026-07-20T01:00:00Z"}`+"\n"+
+			`{"id":"newer","thread_name":"Newer","updated_at":"2026-07-20T02:00:00Z"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile(index) error = %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "rollout-2026-07-20T01-00-00-active.jsonl"),
+		[]byte(
+			`{"type":"session_meta","payload":{"id":"active","timestamp":"2026-07-20T01:00:00Z","cwd":"/tmp/project"}}`+"\n"+
+				`{"timestamp":"2026-07-20T03:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Still active."}]}}`+"\n",
+		),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(rollout) error = %v", err)
+	}
+
+	sessions, err := listCodexLocalSessions()
+	if err != nil {
+		t.Fatalf("listCodexLocalSessions() error = %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("len(sessions) = %d, want 2: %+v", len(sessions), sessions)
+	}
+	if sessions[0].SessionID != "codex:active" || sessions[0].UpdatedAt != "2026-07-20T03:00:00Z" {
+		t.Fatalf("first session = %+v, want active at latest rollout event", sessions[0])
+	}
+}
+
 func TestListCodexLocalSessionsMergesResumeRollout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
