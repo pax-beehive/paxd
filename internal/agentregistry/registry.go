@@ -501,3 +501,26 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// localSessionName derives a display name for a local session that has no
+// real title: the working directory basename plus a short session ID, so
+// reported sessions stay distinguishable instead of showing a raw source
+// value like "cli".
+func localSessionName(cwd, nativeID string) string {
+	base := filepath.Base(strings.TrimSpace(cwd))
+	if base == "." || base == string(filepath.Separator) {
+		base = ""
+	}
+	short := strings.TrimSpace(nativeID)
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	switch {
+	case base != "" && short != "":
+		return base + " (" + short + ")"
+	case base != "":
+		return base
+	default:
+		return short
+	}
+}

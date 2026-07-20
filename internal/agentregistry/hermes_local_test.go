@@ -66,6 +66,26 @@ func TestListHermesLocalSessionsReadsStateDB(t *testing.T) {
 	assert.Equal(t, int64(33), sessions[1].TokenUsage)
 }
 
+func TestListHermesLocalSessionsDerivesNameFromCWDWhenUntitled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dbPath := filepath.Join(home, ".hermes", "state.db")
+	createHermesStateDB(t, dbPath)
+	insertHermesSession(t, dbPath, hermesSessionFixture{
+		id:        "sess-abcdef123456",
+		source:    "cli",
+		cwd:       "/workspace/paxd",
+		startedAt: 1_780_000_010,
+	})
+
+	sessions, err := ListHermesLocalSessions(context.Background(), []string{"hermes", "acp"}, 0)
+
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "paxd (sess-abc)", sessions[0].Name)
+	assert.Equal(t, "cli", sessions[0].Source)
+}
+
 func TestListHermesLocalSessionsRespectsLimit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

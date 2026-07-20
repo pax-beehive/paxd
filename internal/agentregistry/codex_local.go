@@ -36,16 +36,6 @@ type codexSessionMetaLine struct {
 	} `json:"payload"`
 }
 
-// sourceText returns the source for plain-string sources. Object sources
-// (for example subagent spawns) have no text form.
-func (m codexSessionMetaLine) sourceText() string {
-	var text string
-	if err := json.Unmarshal(m.Payload.Source, &text); err == nil {
-		return text
-	}
-	return ""
-}
-
 // isSubagent reports whether the rollout belongs to an internal subagent
 // (guardian reviewers, thread spawns) rather than a user conversation.
 func (m codexSessionMetaLine) isSubagent() bool {
@@ -186,7 +176,7 @@ func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []m
 		key := lineage.conversationKey(meta)
 		session := sessionFor(key)
 		if meta.Payload.ID == key && session.Name == "" {
-			session.Name = firstNonEmpty(meta.sourceText(), filepath.Base(rollout.path))
+			session.Name = localSessionName(meta.Payload.CWD, key)
 		}
 		if session.UpdatedAt == "" {
 			session.UpdatedAt = meta.Payload.Timestamp

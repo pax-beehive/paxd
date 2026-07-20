@@ -276,3 +276,23 @@ func TestDecodeOpenClawSession(t *testing.T) {
 		t.Fatalf("name/project = %q/%q, want Work chat//tmp/project", got.Name, got.ProjectID)
 	}
 }
+
+func TestLocalSessionName(t *testing.T) {
+	cases := []struct {
+		cwd      string
+		nativeID string
+		want     string
+	}{
+		{cwd: "/workspace/paxd", nativeID: "abcdef1234567890", want: "paxd (abcdef12)"},
+		{cwd: "/workspace/paxd", nativeID: "short", want: "paxd (short)"},
+		{cwd: "/workspace/paxd", nativeID: "", want: "paxd"},
+		{cwd: "", nativeID: "abcdef1234567890", want: "abcdef12"},
+		{cwd: "/", nativeID: "abc", want: "abc"},
+		{cwd: "", nativeID: "", want: ""},
+	}
+	for _, tc := range cases {
+		if got := localSessionName(tc.cwd, tc.nativeID); got != tc.want {
+			t.Errorf("localSessionName(%q, %q) = %q, want %q", tc.cwd, tc.nativeID, got, tc.want)
+		}
+	}
+}
