@@ -115,6 +115,9 @@ func TestListCodexLocalSessionsMergesResumeRollout(t *testing.T) {
 	if sessions[0].SessionID != "codex:aaa" || sessions[0].NativeID != "aaa" {
 		t.Fatalf("session = %+v, want codex:aaa", sessions[0])
 	}
+	if sessions[0].Name != "project (aaa)" {
+		t.Fatalf("session.Name = %q, want cwd-derived name, not the raw source %q", sessions[0].Name, "cli")
+	}
 }
 
 func TestCodexLocalElementsReadsLatestLineageRollout(t *testing.T) {

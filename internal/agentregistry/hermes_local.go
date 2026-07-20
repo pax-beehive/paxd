@@ -219,7 +219,7 @@ func scanHermesLocalSession(row hermesSessionRow) (model.SessionInfo, error) {
 		SessionID:      CanonicalSessionID("hermes", id),
 		AgentType:      "hermes",
 		NativeID:       id,
-		Name:           firstNonEmpty(title, preview, source, id),
+		Name:           firstNonEmpty(title, preview, localSessionName(cwd, id)),
 		ProjectID:      cwd,
 		LastActive:     updatedAt,
 		Preview:        preview,
