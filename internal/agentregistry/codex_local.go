@@ -2,9 +2,11 @@ package agentregistry
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -53,9 +55,10 @@ func (m codexSessionMetaLine) isSubagent() bool {
 
 // codexRolloutMeta is the parsed session_meta line of one rollout file.
 type codexRolloutMeta struct {
-	path  string
-	mtime time.Time
-	meta  codexSessionMetaLine
+	path       string
+	mtime      time.Time
+	activityAt string
+	meta       codexSessionMetaLine
 }
 
 // codexLineage resolves codex thread/rollout IDs to the root thread ID of
@@ -178,10 +181,11 @@ func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []m
 		if meta.Payload.ID == key && session.Name == "" {
 			session.Name = localSessionName(meta.Payload.CWD, key)
 		}
-		if session.UpdatedAt == "" {
-			session.UpdatedAt = meta.Payload.Timestamp
-			session.LastActive = session.UpdatedAt
-		}
+		session.UpdatedAt = laterTimeString(
+			session.UpdatedAt,
+			firstNonEmpty(rollout.activityAt, meta.Payload.Timestamp),
+		)
+		session.LastActive = laterTimeString(session.LastActive, session.UpdatedAt)
 		if meta.Payload.CWD != "" && (session.ProjectID == "" || meta.Payload.ID == key) {
 			session.ProjectID = meta.Payload.CWD
 			session.WorkspaceRoots = []string{meta.Payload.CWD}
@@ -246,7 +250,11 @@ func readCodexRolloutMetas(root string) ([]codexRolloutMeta, error) {
 		if err != nil || meta.Payload.ID == "" {
 			return nil
 		}
-		rollout := codexRolloutMeta{path: path, meta: meta}
+		activityAt, err := readCodexRolloutLatestTimestamp(path)
+		if err != nil {
+			return err
+		}
+		rollout := codexRolloutMeta{path: path, activityAt: activityAt, meta: meta}
 		if info, err := entry.Info(); err == nil {
 			rollout.mtime = info.ModTime()
 		}
@@ -257,6 +265,62 @@ func readCodexRolloutMetas(root string) ([]codexRolloutMeta, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func readCodexRolloutLatestTimestamp(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	const blockSize int64 = 64 * 1024
+	offset := info.Size()
+	var suffix []byte
+	for offset > 0 {
+		readSize := min(blockSize, offset)
+		offset -= readSize
+		chunk := make([]byte, readSize)
+		if _, err := file.ReadAt(chunk, offset); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		data := make([]byte, 0, len(chunk)+len(suffix))
+		data = append(data, chunk...)
+		data = append(data, suffix...)
+		lines := bytes.Split(data, []byte{'\n'})
+		firstCompleteLine := 0
+		if offset > 0 {
+			firstCompleteLine = 1
+		}
+		for index := len(lines) - 1; index >= firstCompleteLine; index-- {
+			if timestamp := codexRolloutLineTimestamp(lines[index]); timestamp != "" {
+				return timestamp, nil
+			}
+		}
+		suffix = append(suffix[:0], lines[0]...)
+	}
+	return "", nil
+}
+
+func codexRolloutLineTimestamp(line []byte) string {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return ""
+	}
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(line, &envelope); err == nil && envelope.Timestamp != "" {
+		return envelope.Timestamp
+	}
+	var meta codexSessionMetaLine
+	if err := json.Unmarshal(line, &meta); err == nil && meta.Type == "session_meta" {
+		return meta.Payload.Timestamp
+	}
+	return ""
 }
 
 // laterTimeString returns the later of two RFC 3339 timestamps, tolerating
