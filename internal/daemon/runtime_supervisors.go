@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -33,6 +34,11 @@ type runtimeSupervisors struct {
 	paxdVersion          string
 	acpCapabilityReports *acpCapabilityReports
 	transportDB          *sql.DB
+	transportPruner      transportJournalPruner
+	transportGCConfig    transportGCConfig
+	transportGCDone      chan struct{}
+	transportGCMu        sync.Mutex
+	transportGCStats     transportGCStats
 	transportFlusher     interface {
 		Close(context.Context) error
 		Stats() reliablemq.ProducerWriteBehindStats
@@ -43,6 +49,28 @@ type runtimeSupervisors struct {
 	transportStats *runtimes.TransportStatsTracker
 	startedAt      time.Time
 	logFilePath    string
+}
+
+type transportJournalPruner interface {
+	PruneAckedOutbound(
+		context.Context,
+		sqlstore.AckedOutboundPruneOptions,
+	) (sqlstore.PruneResult, error)
+}
+
+type transportGCConfig struct {
+	Interval   time.Duration
+	KeepFor    time.Duration
+	KeepLatest int
+	BatchSize  int
+	Now        func() time.Time
+}
+
+type transportGCStats struct {
+	lastRunAt    time.Time
+	lastDeleted  int64
+	totalDeleted int64
+	lastError    string
 }
 
 func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control.Service) error {
@@ -62,6 +90,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		return fmt.Errorf("open reliable transport journal: %w", err)
 	}
 	s.transportDB = sqlDB
+	s.transportPruner = mqStore
 	transportStore := reliablemq.NewProducerWriteBehindStore(
 		mqStore,
 		reliablemq.WithProducerWriteBehindRequireBatchStore(),
@@ -227,6 +256,18 @@ func (s *runtimeSupervisors) RuntimeDiagnostics(ctx context.Context) control.Run
 			LastFlushError:           stats.LastFlushError,
 		}
 	}
+	s.transportGCMu.Lock()
+	gcStats := s.transportGCStats
+	s.transportGCMu.Unlock()
+	if !gcStats.lastRunAt.IsZero() || gcStats.totalDeleted > 0 || gcStats.lastError != "" {
+		lastRunAt := gcStats.lastRunAt
+		out.TransportJournalGC = &control.TransportJournalGCStats{
+			LastRunAt:    &lastRunAt,
+			LastDeleted:  gcStats.lastDeleted,
+			TotalDeleted: gcStats.totalDeleted,
+			LastError:    gcStats.lastError,
+		}
+	}
 	return out
 }
 
@@ -307,11 +348,19 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}
-	if s.transportFlusher != nil || s.transportDB != nil {
+	s.startTransportGC(ctx)
+	if s.transportFlusher != nil || s.transportDB != nil || s.transportGCDone != nil {
 		go func() {
 			<-ctx.Done()
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			if s.transportGCDone != nil {
+				select {
+				case <-s.transportGCDone:
+				case <-closeCtx.Done():
+					log.Printf("[paxd] timed out waiting for transport journal GC to stop")
+				}
+			}
 			if s.transportProducers != nil {
 				if err := s.transportProducers.Close(closeCtx); err != nil {
 					log.Printf("[paxd] acp transport producer registry close failed: %v", err)
@@ -339,6 +388,60 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 	startSupervisor(ctx, "remote", s.remote)
 	startSupervisor(ctx, "agent_connection", s.agent)
 	startSupervisor(ctx, "acp_slot", s.acpSlots)
+}
+
+func (s *runtimeSupervisors) startTransportGC(ctx context.Context) {
+	if s == nil || s.transportPruner == nil || s.transportGCConfig.Interval <= 0 ||
+		s.transportGCConfig.KeepFor <= 0 || s.transportGCConfig.KeepLatest < 0 ||
+		s.transportGCConfig.BatchSize <= 0 {
+		return
+	}
+	if s.transportGCConfig.Now == nil {
+		s.transportGCConfig.Now = time.Now
+	}
+	done := make(chan struct{})
+	s.transportGCDone = done
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(s.transportGCConfig.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.pruneTransportJournal(ctx)
+			}
+		}
+	}()
+}
+
+func (s *runtimeSupervisors) pruneTransportJournal(ctx context.Context) {
+	now := s.transportGCConfig.Now().UTC()
+	result, err := s.transportPruner.PruneAckedOutbound(ctx, sqlstore.AckedOutboundPruneOptions{
+		OlderThan:          now.Add(-s.transportGCConfig.KeepFor),
+		KeepLatestPerQueue: int64(s.transportGCConfig.KeepLatest),
+		Limit:              s.transportGCConfig.BatchSize,
+	})
+	s.transportGCMu.Lock()
+	s.transportGCStats.lastRunAt = now
+	s.transportGCStats.lastDeleted = result.Deleted
+	if err != nil {
+		s.transportGCStats.lastError = err.Error()
+	} else {
+		s.transportGCStats.totalDeleted += result.Deleted
+		s.transportGCStats.lastError = ""
+	}
+	s.transportGCMu.Unlock()
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[paxd] transport journal GC failed: %v", err)
+		}
+		return
+	}
+	if result.Deleted > 0 {
+		log.Printf("[paxd] transport journal GC deleted=%d", result.Deleted)
+	}
 }
 
 func startSupervisor(ctx context.Context, name string, sup supervisor.Supervisor) {

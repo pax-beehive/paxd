@@ -17,6 +17,7 @@ import (
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/pax-beehive/paxkit/reliablemq"
+	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +52,9 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	assert.IsType(t, &reliablemq.ProducerWriteBehindStore{}, rt.supervisors.transportFlusher)
 	require.FileExists(t, transportDBPath)
 	assert.Equal(t, 4, rt.supervisors.transportDB.Stats().MaxOpenConnections)
+	var journalMode string
+	require.NoError(t, rt.supervisors.transportDB.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
+	assert.Equal(t, "wal", journalMode)
 	assert.False(t, store.DB().Migrator().HasTable("transport_journal"))
 	var transportJournalTables int
 	require.NoError(t, rt.supervisors.transportDB.QueryRow(
@@ -228,6 +232,45 @@ func TestRuntimeSupervisorsStartIgnoresCanceledAndDeadlineErrors(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestTransportJournalGCRunsBoundedRetentionAndStops(t *testing.T) {
+	// Given
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	pruner := &fakeTransportJournalPruner{result: sqlstore.PruneResult{Deleted: 7}}
+	sups := &runtimeSupervisors{
+		transportPruner: pruner,
+		transportGCConfig: transportGCConfig{
+			Interval:   5 * time.Millisecond,
+			KeepFor:    72 * time.Hour,
+			KeepLatest: 100,
+			BatchSize:  1000,
+			Now:        func() time.Time { return now },
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// When
+	sups.startTransportGC(ctx)
+	require.Eventually(t, func() bool { return pruner.callCount() > 0 }, time.Second, time.Millisecond)
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-sups.transportGCDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+
+	// Then
+	options := pruner.lastOptions()
+	require.Equal(t, now.Add(-72*time.Hour), options.OlderThan)
+	require.Equal(t, int64(100), options.KeepLatestPerQueue)
+	require.Equal(t, 1000, options.Limit)
+	diagnostics := sups.RuntimeDiagnostics(context.Background())
+	require.NotNil(t, diagnostics.TransportJournalGC)
+	require.Equal(t, int64(7), diagnostics.TransportJournalGC.TotalDeleted)
+}
+
 func TestRuntimeSessionFactoriesReturnSessions(t *testing.T) {
 	remoteFactory := remoteControlSessionFactory{
 		headers: fakeHeaderProvider{},
@@ -300,6 +343,37 @@ func (f *fakeDaemonHarnessRegistry) isDiscovered() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.discovered
+}
+
+type fakeTransportJournalPruner struct {
+	mu      sync.Mutex
+	calls   int
+	options sqlstore.AckedOutboundPruneOptions
+	result  sqlstore.PruneResult
+	err     error
+}
+
+func (f *fakeTransportJournalPruner) PruneAckedOutbound(
+	_ context.Context,
+	options sqlstore.AckedOutboundPruneOptions,
+) (sqlstore.PruneResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.options = options
+	return f.result, f.err
+}
+
+func (f *fakeTransportJournalPruner) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *fakeTransportJournalPruner) lastOptions() sqlstore.AckedOutboundPruneOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.options
 }
 
 type fakeDaemonSupervisor struct {

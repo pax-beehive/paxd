@@ -92,6 +92,13 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		acpCapabilityReports: newACPCapabilityReports(),
 		startedAt:            time.Now().UTC(),
 		logFilePath:          cfg.Daemon.LogFile,
+		transportGCConfig: transportGCConfig{
+			Interval:   cfg.Daemon.TransportJournalGCInterval,
+			KeepFor:    cfg.Daemon.TransportJournalKeepAckedFor,
+			KeepLatest: cfg.Daemon.TransportJournalKeepLatest,
+			BatchSize:  cfg.Daemon.TransportJournalGCBatchSize,
+			Now:        time.Now,
+		},
 	}
 	service := control.NewService(control.ServiceOptions{
 		Store:               store,

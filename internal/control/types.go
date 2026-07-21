@@ -359,6 +359,7 @@ type RuntimeDiagnostics struct {
 	LogFile              *LogFileInfo                `json:"log_file,omitempty"`
 	TransportQueues      []TransportQueueDiagnostics `json:"transport_queues,omitempty"`
 	TransportWriteBehind *TransportWriteBehindStats  `json:"transport_write_behind,omitempty"`
+	TransportJournalGC   *TransportJournalGCStats    `json:"transport_journal_gc,omitempty"`
 }
 
 type LogFileInfo struct {
@@ -383,6 +384,13 @@ type TransportWriteBehindStats struct {
 	Degraded                 bool   `json:"degraded"`
 	ConsecutiveFlushFailures int    `json:"consecutive_flush_failures"`
 	LastFlushError           string `json:"last_flush_error,omitempty"`
+}
+
+type TransportJournalGCStats struct {
+	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
+	LastDeleted  int64      `json:"last_deleted"`
+	TotalDeleted int64      `json:"total_deleted"`
+	LastError    string     `json:"last_error,omitempty"`
 }
 
 type ACPSlotStatusInfo struct {

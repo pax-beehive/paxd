@@ -71,15 +71,19 @@ type RuntimeAgentConfig struct {
 
 // DaemonConfig controls daemon behaviour.
 type DaemonConfig struct {
-	StatusInterval    time.Duration `yaml:"status_interval"`    // status report interval (default 10s)
-	ReconcileInterval time.Duration `yaml:"reconcile_interval"` // orphan reconciliation interval (default 15s)
-	LogLevel          string        `yaml:"log_level"`          // debug, info, warn, error
-	LogFile           string        `yaml:"log_file"`           // rolling log path (default ~/.paxd/logs/paxd.log, empty keeps stderr only)
-	LogMaxSizeMB      int           `yaml:"log_max_size_mb"`    // rotate threshold in MB (default 20)
-	LogMaxBackups     int           `yaml:"log_max_backups"`    // rotated files to keep (default 3)
-	DBPath            string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
-	PollInterval      time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
-	SessionBatchSize  int           `yaml:"session_batch_size"` // max sessions per status report
+	StatusInterval               time.Duration `yaml:"status_interval"`    // status report interval (default 10s)
+	ReconcileInterval            time.Duration `yaml:"reconcile_interval"` // orphan reconciliation interval (default 15s)
+	LogLevel                     string        `yaml:"log_level"`          // debug, info, warn, error
+	LogFile                      string        `yaml:"log_file"`           // rolling log path (default ~/.paxd/logs/paxd.log, empty keeps stderr only)
+	LogMaxSizeMB                 int           `yaml:"log_max_size_mb"`    // rotate threshold in MB (default 20)
+	LogMaxBackups                int           `yaml:"log_max_backups"`    // rotated files to keep (default 3)
+	DBPath                       string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
+	PollInterval                 time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
+	SessionBatchSize             int           `yaml:"session_batch_size"` // max sessions per status report
+	TransportJournalGCInterval   time.Duration `yaml:"transport_journal_gc_interval"`
+	TransportJournalKeepAckedFor time.Duration `yaml:"transport_journal_keep_acked_for"`
+	TransportJournalKeepLatest   int           `yaml:"transport_journal_keep_latest"`
+	TransportJournalGCBatchSize  int           `yaml:"transport_journal_gc_batch_size"`
 }
 
 // ACPForwarderConfig controls the stateless ACP tunnel forwarder.
@@ -117,15 +121,19 @@ func DefaultConfig() Config {
 			APIEndpoint: "http://localhost:8642",
 		},
 		Daemon: DaemonConfig{
-			StatusInterval:    10 * time.Second,
-			ReconcileInterval: 15 * time.Second,
-			PollInterval:      5 * time.Second,
-			SessionBatchSize:  100,
-			LogLevel:          "info",
-			LogFile:           filepath.Join(home, ".paxd", "logs", "paxd.log"),
-			LogMaxSizeMB:      20,
-			LogMaxBackups:     3,
-			DBPath:            filepath.Join(home, ".paxd", "paxd.db"),
+			StatusInterval:               10 * time.Second,
+			ReconcileInterval:            15 * time.Second,
+			PollInterval:                 5 * time.Second,
+			SessionBatchSize:             100,
+			LogLevel:                     "info",
+			LogFile:                      filepath.Join(home, ".paxd", "logs", "paxd.log"),
+			LogMaxSizeMB:                 20,
+			LogMaxBackups:                3,
+			DBPath:                       filepath.Join(home, ".paxd", "paxd.db"),
+			TransportJournalGCInterval:   10 * time.Minute,
+			TransportJournalKeepAckedFor: 72 * time.Hour,
+			TransportJournalKeepLatest:   100,
+			TransportJournalGCBatchSize:  1000,
 		},
 		ACPForwarder: ACPForwarderConfig{
 			TunnelPath:        "/api/v1/agent/tunnel",
@@ -269,6 +277,10 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
 	setIntFromEnv(&cfg.Daemon.SessionBatchSize, "PAX_SESSION_REPORT_BATCH_SIZE")
+	setDurationFromEnv(&cfg.Daemon.TransportJournalGCInterval, "PAX_TRANSPORT_JOURNAL_GC_INTERVAL")
+	setDurationFromEnv(&cfg.Daemon.TransportJournalKeepAckedFor, "PAX_TRANSPORT_JOURNAL_KEEP_ACKED_FOR")
+	setIntFromEnv(&cfg.Daemon.TransportJournalKeepLatest, "PAX_TRANSPORT_JOURNAL_KEEP_LATEST")
+	setIntFromEnv(&cfg.Daemon.TransportJournalGCBatchSize, "PAX_TRANSPORT_JOURNAL_GC_BATCH_SIZE")
 	setBoolFromEnv(&cfg.ACPForwarder.Enabled, "PAX_ACP_FORWARD_ENABLED")
 	setStringFromEnv(&cfg.ACPForwarder.Harness, "PAX_ACP_HARNESS")
 	setStringSliceFromEnv(&cfg.ACPForwarder.Command, "PAX_ACP_COMMAND")

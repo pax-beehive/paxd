@@ -1,7 +1,7 @@
 # 会话路由与 Transport Journal 数据回收 — 设计草案
 
 日期：2026-07-19
-状态：设计文档，暂不实现
+状态：transport outbound ACK 回收已实现；session route 回收仍为设计
 
 ## 问题
 
@@ -16,6 +16,14 @@
 - 回收不破坏正确性：未 ack 的帧、可能被 resume 的会话路由不能删。
 
 ## 设计要点
+
+### Transport outbound retention BDD
+
+- Given ACK 正在高频推进，when ACK 落库，then ACK 热路径不执行删除。
+- Given ACKed 记录仍在最近 72 小时内，when GC 运行，then 记录保留。
+- Given ACKed 记录已超过 72 小时但位于每个 queue 最新 100 个 seq 内，when GC 运行，then 记录保留。
+- Given ACKed 记录同时超过时间窗口和 debug tail，when GC 运行，then 单次最多删除 1000 条。
+- Given daemon context 被取消，when transport DB 关闭，then GC 先停止，不再访问已关闭的 DB。
 
 ### acp_session_route 回收
 
@@ -39,9 +47,11 @@
 
 ```yaml
 daemon:
-  route_ttl: 720h        # acp_session_route TTL
-  journal_keep_frames: 1000
-  journal_keep_window: 24h
+  route_ttl: 720h                         # acp_session_route TTL（尚未实现）
+  transport_journal_gc_interval: 10m
+  transport_journal_keep_acked_for: 72h
+  transport_journal_keep_latest: 100
+  transport_journal_gc_batch_size: 1000
 ```
 
 ## 依赖与顺序

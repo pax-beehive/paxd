@@ -25,6 +25,8 @@ github.com/pax-beehive/paxkit v0.0.0-20260717085045-4e8e19d86be8 h1:6DtwmvUYThh8
 github.com/pax-beehive/paxkit v0.0.0-20260717085045-4e8e19d86be8/go.mod h1:0QcXIKVBmmTsmN7jAdVpbC22BIADCp6Q/790mEz/csw=
 github.com/pax-beehive/paxkit v0.0.0-20260717184231-fa74eb1f2cf5 h1:Zh8CPzS0NBISxPoZZ0nrikc7a2vVCjFeLEbI+62SFrQ=
 github.com/pax-beehive/paxkit v0.0.0-20260717184231-fa74eb1f2cf5/go.mod h1:0QcXIKVBmmTsmN7jAdVpbC22BIADCp6Q/790mEz/csw=
+github.com/pax-beehive/paxkit v0.0.0-20260721062139-134391c77515 h1:qQELjhnM0CgnohQhEdAKhHH2jbw7clptRiUyJSIPlJo=
+github.com/pax-beehive/paxkit v0.0.0-20260721062139-134391c77515/go.mod h1:0QcXIKVBmmTsmN7jAdVpbC22BIADCp6Q/790mEz/csw=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c h1:ncq/mPwQF4JjgDlrVEn3C11VoGHZN7m8qihwgMEtzYw=

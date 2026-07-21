@@ -176,3 +176,19 @@ func TestDefaultConfigLogSettings(t *testing.T) {
 		t.Fatalf("Daemon.LogMaxBackups = %d, want 3", cfg.Daemon.LogMaxBackups)
 	}
 }
+
+func TestDefaultConfigRetainsTransportDebugHistory(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Daemon.TransportJournalGCInterval != 10*time.Minute {
+		t.Fatalf("TransportJournalGCInterval = %s, want 10m", cfg.Daemon.TransportJournalGCInterval)
+	}
+	if cfg.Daemon.TransportJournalKeepAckedFor != 72*time.Hour {
+		t.Fatalf("TransportJournalKeepAckedFor = %s, want 72h", cfg.Daemon.TransportJournalKeepAckedFor)
+	}
+	if cfg.Daemon.TransportJournalKeepLatest != 100 {
+		t.Fatalf("TransportJournalKeepLatest = %d, want 100", cfg.Daemon.TransportJournalKeepLatest)
+	}
+	if cfg.Daemon.TransportJournalGCBatchSize != 1000 {
+		t.Fatalf("TransportJournalGCBatchSize = %d, want 1000", cfg.Daemon.TransportJournalGCBatchSize)
+	}
+}
