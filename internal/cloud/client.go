@@ -52,23 +52,24 @@ type AgentStatus struct {
 
 // SessionStatus describes one Hermes session.
 type SessionStatus struct {
-	SessionID      string           `json:"session_id"`
-	AgentType      string           `json:"agent_type,omitempty"`
-	NativeID       string           `json:"native_id,omitempty"`
-	Name           string           `json:"name,omitempty"`
-	ProjectID      string           `json:"project_id,omitempty"`
-	Preview        string           `json:"preview,omitempty"`
-	WorkspaceRoots []string         `json:"workspace_roots,omitempty"`
-	Source         string           `json:"source,omitempty"`
-	Status         string           `json:"status,omitempty"`
-	CurrentTask    string           `json:"current_task,omitempty"`
-	MessageCount   int              `json:"message_count,omitempty"`
-	TokenUsage     TokenUsage       `json:"token_usage,omitempty"`
-	Model          string           `json:"model,omitempty"`
-	RunID          string           `json:"run_id,omitempty"`
-	RunStatus      string           `json:"run_status,omitempty"`
-	LastMessageAt  string           `json:"last_message_at,omitempty"`
-	Messages       []SessionMessage `json:"messages,omitempty"`
+	SessionID         string           `json:"session_id"`
+	AgentType         string           `json:"agent_type,omitempty"`
+	NativeID          string           `json:"native_id,omitempty"`
+	Name              string           `json:"name,omitempty"`
+	ProjectID         string           `json:"project_id,omitempty"`
+	Preview           string           `json:"preview,omitempty"`
+	WorkspaceRoots    []string         `json:"workspace_roots,omitempty"`
+	Source            string           `json:"source,omitempty"`
+	Status            string           `json:"status,omitempty"`
+	CurrentTask       string           `json:"current_task,omitempty"`
+	MessageCount      int              `json:"message_count,omitempty"`
+	TokenUsage        TokenUsage       `json:"token_usage,omitempty"`
+	Model             string           `json:"model,omitempty"`
+	RunID             string           `json:"run_id,omitempty"`
+	RunStatus         string           `json:"run_status,omitempty"`
+	LastMessageAt     string           `json:"last_message_at,omitempty"`
+	LastUserMessageAt string           `json:"last_user_message_at,omitempty"`
+	Messages          []SessionMessage `json:"messages,omitempty"`
 }
 
 type SessionMessage struct {

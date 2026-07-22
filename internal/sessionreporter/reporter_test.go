@@ -50,6 +50,14 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 			SessionID:   "codex:sess_1",
 			Seq:         1,
 			Kind:        "message",
+			Role:        "user",
+			Text:        "fix the session ordering",
+			StartedAt:   "2026-06-28T11:59:58Z",
+			CompletedAt: "2026-06-28T11:59:59Z",
+		}, {
+			SessionID:   "codex:sess_1",
+			Seq:         2,
+			Kind:        "message",
 			Role:        "assistant",
 			Text:        "done",
 			CompletedAt: "2026-06-28T12:00:01Z",
@@ -80,8 +88,20 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
 	assert.Equal(t, "cli", reporter.calls[0].sessions[0].Source)
 	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
-	require.Len(t, reporter.calls[0].sessions[0].Messages, 1)
-	assert.Equal(t, "done", reporter.calls[0].sessions[0].Messages[0].Text)
+	assert.Equal(t, "2026-06-28T11:59:58Z", reporter.calls[0].sessions[0].LastUserMessageAt)
+	require.Len(t, reporter.calls[0].sessions[0].Messages, 2)
+	assert.Equal(t, "done", reporter.calls[0].sessions[0].Messages[1].Text)
+}
+
+func TestLatestUserMessageAtIgnoresAssistantAndUsesCompletedAtFallback(t *testing.T) {
+	messages := []model.SessionMessage{
+		{Role: "user", StartedAt: "2026-06-28T10:00:00Z"},
+		{Role: "assistant", CompletedAt: "2026-06-28T12:00:00Z"},
+		{Role: "user", CompletedAt: "2026-06-28T11:00:00Z"},
+		{Role: "user", StartedAt: "not-a-time"},
+	}
+
+	assert.Equal(t, "2026-06-28T11:00:00Z", latestUserMessageAt(messages))
 }
 
 func TestRunOnceBatchesDuplicateSessionsPerCloudAgent(t *testing.T) {

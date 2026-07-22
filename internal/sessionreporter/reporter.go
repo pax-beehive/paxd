@@ -3,6 +3,7 @@ package sessionreporter
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -271,22 +272,41 @@ func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cl
 		}
 		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
 		out = append(out, cloud.SessionStatus{
-			SessionID:      session.SessionID,
-			AgentType:      agentType,
-			NativeID:       firstNonEmpty(session.NativeID, session.SessionID),
-			Name:           sessionDisplayName(session),
-			ProjectID:      session.ProjectID,
-			Preview:        session.Preview,
-			WorkspaceRoots: append([]string(nil), session.WorkspaceRoots...),
-			Source:         session.Source,
-			Status:         session.Status,
-			CurrentTask:    session.CurrentTask,
-			TokenUsage:     cloud.TokenUsage{TotalTokens: session.TokenUsage},
-			LastMessageAt:  firstNonEmpty(session.UpdatedAt, session.LastActive),
-			Messages:       sessionMessages(session.Messages),
+			SessionID:         session.SessionID,
+			AgentType:         agentType,
+			NativeID:          firstNonEmpty(session.NativeID, session.SessionID),
+			Name:              sessionDisplayName(session),
+			ProjectID:         session.ProjectID,
+			Preview:           session.Preview,
+			WorkspaceRoots:    append([]string(nil), session.WorkspaceRoots...),
+			Source:            session.Source,
+			Status:            session.Status,
+			CurrentTask:       session.CurrentTask,
+			TokenUsage:        cloud.TokenUsage{TotalTokens: session.TokenUsage},
+			LastMessageAt:     firstNonEmpty(session.UpdatedAt, session.LastActive),
+			LastUserMessageAt: latestUserMessageAt(session.Messages),
+			Messages:          sessionMessages(session.Messages),
 		})
 	}
 	return out
+}
+
+func latestUserMessageAt(messages []model.SessionMessage) string {
+	latest := time.Time{}
+	latestValue := ""
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			continue
+		}
+		value := firstNonEmpty(message.StartedAt, message.CompletedAt)
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil || !parsed.After(latest) {
+			continue
+		}
+		latest = parsed
+		latestValue = value
+	}
+	return latestValue
 }
 
 type agentReportKey struct {
