@@ -92,8 +92,10 @@ type ACPRouter struct {
 	activeSessionTurns map[string]string
 	waiters            map[string]chan acpRPCWaitResult
 	slotReservations   map[string]int
+	lastPrompt         map[string]uint64
 	lastAssigned       map[string]uint64
 	drainingSlots      map[string]*slotDrain
+	promptSeq          uint64
 	assignmentSeq      uint64
 	resumeSeq          int64
 }
@@ -153,6 +155,7 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		activeSessionTurns: make(map[string]string),
 		waiters:            make(map[string]chan acpRPCWaitResult),
 		slotReservations:   make(map[string]int),
+		lastPrompt:         make(map[string]uint64),
 		lastAssigned:       make(map[string]uint64),
 		drainingSlots:      make(map[string]*slotDrain),
 	}
@@ -422,6 +425,9 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 		}
 		return err
 	}
+	if needsPromptLease {
+		r.recordPromptAccepted(slot.SlotID())
+	}
 	if reserved {
 		r.releaseSlotReservation(slot.SlotID())
 	}
@@ -655,6 +661,16 @@ func (r *ACPRouter) selectReadySlot(ctx context.Context) (ACPRouterSlot, error) 
 		return nil, ACPRouterError{Code: "slot_unavailable", Message: "no ready ACP slot"}
 	}
 	sort.Slice(slots, func(i, j int) bool {
+		busyI := r.activeSlotPrompts[slots[i].SlotID()] != ""
+		busyJ := r.activeSlotPrompts[slots[j].SlotID()] != ""
+		if busyI != busyJ {
+			return !busyI
+		}
+		promptI := r.lastPrompt[slots[i].SlotID()]
+		promptJ := r.lastPrompt[slots[j].SlotID()]
+		if promptI != promptJ {
+			return promptI < promptJ
+		}
 		countI := boundCounts[slots[i].SlotID()] + r.slotReservations[slots[i].SlotID()]
 		countJ := boundCounts[slots[j].SlotID()] + r.slotReservations[slots[j].SlotID()]
 		if countI != countJ {
@@ -672,6 +688,13 @@ func (r *ACPRouter) selectReadySlot(ctx context.Context) (ACPRouterSlot, error) 
 	r.assignmentSeq++
 	r.lastAssigned[selected.SlotID()] = r.assignmentSeq
 	return selected, nil
+}
+
+func (r *ACPRouter) recordPromptAccepted(slotID string) {
+	r.mu.Lock()
+	r.promptSeq++
+	r.lastPrompt[slotID] = r.promptSeq
+	r.mu.Unlock()
 }
 
 func (r *ACPRouter) releaseSlotReservation(slotID string) {
