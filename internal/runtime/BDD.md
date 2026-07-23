@@ -284,6 +284,15 @@ Then the route is persisted and bound to `(slot_id, process_epoch)`
 And the route preserves the lifecycle descriptor from the request
 And only then is the original response emitted toward the manager
 
+### Scenario: new sessions avoid the slot with the most recent user prompt
+
+Given multiple ready slots can accept a new session
+And their current prompt leases do not require choosing a busy slot
+When the router selects a slot for `session/new`
+Then a slot without an active prompt is preferred
+And the slot that least recently accepted `session/prompt` is preferred
+And bound session count and stable slot order break remaining ties
+
 ### Scenario: cold route resumes before prompt
 
 Given a native session route is cold

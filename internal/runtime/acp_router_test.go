@@ -101,6 +101,51 @@ func TestACPRouterDistributesNewSessionsAcrossReadySlotsAndKeepsRoutesSticky(t *
 	assert.JSONEq(t, `{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session_b","prompt":[]}}`, string(slotB.writes[1]))
 }
 
+func TestACPRouterAssignsNewSessionToSlotWithLeastRecentPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slotA)
+	router.UpsertSlot(slotB)
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work-a","mcpServers":[]}}`)))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_a"}}`)))
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/work-b","mcpServers":[]}}`)))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_b", "epoch_b", []byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session_b"}}`)))
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session_a","prompt":[]}}`)))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}`)))
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/work-c","mcpServers":[]}}`)))
+	require.Equal(t, 2, slotB.writeCount(), "slot without a recent prompt should receive the new session")
+	require.Equal(t, 2, slotA.writeCount())
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/work-c","mcpServers":[]}}`, string(slotB.writes[1]))
+}
+
+func TestACPRouterDoesNotAssignNewSessionToSlotWithActivePrompt(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slotA)
+	router.UpsertSlot(slotB)
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work-a","mcpServers":[]}}`)))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_a"}}`)))
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/work-b","mcpServers":[]}}`)))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_b", "epoch_b", []byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session_b"}}`)))
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session_a","prompt":[]}}`)))
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/work-c","mcpServers":[]}}`)))
+
+	require.Equal(t, 2, slotA.writeCount())
+	require.Equal(t, 2, slotB.writeCount(), "slot without an active prompt should receive the new session")
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/work-c","mcpServers":[]}}`, string(slotB.writes[1]))
+}
+
 func TestACPRouterResumesOnlySessionsBoundToRestartedSlot(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
