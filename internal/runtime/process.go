@@ -22,7 +22,12 @@ func (r ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProce
 	if len(spec.Command) == 0 {
 		return nil, exec.ErrNotFound
 	}
-	cmd := exec.CommandContext(ctx, spec.Command[0], spec.Command[1:]...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Terminate owns the process lifetime. CommandContext kills only the process
+	// leader on cancellation, which can orphan ACP server descendants.
+	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
 	prepareExecCommand(cmd)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = os.Environ()
@@ -91,6 +96,9 @@ func (p *execProcess) startWait() {
 	p.waitOnce.Do(func() {
 		go func() {
 			p.waitErr = p.cmd.Wait()
+			// The ACP leader can exit while descendants remain alive and keep
+			// resources such as inherited pipes open.
+			_ = killExecCommand(p.cmd)
 			close(p.waitDone)
 		}()
 	})
@@ -100,8 +108,14 @@ func (p *execProcess) Terminate(ctx context.Context) error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	_ = interruptExecCommand(p.cmd)
 	p.startWait()
+	select {
+	case <-p.waitDone:
+		return p.waitErr
+	default:
+	}
+
+	_ = interruptExecCommand(p.cmd)
 
 	graceCtx, cancel := context.WithTimeout(ctx, p.terminateGracePeriod)
 	defer cancel()

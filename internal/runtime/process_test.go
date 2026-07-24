@@ -79,3 +79,13 @@ func TestExecProcessWaitIsConcurrentAndIdempotent(t *testing.T) {
 	require.ErrorAs(t, proc.Wait(), &exitErr)
 	assert.Equal(t, 7, exitErr.ExitCode())
 }
+
+func TestExecLocalACPProcessRunnerRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ExecLocalACPProcessRunner{}.Start(ctx, LocalACPProcessSpec{
+		Command: []string{"/bin/sh", "-c", "exit 0"},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
