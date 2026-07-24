@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,4 +49,43 @@ func TestExecProcessTerminateStopsRunningProcess(t *testing.T) {
 	err = proc.Terminate(ctx)
 	assert.NoError(t, ctx.Err())
 	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestExecProcessWaitIsConcurrentAndIdempotent(t *testing.T) {
+	proc, err := ExecLocalACPProcessRunner{}.Start(context.Background(), LocalACPProcessSpec{
+		Command: []string{"/bin/sh", "-c", "exit 7"},
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- proc.Wait()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for waitErr := range errs {
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, waitErr, &exitErr)
+		assert.Equal(t, 7, exitErr.ExitCode())
+	}
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, proc.Wait(), &exitErr)
+	assert.Equal(t, 7, exitErr.ExitCode())
+}
+
+func TestExecLocalACPProcessRunnerRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ExecLocalACPProcessRunner{}.Start(ctx, LocalACPProcessSpec{
+		Command: []string{"/bin/sh", "-c", "exit 0"},
+	})
+	require.ErrorIs(t, err, context.Canceled)
 }

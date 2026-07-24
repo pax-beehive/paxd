@@ -5,15 +5,30 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
+	"time"
 )
 
-type ExecLocalACPProcessRunner struct{}
+const (
+	defaultExecTerminateGracePeriod = 5 * time.Second
+	execTerminateReapTimeout        = 2 * time.Second
+)
 
-func (ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProcessSpec) (LocalACPProcess, error) {
+type ExecLocalACPProcessRunner struct {
+	TerminateGracePeriod time.Duration
+}
+
+func (r ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProcessSpec) (LocalACPProcess, error) {
 	if len(spec.Command) == 0 {
 		return nil, exec.ErrNotFound
 	}
-	cmd := exec.CommandContext(ctx, spec.Command[0], spec.Command[1:]...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Terminate owns the process lifetime. CommandContext kills only the process
+	// leader on cancellation, which can orphan ACP server descendants.
+	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
+	prepareExecCommand(cmd)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = os.Environ()
 	for key, value := range spec.Env {
@@ -34,14 +49,29 @@ func (ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProcess
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return &execProcess{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}, nil
+	gracePeriod := r.TerminateGracePeriod
+	if gracePeriod <= 0 {
+		gracePeriod = defaultExecTerminateGracePeriod
+	}
+	return &execProcess{
+		cmd:                  cmd,
+		stdin:                stdin,
+		stdout:               stdout,
+		stderr:               stderr,
+		terminateGracePeriod: gracePeriod,
+		waitDone:             make(chan struct{}),
+	}, nil
 }
 
 type execProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.Reader
-	stderr io.Reader
+	cmd                  *exec.Cmd
+	stdin                io.WriteCloser
+	stdout               io.Reader
+	stderr               io.Reader
+	terminateGracePeriod time.Duration
+	waitOnce             sync.Once
+	waitDone             chan struct{}
+	waitErr              error
 }
 
 func (p *execProcess) Stdin() io.WriteCloser {
@@ -57,21 +87,51 @@ func (p *execProcess) Stderr() io.Reader {
 }
 
 func (p *execProcess) Wait() error {
-	return p.cmd.Wait()
+	p.startWait()
+	<-p.waitDone
+	return p.waitErr
+}
+
+func (p *execProcess) startWait() {
+	p.waitOnce.Do(func() {
+		go func() {
+			p.waitErr = p.cmd.Wait()
+			// The ACP leader can exit while descendants remain alive and keep
+			// resources such as inherited pipes open.
+			_ = killExecCommand(p.cmd)
+			close(p.waitDone)
+		}()
+	})
 }
 
 func (p *execProcess) Terminate(ctx context.Context) error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	_ = p.cmd.Process.Signal(execInterruptSignal())
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
+	p.startWait()
 	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		_ = p.cmd.Process.Kill()
-		return ctx.Err()
+	case <-p.waitDone:
+		return p.waitErr
+	default:
+	}
+
+	_ = interruptExecCommand(p.cmd)
+
+	graceCtx, cancel := context.WithTimeout(ctx, p.terminateGracePeriod)
+	defer cancel()
+	select {
+	case <-p.waitDone:
+		return p.waitErr
+	case <-graceCtx.Done():
+	}
+
+	_ = killExecCommand(p.cmd)
+	reapTimer := time.NewTimer(execTerminateReapTimeout)
+	defer reapTimer.Stop()
+	select {
+	case <-p.waitDone:
+		return nil
+	case <-reapTimer.C:
+		return graceCtx.Err()
 	}
 }
