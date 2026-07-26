@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/artifactpublisher"
 	"github.com/pax-beehive/paxd/internal/attachmentlocalizer"
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/config"
@@ -93,6 +94,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		RootDir: cfg.Daemon.AttachmentDir,
 		OnState: attachmentStates.Publish,
 	})
+	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
+		Store:   store,
+		RootDir: cfg.Daemon.ArtifactSpoolDir,
+	})
 	supervisors := &runtimeSupervisors{
 		statusHub:            newStatusHub(),
 		attachmentStates:     attachmentStates,
@@ -131,9 +136,12 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		})
 	}
 	return &Runtime{
-		Store:          store,
-		Control:        service,
-		LocalHandler:   localapi.NewHandler(service),
+		Store:   store,
+		Control: service,
+		LocalHandler: localapi.NewHandler(artifactControlService{
+			Service:      service,
+			publications: artifactPublications,
+		}),
 		supervisors:    supervisors,
 		harnesses:      harnesses,
 		hostMetrics:    metricsStarter,

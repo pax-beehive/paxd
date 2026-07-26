@@ -37,6 +37,7 @@ func TestMigrateCreatesTargetTablesAndIsIdempotent(t *testing.T) {
 		"messages",
 		"message_parts",
 		"setting",
+		"artifact_publish_jobs",
 	} {
 		if !store.DB().Migrator().HasTable(table) {
 			t.Fatalf("missing migrated table %q", table)

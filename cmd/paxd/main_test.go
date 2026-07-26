@@ -361,7 +361,7 @@ func TestMCPConversationReplyRequiresSessionEnv(t *testing.T) {
 	assert.Contains(t, err.Error(), "PAX_SESSION_ID")
 }
 
-func TestMCPConversationServeGivenToolsListWhenCalledThenReturnsAskAndReplyTools(t *testing.T) {
+func TestMCPConversationServeGivenToolsListWhenCalledThenReturnsConversationAndArtifactTools(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
@@ -376,9 +376,49 @@ func TestMCPConversationServeGivenToolsListWhenCalledThenReturnsAskAndReplyTools
 	require.Len(t, responses, 2)
 	assert.Equal(t, "pax-conversation", responses[0]["result"].(map[string]any)["serverInfo"].(map[string]any)["name"])
 	tools := responses[1]["result"].(map[string]any)["tools"].([]any)
-	require.Len(t, tools, 2)
+	require.Len(t, tools, 3)
 	assert.Equal(t, "ask", tools[0].(map[string]any)["name"])
 	assert.Equal(t, "reply", tools[1].(map[string]any)["name"])
+	artifactTool := tools[2].(map[string]any)
+	assert.Equal(t, "publish_artifact", artifactTool["name"])
+	schema := artifactTool["inputSchema"].(map[string]any)
+	assert.Equal(t, []any{"path"}, schema["required"])
+}
+
+func TestMCPConversationServeGivenPublishArtifactWhenDaemonAcceptsThenReturnsPublicationMarker(t *testing.T) {
+	t.Setenv("PAX_AGENT_ID", "agent_runtime_1")
+	t.Setenv("PAX_SESSION_ID", "sess_1")
+	previous := publishArtifactThroughDaemon
+	t.Cleanup(func() { publishArtifactThroughDaemon = previous })
+	publishArtifactThroughDaemon = func(
+		_ context.Context,
+		req control.PublishArtifactRequest,
+	) (control.ArtifactPublication, error) {
+		assert.Equal(t, "agent_runtime_1", req.AgentID)
+		assert.Equal(t, "sess_1", req.SessionID)
+		assert.Equal(t, "/workspace/report.pdf", req.SourcePath)
+		assert.Equal(t, "Analysis report", req.Title)
+		return control.ArtifactPublication{
+			PublicationID: "apub_1",
+			Status:        "accepted",
+		}, nil
+	}
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"publish_artifact","arguments":{"path":"/workspace/report.pdf","title":"Analysis report"}}}`
+	var output bytes.Buffer
+
+	err := serveConversationMCP(context.Background(), strings.NewReader(input), &output)
+
+	require.NoError(t, err)
+	responses := decodeMCPResponses(t, output.String())
+	require.Len(t, responses, 1)
+	result := responses[0]["result"].(map[string]any)
+	assert.Nil(t, result["isError"])
+	content := result["content"].([]any)
+	assert.JSONEq(
+		t,
+		`{"accepted":true,"pax_artifact_publication":{"publication_id":"apub_1"}}`,
+		content[0].(map[string]any)["text"].(string),
+	)
 }
 
 func TestMCPConversationServeGivenAskToolCallWhenCalledThenPostsRepresentativeDelivery(t *testing.T) {

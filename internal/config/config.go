@@ -79,6 +79,7 @@ type DaemonConfig struct {
 	LogMaxBackups                int           `yaml:"log_max_backups"`    // rotated files to keep (default 3)
 	DBPath                       string        `yaml:"db_path"`            // SQLite path (default ~/.paxd/paxd.db)
 	AttachmentDir                string        `yaml:"attachment_dir"`     // localized user attachments (default ~/.paxd/attachments)
+	ArtifactSpoolDir             string        `yaml:"artifact_spool_dir"` // agent artifact snapshots (default ~/.paxd/artifact-spool)
 	PollInterval                 time.Duration `yaml:"poll_interval"`      // DEPRECATED: kept for config compat
 	SessionBatchSize             int           `yaml:"session_batch_size"` // max sessions per status report
 	TransportJournalGCInterval   time.Duration `yaml:"transport_journal_gc_interval"`
@@ -132,6 +133,7 @@ func DefaultConfig() Config {
 			LogMaxBackups:                3,
 			DBPath:                       filepath.Join(home, ".paxd", "paxd.db"),
 			AttachmentDir:                filepath.Join(home, ".paxd", "attachments"),
+			ArtifactSpoolDir:             filepath.Join(home, ".paxd", "artifact-spool"),
 			TransportJournalGCInterval:   10 * time.Minute,
 			TransportJournalKeepAckedFor: 72 * time.Hour,
 			TransportJournalKeepLatest:   100,
@@ -183,6 +185,7 @@ func Load(path string) (*Config, error) {
 			}
 			cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
 			cfg.Daemon.AttachmentDir = expandHome(cfg.Daemon.AttachmentDir)
+			cfg.Daemon.ArtifactSpoolDir = expandHome(cfg.Daemon.ArtifactSpoolDir)
 			cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
 			cfg.ACPForwarder.WorkingDir = expandHome(cfg.ACPForwarder.WorkingDir)
 			return &cfg, nil // use defaults if no config file
@@ -207,6 +210,7 @@ func Load(path string) (*Config, error) {
 	// Resolve ~ in db_path
 	cfg.Daemon.DBPath = expandHome(cfg.Daemon.DBPath)
 	cfg.Daemon.AttachmentDir = expandHome(cfg.Daemon.AttachmentDir)
+	cfg.Daemon.ArtifactSpoolDir = expandHome(cfg.Daemon.ArtifactSpoolDir)
 	cfg.Hermes.APIKeyEnv = expandHome(cfg.Hermes.APIKeyEnv)
 	cfg.ACPForwarder.WorkingDir = expandHome(cfg.ACPForwarder.WorkingDir)
 	for i := range cfg.Agents {
@@ -281,6 +285,7 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Hermes.Profile, "HERMES_PROFILE")
 	setStringFromEnv(&cfg.Daemon.DBPath, "PAXD_DB_PATH")
 	setStringFromEnv(&cfg.Daemon.AttachmentDir, "PAXD_ATTACHMENT_DIR")
+	setStringFromEnv(&cfg.Daemon.ArtifactSpoolDir, "PAXD_ARTIFACT_SPOOL_DIR")
 	setIntFromEnv(&cfg.Daemon.SessionBatchSize, "PAX_SESSION_REPORT_BATCH_SIZE")
 	setDurationFromEnv(&cfg.Daemon.TransportJournalGCInterval, "PAX_TRANSPORT_JOURNAL_GC_INTERVAL")
 	setDurationFromEnv(&cfg.Daemon.TransportJournalKeepAckedFor, "PAX_TRANSPORT_JOURNAL_KEEP_ACKED_FOR")
