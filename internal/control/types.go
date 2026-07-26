@@ -65,6 +65,7 @@ const (
 	CommandAgentConnectionDelete  CommandType = "agent_connection.delete"
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
+	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
 )
 
 type CommandStatus string
@@ -94,7 +95,57 @@ type Command struct {
 	DeleteAgentConnection  *DeleteAgentConnectionCommand  `json:"delete_agent_connection,omitempty"`
 	RestartAgentConnection *RestartAgentConnectionCommand `json:"restart_agent_connection,omitempty"`
 
-	UpgradePaxd *UpgradePaxdCommand `json:"upgrade_paxd,omitempty"`
+	UpgradePaxd           *UpgradePaxdCommand           `json:"upgrade_paxd,omitempty"`
+	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
+}
+
+type AttachmentDescriptor struct {
+	AttachmentID string `json:"attachment_id"`
+	Filename     string `json:"filename"`
+	ContentType  string `json:"content_type,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	Generation   int64  `json:"generation,omitempty"`
+}
+
+type AttachmentDownloadTicket struct {
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	ExpiresAt string            `json:"expires_at,omitempty"`
+}
+
+type EnsureAttachmentLocalCommand struct {
+	Attachment AttachmentDescriptor     `json:"attachment"`
+	Download   AttachmentDownloadTicket `json:"download"`
+}
+
+type AttachmentLocalStateValue string
+
+const (
+	AttachmentLocalUnknown     AttachmentLocalStateValue = "unknown"
+	AttachmentLocalQueued      AttachmentLocalStateValue = "queued"
+	AttachmentLocalDownloading AttachmentLocalStateValue = "downloading"
+	AttachmentLocalVerifying   AttachmentLocalStateValue = "verifying"
+	AttachmentLocalReady       AttachmentLocalStateValue = "ready"
+	AttachmentLocalFailed      AttachmentLocalStateValue = "failed"
+	AttachmentLocalPaused      AttachmentLocalStateValue = "paused"
+)
+
+type AttachmentLocalState struct {
+	AttachmentID    string                    `json:"attachment_id"`
+	State           AttachmentLocalStateValue `json:"state"`
+	BytesDownloaded int64                     `json:"bytes_downloaded,omitempty"`
+	TotalBytes      int64                     `json:"total_bytes,omitempty"`
+	SizeBytes       int64                     `json:"size_bytes,omitempty"`
+	LocalURI        string                    `json:"local_uri,omitempty"`
+	SHA256          string                    `json:"sha256,omitempty"`
+	ErrorCode       string                    `json:"error_code,omitempty"`
+	ErrorMessage    string                    `json:"error_message,omitempty"`
+}
+
+type AttachmentLocalizer interface {
+	Ensure(ctx context.Context, command EnsureAttachmentLocalCommand) error
+	Status(ctx context.Context, attachmentIDs []string) ([]AttachmentLocalState, error)
 }
 
 type Remote struct {
@@ -240,8 +291,9 @@ type CommandResult struct {
 type ReportType string
 
 const (
-	ReportHeartbeat       ReportType = "heartbeat"
-	ReportRuntimeSnapshot ReportType = "runtime.snapshot"
+	ReportHeartbeat            ReportType = "heartbeat"
+	ReportRuntimeSnapshot      ReportType = "runtime.snapshot"
+	ReportAttachmentLocalState ReportType = "attachment.local_state"
 )
 
 type Report struct {
@@ -250,8 +302,9 @@ type Report struct {
 	NodeID   string     `json:"node_id,omitempty"`
 	SentAt   string     `json:"sent_at"`
 
-	Heartbeat       *HeartbeatReport       `json:"heartbeat,omitempty"`
-	RuntimeSnapshot *RuntimeSnapshotReport `json:"runtime_snapshot,omitempty"`
+	Heartbeat            *HeartbeatReport       `json:"heartbeat,omitempty"`
+	RuntimeSnapshot      *RuntimeSnapshotReport `json:"runtime_snapshot,omitempty"`
+	AttachmentLocalState *AttachmentLocalState  `json:"attachment_local_state,omitempty"`
 }
 
 type HeartbeatReport struct{}
@@ -310,37 +363,43 @@ type ACPPoolCapabilityReport struct {
 type QueryType string
 
 const (
-	QueryStatusGet            QueryType = "status.get"
-	QueryDiagnosticsGet       QueryType = "diagnostics.get"
-	QueryRemotesList          QueryType = "remotes.list"
-	QueryRemoteGet            QueryType = "remote.get"
-	QueryAgentConnectionsList QueryType = "agent_connections.list"
-	QueryAgentConnectionGet   QueryType = "agent_connection.get"
-	QueryHarnessesList        QueryType = "harnesses.list"
-	QueryHarnessesDiscover    QueryType = "harnesses.discover"
-	QueryLocalOverviewGet     QueryType = "local_overview.get"
-	QueryLocalSessionsList    QueryType = "local_sessions.list"
-	QueryLocalSessionsSync    QueryType = "local_sessions.sync"
-	QueryLocalSessionGet      QueryType = "local_session.get"
-	QueryCommandGet           QueryType = "command.get"
+	QueryStatusGet             QueryType = "status.get"
+	QueryDiagnosticsGet        QueryType = "diagnostics.get"
+	QueryRemotesList           QueryType = "remotes.list"
+	QueryRemoteGet             QueryType = "remote.get"
+	QueryAgentConnectionsList  QueryType = "agent_connections.list"
+	QueryAgentConnectionGet    QueryType = "agent_connection.get"
+	QueryHarnessesList         QueryType = "harnesses.list"
+	QueryHarnessesDiscover     QueryType = "harnesses.discover"
+	QueryLocalOverviewGet      QueryType = "local_overview.get"
+	QueryLocalSessionsList     QueryType = "local_sessions.list"
+	QueryLocalSessionsSync     QueryType = "local_sessions.sync"
+	QueryLocalSessionGet       QueryType = "local_session.get"
+	QueryCommandGet            QueryType = "command.get"
+	QueryAttachmentLocalStatus QueryType = "attachment.local_status"
 )
 
 type Query struct {
 	Type QueryType `json:"type"`
 
-	GetStatus            *GetStatusQuery            `json:"get_status,omitempty"`
-	GetDiagnostics       *GetDiagnosticsQuery       `json:"get_diagnostics,omitempty"`
-	ListRemotes          *ListRemotesQuery          `json:"list_remotes,omitempty"`
-	GetRemote            *GetRemoteQuery            `json:"get_remote,omitempty"`
-	ListAgentConnections *ListAgentConnectionsQuery `json:"list_agent_connections,omitempty"`
-	GetAgentConnection   *GetAgentConnectionQuery   `json:"get_agent_connection,omitempty"`
-	ListHarnesses        *ListHarnessesQuery        `json:"list_harnesses,omitempty"`
-	DiscoverHarnesses    *DiscoverHarnessesQuery    `json:"discover_harnesses,omitempty"`
-	GetLocalOverview     *GetLocalOverviewQuery     `json:"get_local_overview,omitempty"`
-	ListLocalSessions    *ListLocalSessionsQuery    `json:"list_local_sessions,omitempty"`
-	SyncLocalSessions    *SyncLocalSessionsQuery    `json:"sync_local_sessions,omitempty"`
-	GetLocalSession      *GetLocalSessionQuery      `json:"get_local_session,omitempty"`
-	GetCommand           *GetCommandQuery           `json:"get_command,omitempty"`
+	GetStatus                *GetStatusQuery                `json:"get_status,omitempty"`
+	GetDiagnostics           *GetDiagnosticsQuery           `json:"get_diagnostics,omitempty"`
+	ListRemotes              *ListRemotesQuery              `json:"list_remotes,omitempty"`
+	GetRemote                *GetRemoteQuery                `json:"get_remote,omitempty"`
+	ListAgentConnections     *ListAgentConnectionsQuery     `json:"list_agent_connections,omitempty"`
+	GetAgentConnection       *GetAgentConnectionQuery       `json:"get_agent_connection,omitempty"`
+	ListHarnesses            *ListHarnessesQuery            `json:"list_harnesses,omitempty"`
+	DiscoverHarnesses        *DiscoverHarnessesQuery        `json:"discover_harnesses,omitempty"`
+	GetLocalOverview         *GetLocalOverviewQuery         `json:"get_local_overview,omitempty"`
+	ListLocalSessions        *ListLocalSessionsQuery        `json:"list_local_sessions,omitempty"`
+	SyncLocalSessions        *SyncLocalSessionsQuery        `json:"sync_local_sessions,omitempty"`
+	GetLocalSession          *GetLocalSessionQuery          `json:"get_local_session,omitempty"`
+	GetCommand               *GetCommandQuery               `json:"get_command,omitempty"`
+	GetAttachmentLocalStatus *GetAttachmentLocalStatusQuery `json:"get_attachment_local_status,omitempty"`
+}
+
+type GetAttachmentLocalStatusQuery struct {
+	AttachmentIDs []string `json:"attachment_ids"`
 }
 
 type GetStatusQuery struct{}
@@ -468,18 +527,23 @@ type QueryResult struct {
 	Type  QueryType     `json:"type"`
 	Error *ControlError `json:"error,omitempty"`
 
-	Status           *DaemonStatus               `json:"status,omitempty"`
-	Diagnostics      *DiagnosticsView            `json:"diagnostics,omitempty"`
-	Remotes          *ListRemotesResult          `json:"remotes,omitempty"`
-	Remote           *RemoteView                 `json:"remote,omitempty"`
-	AgentConnections *ListAgentConnectionsResult `json:"agent_connections,omitempty"`
-	AgentConnection  *AgentConnectionView        `json:"agent_connection,omitempty"`
-	Harnesses        *ListHarnessesResult        `json:"harnesses,omitempty"`
-	LocalOverview    *LocalOverview              `json:"local_overview,omitempty"`
-	LocalSessions    *ListLocalSessionsResult    `json:"local_sessions,omitempty"`
-	LocalSession     *LocalSessionView           `json:"local_session,omitempty"`
-	LocalSessionSync *LocalSessionSyncResult     `json:"local_session_sync,omitempty"`
-	Command          *CommandView                `json:"command,omitempty"`
+	Status                *DaemonStatus                `json:"status,omitempty"`
+	Diagnostics           *DiagnosticsView             `json:"diagnostics,omitempty"`
+	Remotes               *ListRemotesResult           `json:"remotes,omitempty"`
+	Remote                *RemoteView                  `json:"remote,omitempty"`
+	AgentConnections      *ListAgentConnectionsResult  `json:"agent_connections,omitempty"`
+	AgentConnection       *AgentConnectionView         `json:"agent_connection,omitempty"`
+	Harnesses             *ListHarnessesResult         `json:"harnesses,omitempty"`
+	LocalOverview         *LocalOverview               `json:"local_overview,omitempty"`
+	LocalSessions         *ListLocalSessionsResult     `json:"local_sessions,omitempty"`
+	LocalSession          *LocalSessionView            `json:"local_session,omitempty"`
+	LocalSessionSync      *LocalSessionSyncResult      `json:"local_session_sync,omitempty"`
+	Command               *CommandView                 `json:"command,omitempty"`
+	AttachmentLocalStatus *AttachmentLocalStatusResult `json:"attachment_local_status,omitempty"`
+}
+
+type AttachmentLocalStatusResult struct {
+	Items []AttachmentLocalState `json:"items"`
 }
 
 type ListRemotesResult struct {

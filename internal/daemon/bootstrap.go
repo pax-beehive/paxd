@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/attachmentlocalizer"
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
@@ -86,8 +87,15 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		metrics = sampler
 		metricsStarter = sampler
 	}
+	attachmentStates := newAttachmentStateHub()
+	attachments := attachmentlocalizer.New(attachmentlocalizer.Options{
+		Context: ctx,
+		RootDir: cfg.Daemon.AttachmentDir,
+		OnState: attachmentStates.Publish,
+	})
 	supervisors := &runtimeSupervisors{
 		statusHub:            newStatusHub(),
+		attachmentStates:     attachmentStates,
 		paxdVersion:          opts.PaxdVersion,
 		acpCapabilityReports: newACPCapabilityReports(),
 		startedAt:            time.Now().UTC(),
@@ -108,6 +116,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		HostMetrics:         metrics,
 		ACPPoolCapabilities: supervisors.acpCapabilityReports,
 		Diagnostics:         supervisors,
+		Attachments:         attachments,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)

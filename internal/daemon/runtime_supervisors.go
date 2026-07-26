@@ -31,6 +31,7 @@ type runtimeSupervisors struct {
 	acpSlots             supervisor.Supervisor
 	agentRuntimeSource   *supervisor.AgentConnectionSupervisor
 	statusHub            *statusHub
+	attachmentStates     *attachmentStateHub
 	paxdVersion          string
 	acpCapabilityReports *acpCapabilityReports
 	transportDB          *sql.DB
@@ -127,6 +128,9 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	}
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
+	}
+	if s.attachmentStates != nil {
+		runner.Reports.AttachmentSubscribe = s.attachmentStates.Subscribe
 	}
 	acpPoolRegistry := runtimes.NewACPPoolRegistry(runtimes.ACPRouteStoreFactoryFunc(func(connectionID string) runtimes.ACPRouteStore {
 		return acpRouteStoreAdapter{store: store}
