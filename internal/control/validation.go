@@ -1,6 +1,9 @@
 package control
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 const (
 	ErrCodeInvalidArgument = "invalid_argument"
@@ -73,6 +76,7 @@ func (cmd Command) Validate() error {
 		{CommandAgentConnectionDelete, cmd.DeleteAgentConnection != nil, validatePtr(cmd.DeleteAgentConnection)},
 		{CommandAgentConnectionRestart, cmd.RestartAgentConnection != nil, validatePtr(cmd.RestartAgentConnection)},
 		{CommandUpgradePaxd, cmd.UpgradePaxd != nil, validatePtr(cmd.UpgradePaxd)},
+		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
 	}
 
 	count := 0
@@ -268,6 +272,24 @@ func (cmd UpgradePaxdCommand) Validate() error {
 	return nil
 }
 
+func (cmd EnsureAttachmentLocalCommand) Validate() error {
+	if strings.TrimSpace(cmd.Attachment.AttachmentID) == "" {
+		return invalid("ensure_attachment_local.attachment.attachment_id", "attachment id is required")
+	}
+	filename := strings.TrimSpace(cmd.Attachment.Filename)
+	if filename == "" || filename == "." || filename == ".." ||
+		filepath.Base(filename) != filename {
+		return invalid("ensure_attachment_local.attachment.filename", "filename is required")
+	}
+	if cmd.Attachment.SizeBytes < 0 {
+		return invalid("ensure_attachment_local.attachment.size_bytes", "size cannot be negative")
+	}
+	if strings.TrimSpace(cmd.Download.URL) == "" {
+		return invalid("ensure_attachment_local.download.url", "download url is required")
+	}
+	return nil
+}
+
 func (query Query) Validate() error {
 	if query.Type == "" {
 		return invalid("type", "query type is required")
@@ -290,6 +312,7 @@ func (query Query) Validate() error {
 		{QueryLocalSessionsSync, query.SyncLocalSessions != nil, validatePtr(query.SyncLocalSessions)},
 		{QueryLocalSessionGet, query.GetLocalSession != nil, validatePtr(query.GetLocalSession)},
 		{QueryCommandGet, query.GetCommand != nil, validatePtr(query.GetCommand)},
+		{QueryAttachmentLocalStatus, query.GetAttachmentLocalStatus != nil, validatePtr(query.GetAttachmentLocalStatus)},
 	}
 
 	count := 0
@@ -403,6 +426,18 @@ func (query GetCommandQuery) Validate() error {
 	return nil
 }
 
+func (query GetAttachmentLocalStatusQuery) Validate() error {
+	if len(query.AttachmentIDs) == 0 {
+		return invalid("get_attachment_local_status.attachment_ids", "at least one attachment id is required")
+	}
+	for _, id := range query.AttachmentIDs {
+		if strings.TrimSpace(id) == "" {
+			return invalid("get_attachment_local_status.attachment_ids", "attachment id cannot be empty")
+		}
+	}
+	return nil
+}
+
 type validatable interface {
 	Validate() error
 }
@@ -444,7 +479,8 @@ func knownCommandType(typ CommandType) bool {
 		CommandAgentConnectionUpdate,
 		CommandAgentConnectionDelete,
 		CommandAgentConnectionRestart,
-		CommandUpgradePaxd:
+		CommandUpgradePaxd,
+		CommandAttachmentEnsureLocal:
 		return true
 	default:
 		return false
@@ -465,7 +501,8 @@ func knownQueryType(typ QueryType) bool {
 		QueryLocalSessionsList,
 		QueryLocalSessionsSync,
 		QueryLocalSessionGet,
-		QueryCommandGet:
+		QueryCommandGet,
+		QueryAttachmentLocalStatus:
 		return true
 	default:
 		return false

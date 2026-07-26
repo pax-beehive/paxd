@@ -93,6 +93,7 @@ type ServiceOptions struct {
 	HostMetrics         HostMetricsProvider
 	ACPPoolCapabilities ACPPoolCapabilitySource
 	Diagnostics         DiagnosticsProvider
+	Attachments         AttachmentLocalizer
 }
 
 type ControlService struct {
@@ -103,6 +104,7 @@ type ControlService struct {
 	hostMetrics         HostMetricsProvider
 	acpPoolCapabilities ACPPoolCapabilitySource
 	diagnostics         DiagnosticsProvider
+	attachments         AttachmentLocalizer
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -114,6 +116,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		hostMetrics:         opts.HostMetrics,
 		acpPoolCapabilities: opts.ACPPoolCapabilities,
 		diagnostics:         opts.Diagnostics,
+		attachments:         opts.Attachments,
 	}
 }
 
@@ -251,6 +254,12 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	case QueryCommandGet:
 		cmd, err := s.store.GetCommand(ctx, query.GetCommand.CommandID)
 		return QueryResult{Type: query.Type, Command: cmd, Error: errorPtr(err)}, nil
+	case QueryAttachmentLocalStatus:
+		if s.attachments == nil {
+			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "attachment localizer is not configured"})}, nil
+		}
+		items, err := s.attachments.Status(ctx, query.GetAttachmentLocalStatus.AttachmentIDs)
+		return QueryResult{Type: query.Type, AttachmentLocalStatus: &AttachmentLocalStatusResult{Items: items}, Error: errorPtr(err)}, nil
 	default:
 		return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "unsupported query type"})}, nil
 	}
@@ -290,6 +299,14 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Comma
 		return receivedAgentConnectionAck(cmd.CommandID, view), false, true, err
 	case CommandUpgradePaxd:
 		return CommandAck{}, false, false, ErrNotFound
+	case CommandAttachmentEnsureLocal:
+		if s.attachments == nil {
+			return CommandAck{}, false, false, errors.New("attachment localizer is not configured")
+		}
+		if err := s.attachments.Ensure(ctx, *cmd.EnsureAttachmentLocal); err != nil {
+			return CommandAck{}, false, false, err
+		}
+		return receivedAck(cmd.CommandID, "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID), false, false, nil
 	default:
 		return CommandAck{}, false, false, fmt.Errorf("unsupported command type %q", cmd.Type)
 	}
@@ -523,6 +540,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.DeleteAgentConnection.ConnectionID
 	case CommandAgentConnectionRestart:
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
+	case CommandAttachmentEnsureLocal:
+		return "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID
 	default:
 		return "", ""
 	}

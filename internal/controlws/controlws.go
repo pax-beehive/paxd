@@ -78,6 +78,7 @@ type ReportOptions struct {
 	Now                 func() time.Time
 	NewID               func(prefix string) string
 	StatusSubscribe     func(remoteID string) (<-chan struct{}, func())
+	AttachmentSubscribe func(remoteID string) (<-chan control.AttachmentLocalState, func())
 	PokeDebounce        time.Duration
 }
 
@@ -136,7 +137,7 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 }
 
 func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
-	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil {
+	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil {
 		return
 	}
 	now := opts.Now
@@ -172,6 +173,38 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 				}
 			}
 		}()
+	}
+	if opts.AttachmentSubscribe != nil {
+		states, unsubscribe := opts.AttachmentSubscribe(remoteID)
+		if states != nil {
+			go func() {
+				if unsubscribe != nil {
+					defer unsubscribe()
+				}
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case state, ok := <-states:
+						if !ok {
+							return
+						}
+						stateCopy := state
+						frame := reportFrame(newID("rpt"), control.Report{
+							Type:                 control.ReportAttachmentLocalState,
+							RemoteID:             remoteID,
+							NodeID:               nodeID,
+							SentAt:               now().UTC().Format(time.RFC3339Nano),
+							AttachmentLocalState: &stateCopy,
+						})
+						if err := writer.write(frame); err != nil {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+		}
 	}
 	reporter, ok := service.(control.ReportService)
 	if !ok {

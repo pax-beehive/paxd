@@ -448,6 +448,47 @@ func TestStatusPokeSendsDebouncedRuntimeSnapshot(t *testing.T) {
 	assert.Equal(t, "snap_poke", got.Report.RuntimeSnapshot.SnapshotID)
 }
 
+func TestAttachmentStatePushSendsReport(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	states := make(chan control.AttachmentLocalState, 1)
+	service := &reportingService{}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			AttachmentSubscribe: func(remoteID string) (<-chan control.AttachmentLocalState, func()) {
+				assert.Equal(t, "remote_prod", remoteID)
+				return states, func() {}
+			},
+			NewID: fixedReportID("rpt_attachment"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+	require.Eventually(t, conn.readStarted, 2*time.Second, 10*time.Millisecond)
+
+	states <- control.AttachmentLocalState{
+		AttachmentID:    "att_1",
+		State:           control.AttachmentLocalDownloading,
+		BytesDownloaded: 1024,
+		TotalBytes:      4096,
+	}
+
+	require.Eventually(t, func() bool {
+		return len(conn.writes()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+	got := decodeReportFrame(t, conn.writes()[0])
+	assert.Equal(t, control.ReportAttachmentLocalState, got.Report.Type)
+	require.NotNil(t, got.Report.AttachmentLocalState)
+	assert.Equal(t, "att_1", got.Report.AttachmentLocalState.AttachmentID)
+	assert.Equal(t, int64(1024), got.Report.AttachmentLocalState.BytesDownloaded)
+}
+
 func remoteSource() control.Source {
 	return control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}
 }

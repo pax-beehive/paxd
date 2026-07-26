@@ -31,6 +31,7 @@ type runtimeSupervisors struct {
 	acpSlots             supervisor.Supervisor
 	agentRuntimeSource   *supervisor.AgentConnectionSupervisor
 	statusHub            *statusHub
+	attachmentStates     *attachmentStateHub
 	paxdVersion          string
 	acpCapabilityReports *acpCapabilityReports
 	transportDB          *sql.DB
@@ -127,6 +128,9 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	}
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
+	}
+	if s.attachmentStates != nil {
+		runner.Reports.AttachmentSubscribe = s.attachmentStates.Subscribe
 	}
 	acpPoolRegistry := runtimes.NewACPPoolRegistry(runtimes.ACPRouteStoreFactoryFunc(func(connectionID string) runtimes.ACPRouteStore {
 		return acpRouteStoreAdapter{store: store}
@@ -305,7 +309,13 @@ func (s *runtimeSupervisors) WakeACPSlots() {
 }
 
 func (r *Runtime) StartSupervisors(ctx context.Context) {
-	if r == nil || r.supervisors == nil {
+	if r == nil {
+		return
+	}
+	if r.artifactJobs != nil {
+		r.artifactJobs.Start(ctx)
+	}
+	if r.supervisors == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}

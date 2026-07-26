@@ -355,6 +355,18 @@ func conversationMCPTools() []map[string]any {
 				},
 			},
 		},
+		{
+			"name":        "publish_artifact",
+			"description": "Publish a local file for the user. Acceptance means paxd has durably captured the file; delivery continues asynchronously.",
+			"inputSchema": map[string]any{
+				"type":     "object",
+				"required": []string{"path"},
+				"properties": map[string]any{
+					"path":  map[string]any{"type": "string"},
+					"title": map[string]any{"type": "string"},
+				},
+			},
+		},
 	}
 }
 
@@ -374,6 +386,8 @@ func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mc
 		return callConversationMCPAsk(ctx, args), nil
 	case "reply":
 		return callConversationMCPReply(ctx, args), nil
+	case "publish_artifact":
+		return callConversationMCPPublishArtifact(ctx, args), nil
 	default:
 		return mcpToolCallResult{}, fmt.Errorf("unknown conversation tool %q", params.Name)
 	}

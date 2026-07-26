@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/artifactpublisher"
+	"github.com/pax-beehive/paxd/internal/attachmentlocalizer"
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
@@ -37,6 +39,7 @@ type Runtime struct {
 	harnesses      control.HarnessRegistry
 	hostMetrics    interface{ Start(context.Context) }
 	sessionReports interface{ Start(context.Context) }
+	artifactJobs   interface{ Start(context.Context) }
 }
 
 type Options struct {
@@ -86,8 +89,29 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		metrics = sampler
 		metricsStarter = sampler
 	}
+	attachmentStates := newAttachmentStateHub()
+	attachments := attachmentlocalizer.New(attachmentlocalizer.Options{
+		Context: ctx,
+		RootDir: cfg.Daemon.AttachmentDir,
+		OnState: attachmentStates.Publish,
+	})
+	artifactJobs := artifactpublisher.NewWorker(artifactpublisher.WorkerOptions{
+		Store: store,
+		Targets: artifactpublisher.NewRemoteTargetResolver(
+			store,
+			auth.NewProvider(store, nil),
+		),
+		Manager:  artifactpublisher.NewHTTPManager(nil),
+		Uploader: artifactpublisher.NewResumableUploader(nil),
+	})
+	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
+		Store:      store,
+		RootDir:    cfg.Daemon.ArtifactSpoolDir,
+		OnAccepted: artifactJobs.Wake,
+	})
 	supervisors := &runtimeSupervisors{
 		statusHub:            newStatusHub(),
+		attachmentStates:     attachmentStates,
 		paxdVersion:          opts.PaxdVersion,
 		acpCapabilityReports: newACPCapabilityReports(),
 		startedAt:            time.Now().UTC(),
@@ -108,6 +132,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		HostMetrics:         metrics,
 		ACPPoolCapabilities: supervisors.acpCapabilityReports,
 		Diagnostics:         supervisors,
+		Attachments:         attachments,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
@@ -122,13 +147,17 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		})
 	}
 	return &Runtime{
-		Store:          store,
-		Control:        service,
-		LocalHandler:   localapi.NewHandler(service),
+		Store:   store,
+		Control: service,
+		LocalHandler: localapi.NewHandler(artifactControlService{
+			Service:      service,
+			publications: artifactPublications,
+		}),
 		supervisors:    supervisors,
 		harnesses:      harnesses,
 		hostMetrics:    metricsStarter,
 		sessionReports: reports,
+		artifactJobs:   artifactJobs,
 	}, nil
 }
 

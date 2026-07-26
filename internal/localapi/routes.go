@@ -50,6 +50,8 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("POST /v1/local/sessions/sync", h.routeLocalSessionsSync)
 	h.mux.HandleFunc("GET /v1/local/sessions/{id}", h.routeLocalSessionGet)
 
+	h.mux.HandleFunc("POST /v1/artifact-publications", h.routeArtifactPublicationCreate)
+
 	h.mux.HandleFunc("GET /v1/commands/{id}", h.routeCommandGet)
 	h.mux.HandleFunc("/", h.routeNotFound)
 }

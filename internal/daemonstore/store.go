@@ -137,6 +137,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&Message{},
 		&MessagePart{},
 		&Setting{},
+		&ArtifactPublishJob{},
 	)
 }
 
