@@ -26,17 +26,19 @@ type Store interface {
 }
 
 type Options struct {
-	Store   Store
-	RootDir string
-	NewID   func() (string, error)
-	Now     func() time.Time
+	Store      Store
+	RootDir    string
+	NewID      func() (string, error)
+	Now        func() time.Time
+	OnAccepted func()
 }
 
 type Service struct {
-	store   Store
-	rootDir string
-	newID   func() (string, error)
-	now     func() time.Time
+	store      Store
+	rootDir    string
+	newID      func() (string, error)
+	now        func() time.Time
+	onAccepted func()
 }
 
 func New(opts Options) *Service {
@@ -49,10 +51,11 @@ func New(opts Options) *Service {
 		now = time.Now
 	}
 	return &Service{
-		store:   opts.Store,
-		rootDir: opts.RootDir,
-		newID:   newID,
-		now:     now,
+		store:      opts.Store,
+		rootDir:    opts.RootDir,
+		newID:      newID,
+		now:        now,
+		onAccepted: opts.OnAccepted,
 	}
 }
 
@@ -136,6 +139,9 @@ func (s *Service) Accept(ctx context.Context, req Request) (Publication, error) 
 	if err := s.store.CreateArtifactPublishJob(ctx, job); err != nil {
 		_ = os.RemoveAll(finalDir)
 		return Publication{}, fmt.Errorf("persist artifact publish job: %w", err)
+	}
+	if s.onAccepted != nil {
+		s.onAccepted()
 	}
 	return Publication{
 		PublicationID: publicationID,

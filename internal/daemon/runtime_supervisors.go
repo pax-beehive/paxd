@@ -309,7 +309,13 @@ func (s *runtimeSupervisors) WakeACPSlots() {
 }
 
 func (r *Runtime) StartSupervisors(ctx context.Context) {
-	if r == nil || r.supervisors == nil {
+	if r == nil {
+		return
+	}
+	if r.artifactJobs != nil {
+		r.artifactJobs.Start(ctx)
+	}
+	if r.supervisors == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}

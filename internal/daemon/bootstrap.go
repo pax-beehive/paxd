@@ -39,6 +39,7 @@ type Runtime struct {
 	harnesses      control.HarnessRegistry
 	hostMetrics    interface{ Start(context.Context) }
 	sessionReports interface{ Start(context.Context) }
+	artifactJobs   interface{ Start(context.Context) }
 }
 
 type Options struct {
@@ -94,9 +95,19 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		RootDir: cfg.Daemon.AttachmentDir,
 		OnState: attachmentStates.Publish,
 	})
+	artifactJobs := artifactpublisher.NewWorker(artifactpublisher.WorkerOptions{
+		Store: store,
+		Targets: artifactpublisher.NewRemoteTargetResolver(
+			store,
+			auth.NewProvider(store, nil),
+		),
+		Manager:  artifactpublisher.NewHTTPManager(nil),
+		Uploader: artifactpublisher.NewResumableUploader(nil),
+	})
 	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
-		Store:   store,
-		RootDir: cfg.Daemon.ArtifactSpoolDir,
+		Store:      store,
+		RootDir:    cfg.Daemon.ArtifactSpoolDir,
+		OnAccepted: artifactJobs.Wake,
 	})
 	supervisors := &runtimeSupervisors{
 		statusHub:            newStatusHub(),
@@ -146,6 +157,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		harnesses:      harnesses,
 		hostMetrics:    metricsStarter,
 		sessionReports: reports,
+		artifactJobs:   artifactJobs,
 	}, nil
 }
 
