@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/pax-beehive/paxd/internal/auth"
@@ -21,6 +22,7 @@ const (
 	envPaxRepresentativeAgentID            = "PAX_REPRESENTATIVE_AGENT_ID"
 	envPaxSessionID                        = "PAX_SESSION_ID"
 	conversationTargetKindRepresentative   = "representative"
+	conversationTargetKindAgent            = "agent"
 	conversationTargetKindActiveInvocation = "active_invocation"
 )
 
@@ -330,13 +332,35 @@ func writeMCPResponse(out io.Writer, resp mcpRPCResponse) error {
 func conversationMCPTools() []map[string]any {
 	return []map[string]any{
 		{
-			"name":        "ask",
-			"description": "Ask another Pax representative agent and return a receipt token.",
+			"name": "list_agents",
+			"description": "List the agents you own so you can pick one to message. " +
+				"Returns each agent's agent_id -- pass it to ask as to_agent_id. Each entry " +
+				"includes a display name, alias, type, a short description, and current " +
+				"reachability (status). Filter with a free-text query (matches name and alias) " +
+				"and by status.",
 			"inputSchema": map[string]any{
-				"type":     "object",
-				"required": []string{"to_representative_agent_id"},
+				"type": "object",
 				"properties": map[string]any{
+					"query":    map[string]any{"type": "string"},
+					"status":   map[string]any{"type": "string", "enum": []string{"online", "offline", "any"}},
+					"order_by": map[string]any{"type": "string", "enum": []string{"relevance", "last_active", "name"}},
+					"limit":    map[string]any{"type": "integer"},
+				},
+			},
+		},
+		{
+			"name": "ask",
+			"description": "Ask one of your agents (by to_agent_id from list_agents) or a Pax " +
+				"representative agent (by to_representative_agent_id) and return a receipt token. " +
+				"Provide exactly one of to_agent_id or to_representative_agent_id. With to_agent_id " +
+				"you may set to_session_id to target a specific session of that agent; omit it to " +
+				"open a new session.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to_agent_id":                map[string]any{"type": "string"},
 					"to_representative_agent_id": map[string]any{"type": "string"},
+					"to_session_id":              map[string]any{"type": "string"},
 					"text":                       map[string]any{"type": "string"},
 					"input_file":                 map[string]any{"type": "string"},
 					"include_message":            map[string]any{"type": "boolean"},
@@ -382,6 +406,8 @@ func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mc
 		}
 	}
 	switch params.Name {
+	case "list_agents":
+		return callConversationMCPListAgents(ctx, args), nil
 	case "ask":
 		return callConversationMCPAsk(ctx, args), nil
 	case "reply":
@@ -398,9 +424,12 @@ func callConversationMCPAsk(ctx context.Context, args map[string]any) mcpToolCal
 	if err != nil {
 		return mcpTextResult(err.Error(), true)
 	}
+	toAgentID := strings.TrimSpace(mcpStringArg(args, "to_agent_id"))
 	toRepresentativeAgentID := strings.TrimSpace(mcpStringArg(args, "to_representative_agent_id"))
-	if toRepresentativeAgentID == "" {
-		return mcpTextResult("to_representative_agent_id is required", true)
+	toSessionID := strings.TrimSpace(mcpStringArg(args, "to_session_id"))
+	target, err := conversationAskTarget(toAgentID, toRepresentativeAgentID, toSessionID)
+	if err != nil {
+		return mcpTextResult(err.Error(), true)
 	}
 	instruction, err := conversationInstructionFromToolArgs(args)
 	if err != nil {
@@ -412,10 +441,7 @@ func callConversationMCPAsk(ctx context.Context, args map[string]any) mcpToolCal
 			RepresentativeAgentID: representativeAgentID,
 			SessionID:             sessionID,
 		},
-		Target: cloud.ConversationDeliveryTarget{
-			Kind:                  conversationTargetKindRepresentative,
-			RepresentativeAgentID: toRepresentativeAgentID,
-		},
+		Target: target,
 		Context: cloud.ConversationDeliveryContext{
 			LatestResponse: mcpBoolArg(args, "include_message"),
 		},
@@ -426,6 +452,73 @@ func callConversationMCPAsk(ctx context.Context, args map[string]any) mcpToolCal
 		return mcpTextResult(err.Error(), true)
 	}
 	return mcpTextResult(conversationDeliverySummary(resp), false)
+}
+
+// conversationAskTarget builds the delivery target for ask. Exactly one of
+// to_agent_id or to_representative_agent_id must be provided: agent_id addresses
+// a runtime agent directly (the manager maps it to its canonical
+// representative), while representative_agent_id keeps the original addressing.
+// to_session_id applies only to the agent path: given, it targets that session;
+// absent, the manager opens a new session.
+func conversationAskTarget(
+	toAgentID, toRepresentativeAgentID, toSessionID string,
+) (cloud.ConversationDeliveryTarget, error) {
+	switch {
+	case toAgentID != "" && toRepresentativeAgentID != "":
+		return cloud.ConversationDeliveryTarget{}, fmt.Errorf(
+			"provide either to_agent_id or to_representative_agent_id, not both")
+	case toAgentID != "":
+		return cloud.ConversationDeliveryTarget{
+			Kind:      conversationTargetKindAgent,
+			AgentID:   toAgentID,
+			SessionID: toSessionID,
+		}, nil
+	case toRepresentativeAgentID != "":
+		return cloud.ConversationDeliveryTarget{
+			Kind:                  conversationTargetKindRepresentative,
+			RepresentativeAgentID: toRepresentativeAgentID,
+		}, nil
+	default:
+		return cloud.ConversationDeliveryTarget{}, fmt.Errorf(
+			"to_agent_id or to_representative_agent_id is required")
+	}
+}
+
+func callConversationMCPListAgents(ctx context.Context, args map[string]any) mcpToolCallResult {
+	agentID := strings.TrimSpace(os.Getenv(envPaxAgentID))
+	if agentID == "" {
+		return mcpTextResult(envPaxAgentID+" is required", true)
+	}
+	agents, err := listOwnerAgents(ctx, cloud.ListOwnerAgentsParams{
+		FromAgentID: agentID,
+		Query:       mcpStringArg(args, "query"),
+		Status:      mcpStringArg(args, "status"),
+		OrderBy:     mcpStringArg(args, "order_by"),
+		Limit:       mcpIntArg(args, "limit"),
+	})
+	if err != nil {
+		return mcpTextResult(err.Error(), true)
+	}
+	raw, err := json.Marshal(agents)
+	if err != nil {
+		return mcpTextResult("failed to encode agents", true)
+	}
+	return mcpTextResult(string(raw), false)
+}
+
+var listOwnerAgents = func(
+	ctx context.Context,
+	params cloud.ListOwnerAgentsParams,
+) ([]cloud.OwnerAgentView, error) {
+	cfg, err := loadRuntimeConfig()
+	if err != nil {
+		return nil, err
+	}
+	client, err := conversationCloudClient(ctx, cfg, params.FromAgentID)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListOwnerAgents(params)
 }
 
 func callConversationMCPReply(ctx context.Context, args map[string]any) mcpToolCallResult {
@@ -504,6 +597,24 @@ func mcpBoolArg(args map[string]any, name string) bool {
 	}
 	v, ok := value.(bool)
 	return ok && v
+}
+
+func mcpIntArg(args map[string]any, name string) int {
+	value, ok := args[name]
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(v))
+		return n
+	default:
+		return 0
+	}
 }
 
 func addSummaryField(summary *[]string, name string, value string) {

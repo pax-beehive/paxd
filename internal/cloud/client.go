@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -261,8 +262,40 @@ type ConversationDeliverySource struct {
 type ConversationDeliveryTarget struct {
 	Kind                  string `json:"kind"`
 	RepresentativeAgentID string `json:"representative_agent_id,omitempty"`
+	AgentID               string `json:"agent_id,omitempty"`
 	SessionID             string `json:"session_id,omitempty"`
 	InvocationID          string `json:"invocation_id,omitempty"`
+}
+
+// OwnerAgentView is one agent in the owner-scoped discovery inventory returned
+// by GET /api/v1/node/agents. It mirrors the manager ownerAgentView projection.
+type OwnerAgentView struct {
+	AgentID      string     `json:"agent_id"`
+	Name         string     `json:"name,omitempty"`
+	Alias        string     `json:"alias,omitempty"`
+	Type         string     `json:"type,omitempty"`
+	Status       string     `json:"status"`
+	NodeID       string     `json:"node_id,omitempty"`
+	NodeName     string     `json:"node_name,omitempty"`
+	NodeHostname string     `json:"node_hostname,omitempty"`
+	Description  string     `json:"description,omitempty"`
+	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
+	IsSelf       bool       `json:"is_self"`
+}
+
+type ownerAgentsData struct {
+	Agents []OwnerAgentView `json:"agents"`
+}
+
+// ListOwnerAgentsParams narrows the owner-scoped discovery query. FromAgentID
+// names the calling agent and is required; the manager derives whose inventory
+// to return from it.
+type ListOwnerAgentsParams struct {
+	FromAgentID string
+	Query       string
+	Status      string
+	OrderBy     string
+	Limit       int
 }
 
 type ConversationDeliveryContext struct {
@@ -607,6 +640,39 @@ func (c *Client) PostConversationDelivery(req *ConversationDeliveryRequest) (*Co
 		return nil, fmt.Errorf("post conversation delivery: status %d: %s", resp.StatusCode, bodySnippet(body))
 	}
 	return decodeEnvelope[ConversationDeliveryResponse](resp.Body, "post conversation delivery")
+}
+
+// ListOwnerAgents returns the calling agent owner's cross-node agent inventory
+// from the manager discovery endpoint.
+func (c *Client) ListOwnerAgents(params ListOwnerAgentsParams) ([]OwnerAgentView, error) {
+	q := url.Values{}
+	q.Set("from_agent_id", params.FromAgentID)
+	if params.Query != "" {
+		q.Set("query", params.Query)
+	}
+	if params.Status != "" {
+		q.Set("status", params.Status)
+	}
+	if params.OrderBy != "" {
+		q.Set("order_by", params.OrderBy)
+	}
+	if params.Limit > 0 {
+		q.Set("limit", strconv.Itoa(params.Limit))
+	}
+	resp, err := c.do(http.MethodGet, "/api/v1/node/agents?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list owner agents: status %d: %s", resp.StatusCode, bodySnippet(body))
+	}
+	data, err := decodeEnvelope[ownerAgentsData](resp.Body, "list owner agents")
+	if err != nil {
+		return nil, err
+	}
+	return data.Agents, nil
 }
 
 // ReportCompleted marks a message as completed.
