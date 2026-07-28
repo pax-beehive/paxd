@@ -276,6 +276,8 @@ type OwnerAgentView struct {
 	Type         string     `json:"type,omitempty"`
 	Status       string     `json:"status"`
 	NodeID       string     `json:"node_id,omitempty"`
+	NodeName     string     `json:"node_name,omitempty"`
+	NodeHostname string     `json:"node_hostname,omitempty"`
 	Description  string     `json:"description,omitempty"`
 	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
 	IsSelf       bool       `json:"is_self"`
