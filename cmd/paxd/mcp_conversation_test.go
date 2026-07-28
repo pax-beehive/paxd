@@ -13,28 +13,38 @@ import (
 
 func TestConversationAskTarget(t *testing.T) {
 	t.Run("agent id yields an agent target", func(t *testing.T) {
-		target, err := conversationAskTarget("agent_x", "")
+		target, err := conversationAskTarget("agent_x", "", "")
 		require.NoError(t, err)
 		assert.Equal(t, conversationTargetKindAgent, target.Kind)
 		assert.Equal(t, "agent_x", target.AgentID)
 		assert.Empty(t, target.RepresentativeAgentID)
+		assert.Empty(t, target.SessionID)
 	})
 
-	t.Run("representative id yields a representative target", func(t *testing.T) {
-		target, err := conversationAskTarget("", "rep_x")
+	t.Run("agent id with session id targets that session", func(t *testing.T) {
+		target, err := conversationAskTarget("agent_x", "", "sess_y")
+		require.NoError(t, err)
+		assert.Equal(t, conversationTargetKindAgent, target.Kind)
+		assert.Equal(t, "agent_x", target.AgentID)
+		assert.Equal(t, "sess_y", target.SessionID)
+	})
+
+	t.Run("representative id yields a representative target without session", func(t *testing.T) {
+		target, err := conversationAskTarget("", "rep_x", "sess_y")
 		require.NoError(t, err)
 		assert.Equal(t, conversationTargetKindRepresentative, target.Kind)
 		assert.Equal(t, "rep_x", target.RepresentativeAgentID)
 		assert.Empty(t, target.AgentID)
+		assert.Empty(t, target.SessionID)
 	})
 
 	t.Run("providing both is rejected", func(t *testing.T) {
-		_, err := conversationAskTarget("agent_x", "rep_x")
+		_, err := conversationAskTarget("agent_x", "rep_x", "")
 		require.Error(t, err)
 	})
 
 	t.Run("providing neither is rejected", func(t *testing.T) {
-		_, err := conversationAskTarget("", "")
+		_, err := conversationAskTarget("", "", "")
 		require.Error(t, err)
 	})
 }
@@ -100,6 +110,7 @@ func TestConversationMCPToolsExposesDiscoveryAndDualAsk(t *testing.T) {
 	props, _ := schema["properties"].(map[string]any)
 	require.Contains(t, props, "to_agent_id")
 	require.Contains(t, props, "to_representative_agent_id")
+	require.Contains(t, props, "to_session_id")
 	// ask no longer forces a representative id: addressing is validated at call
 	// time as an xor between to_agent_id and to_representative_agent_id.
 	_, hasRequired := schema["required"]

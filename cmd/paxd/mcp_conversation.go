@@ -352,12 +352,15 @@ func conversationMCPTools() []map[string]any {
 			"name": "ask",
 			"description": "Ask one of your agents (by to_agent_id from list_agents) or a Pax " +
 				"representative agent (by to_representative_agent_id) and return a receipt token. " +
-				"Provide exactly one of to_agent_id or to_representative_agent_id.",
+				"Provide exactly one of to_agent_id or to_representative_agent_id. With to_agent_id " +
+				"you may set to_session_id to target a specific session of that agent; omit it to " +
+				"open a new session.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"to_agent_id":                map[string]any{"type": "string"},
 					"to_representative_agent_id": map[string]any{"type": "string"},
+					"to_session_id":              map[string]any{"type": "string"},
 					"text":                       map[string]any{"type": "string"},
 					"input_file":                 map[string]any{"type": "string"},
 					"include_message":            map[string]any{"type": "boolean"},
@@ -423,7 +426,8 @@ func callConversationMCPAsk(ctx context.Context, args map[string]any) mcpToolCal
 	}
 	toAgentID := strings.TrimSpace(mcpStringArg(args, "to_agent_id"))
 	toRepresentativeAgentID := strings.TrimSpace(mcpStringArg(args, "to_representative_agent_id"))
-	target, err := conversationAskTarget(toAgentID, toRepresentativeAgentID)
+	toSessionID := strings.TrimSpace(mcpStringArg(args, "to_session_id"))
+	target, err := conversationAskTarget(toAgentID, toRepresentativeAgentID, toSessionID)
 	if err != nil {
 		return mcpTextResult(err.Error(), true)
 	}
@@ -454,15 +458,20 @@ func callConversationMCPAsk(ctx context.Context, args map[string]any) mcpToolCal
 // to_agent_id or to_representative_agent_id must be provided: agent_id addresses
 // a runtime agent directly (the manager maps it to its canonical
 // representative), while representative_agent_id keeps the original addressing.
-func conversationAskTarget(toAgentID, toRepresentativeAgentID string) (cloud.ConversationDeliveryTarget, error) {
+// to_session_id applies only to the agent path: given, it targets that session;
+// absent, the manager opens a new session.
+func conversationAskTarget(
+	toAgentID, toRepresentativeAgentID, toSessionID string,
+) (cloud.ConversationDeliveryTarget, error) {
 	switch {
 	case toAgentID != "" && toRepresentativeAgentID != "":
 		return cloud.ConversationDeliveryTarget{}, fmt.Errorf(
 			"provide either to_agent_id or to_representative_agent_id, not both")
 	case toAgentID != "":
 		return cloud.ConversationDeliveryTarget{
-			Kind:    conversationTargetKindAgent,
-			AgentID: toAgentID,
+			Kind:      conversationTargetKindAgent,
+			AgentID:   toAgentID,
+			SessionID: toSessionID,
 		}, nil
 	case toRepresentativeAgentID != "":
 		return cloud.ConversationDeliveryTarget{
