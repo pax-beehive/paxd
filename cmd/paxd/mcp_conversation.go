@@ -357,7 +357,7 @@ func conversationMCPTools() []map[string]any {
 		},
 		{
 			"name":        "publish_artifact",
-			"description": "Publish a local file for the user. Acceptance means paxd has durably captured the file; delivery continues asynchronously.",
+			"description": "Deliver a completed file that the user asked to read, review, or download. Local paths are not visible to the user, so you MUST call this tool for user-facing deliverables such as plans, reports, documents, images, archives, and exported data, even when saved inside a repository. Do not publish ordinary code, test, config, or documentation changes, or temporary or internal working files. If the file itself is the requested outcome, publish it; if it is only part of changing the codebase, do not.",
 			"inputSchema": map[string]any{
 				"type":     "object",
 				"required": []string{"path"},
