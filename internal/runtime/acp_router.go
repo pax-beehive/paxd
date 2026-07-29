@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	internalACPResumeIDPrefix = "paxd.resume."
-	paxConversationMCPName    = "pax-conversation"
+	internalACPResumeIDPrefix          = "paxd.resume."
+	paxConversationMCPName             = "pax-conversation"
+	paxConversationMCPNameSuffixLength = 8
 )
 
 type ACPRouterError struct {
@@ -619,7 +620,7 @@ func (r *ACPRouter) localizeMCPServers(mcpServers json.RawMessage) (json.RawMess
 	}
 	var executable string
 	for i := range servers {
-		if stringField(servers[i], "name") != paxConversationMCPName {
+		if !isPaxConversationMCPName(stringField(servers[i], "name")) {
 			continue
 		}
 		if executable == "" {
@@ -642,6 +643,22 @@ func (r *ACPRouter) localizeMCPServers(mcpServers json.RawMessage) (json.RawMess
 		return nil, err
 	}
 	return json.RawMessage(payload), nil
+}
+
+func isPaxConversationMCPName(name string) bool {
+	if name == paxConversationMCPName {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(name, paxConversationMCPName+"-")
+	if !ok || len(suffix) != paxConversationMCPNameSuffixLength {
+		return false
+	}
+	for _, char := range suffix {
+		if (char < 'a' || char > 'z') && (char < '2' || char > '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ACPRouter) selectReadySlot(ctx context.Context) (ACPRouterSlot, error) {

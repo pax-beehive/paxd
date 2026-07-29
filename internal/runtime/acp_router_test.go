@@ -62,17 +62,37 @@ func TestACPRouterLocalizesPaxConversationMCPServerOnNewSession(t *testing.T) {
 	)
 	router.UpsertSlot(slot)
 
-	err := router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`))
+	err := router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation-k7m2x5qa","command":"paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`))
 	require.NoError(t, err)
 	require.Len(t, slot.writes, 1)
-	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`, string(slot.writes[0]))
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"pax-conversation-k7m2x5qa","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}}`, string(slot.writes[0]))
 
 	err = router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_1"}}`))
 	require.NoError(t, err)
 	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_1")
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}`, string(route.ResumeParams))
+	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[{"name":"pax-conversation-k7m2x5qa","command":"/home/kk/.local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_AGENT_ID","value":"agent_1"}]},{"name":"fs","command":"fs-mcp","args":[],"env":[]}]}`, string(route.ResumeParams))
+}
+
+func TestIsPaxConversationMCPName(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+	}{
+		{name: "pax-conversation", expected: true},
+		{name: "pax-conversation-k7m2x5qa", expected: true},
+		{name: "pax-conversation-short", expected: false},
+		{name: "pax-conversation-12345678", expected: false},
+		{name: "pax-conversation-k7m2x9q!", expected: false},
+		{name: "other-k7m2x9qa", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isPaxConversationMCPName(tt.name))
+		})
+	}
 }
 
 func TestACPRouterDistributesNewSessionsAcrossReadySlotsAndKeepsRoutesSticky(t *testing.T) {
