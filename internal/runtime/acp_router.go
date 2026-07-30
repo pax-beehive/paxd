@@ -83,6 +83,7 @@ type ACPRouter struct {
 	store        ACPRouteStore
 	output       ACPRouterOutputSink
 	executable   func() (string, error)
+	workspace    func(string) (string, error)
 
 	mu                 sync.Mutex
 	slots              map[string]ACPRouterSlot
@@ -119,6 +120,16 @@ func WithACPRouterExecutablePath(resolver func() (string, error)) ACPRouterOptio
 	}
 }
 
+func WithACPRouterWorkspaceResolver(
+	resolver func(string) (string, error),
+) ACPRouterOption {
+	return func(router *ACPRouter) {
+		if resolver != nil {
+			router.workspace = resolver
+		}
+	}
+}
+
 type pendingNewSession struct {
 	slotID       string
 	processEpoch string
@@ -148,6 +159,7 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		store:              store,
 		output:             ACPRouterOutputSinkFunc(nil),
 		executable:         os.Executable,
+		workspace:          resolveSessionWorkspace,
 		slots:              make(map[string]ACPRouterSlot),
 		pendingNew:         make(map[string]pendingNewSession),
 		pendingPrompts:     make(map[string]pendingPrompt),
@@ -597,6 +609,20 @@ func (r *ACPRouter) localizeSessionLifecycleParams(params json.RawMessage) (json
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(params, &raw); err != nil {
 		return nil, ACPRouterError{Code: "invalid_session_lifecycle", Message: "session lifecycle params must be an object"}
+	}
+	cwd := stringField(raw, "cwd")
+	if cwd != "" {
+		resolvedCWD, err := r.workspace(cwd)
+		if err != nil {
+			return nil, err
+		}
+		raw["cwd"], err = json.Marshal(resolvedCWD)
+		if err != nil {
+			return nil, ACPRouterError{
+				Code:    "workspace_path_invalid",
+				Message: "resolved workspace path cannot be encoded",
+			}
+		}
 	}
 	mcpServers, ok := firstJSONField(raw, "mcpServers", "mcp_servers")
 	if !ok {
