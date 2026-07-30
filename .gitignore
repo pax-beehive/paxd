@@ -1,4 +1,5 @@
 /paxd
+dist/
 /.gocache
 .local/
 .DS_Store
