@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -17,13 +20,50 @@ const (
 	eventuallyTick = 10 * time.Millisecond
 )
 
+func newTestACPRouter(
+	connectionID string,
+	store ACPRouteStore,
+	opts ...ACPRouterOption,
+) *ACPRouter {
+	testOpts := []ACPRouterOption{
+		WithACPRouterWorkspaceResolver(func(value string) (string, error) {
+			return value, nil
+		}),
+	}
+	testOpts = append(testOpts, opts...)
+	return NewACPRouter(connectionID, store, testOpts...)
+}
+
+func TestACPRouterGivenHomeWorkspaceWhenCreatingSessionThenSendsResolvedAbsolutePath(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "project")
+	require.NoError(t, os.Mkdir(workspace, 0o700))
+	t.Setenv("HOME", home)
+
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+
+	err := router.HandleManagerFrame(
+		t.Context(),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"~/project","mcpServers":[]}}`),
+	)
+
+	require.NoError(t, err)
+	require.Len(t, slot.writes, 1)
+	var request acpRPCMessage
+	require.NoError(t, json.Unmarshal(slot.writes[0], &request))
+	assert.JSONEq(t, fmt.Sprintf(`{"cwd":%q,"mcpServers":[]}`, workspace), string(request.Params))
+}
+
 func TestACPRouterCommitsNewSessionRouteBeforeEmittingResponse(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	var emitted [][]byte
 	var emittedSessionID string
-	router := NewACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
+	router := newTestACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
 		assert.True(t, store.boundBeforeEmit("session_1"), "route must be bound before session/new response is emitted")
 		emittedSessionID = nativeSessionID
 		emitted = append(emitted, append([]byte(nil), payload...))
@@ -53,7 +93,7 @@ func TestACPRouterLocalizesPaxConversationMCPServerOnNewSession(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
-	router := NewACPRouter(
+	router := newTestACPRouter(
 		"conn_1",
 		store,
 		WithACPRouterExecutablePath(func() (string, error) {
@@ -100,7 +140,7 @@ func TestACPRouterDistributesNewSessionsAcrossReadySlotsAndKeepsRoutesSticky(t *
 	store := newFakeACPRouteStore("conn_1")
 	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slotA)
 	router.UpsertSlot(slotB)
 
@@ -126,7 +166,7 @@ func TestACPRouterAssignsNewSessionToSlotWithLeastRecentPrompt(t *testing.T) {
 	store := newFakeACPRouteStore("conn_1")
 	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slotA)
 	router.UpsertSlot(slotB)
 
@@ -149,7 +189,7 @@ func TestACPRouterDoesNotAssignNewSessionToSlotWithActivePrompt(t *testing.T) {
 	store := newFakeACPRouteStore("conn_1")
 	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slotA)
 	router.UpsertSlot(slotB)
 
@@ -171,7 +211,7 @@ func TestACPRouterResumesOnlySessionsBoundToRestartedSlot(t *testing.T) {
 	store := newFakeACPRouteStore("conn_1")
 	oldSlotA := newFakeRouterSlot("slot_a", "epoch_a_old", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(oldSlotA)
 	router.UpsertSlot(slotB)
 
@@ -222,7 +262,7 @@ func TestACPRouterDrainStopsAdmissionAndWaitsForActivePrompt(t *testing.T) {
 	})
 	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slotA)
 	router.UpsertSlot(slotB)
 
@@ -252,7 +292,7 @@ func TestACPRouterResumesCreatedSessionAfterSlotProcessEpochChanges(t *testing.T
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	oldSlot := newFakeRouterSlot("slot_a", "epoch_old", 0)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(oldSlot)
 
 	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"fs","command":"fs-mcp","args":[],"env":[]}],"additionalDirectories":["/shared"]}}`)))
@@ -296,7 +336,7 @@ func TestACPRouterEnforcesOneActivePromptPerSessionAndSlot(t *testing.T) {
 		ResumeParams:      json.RawMessage(`{"sessionId":"session_1","cwd":"/work","mcpServers":{}}`),
 		Version:           1,
 	})
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slot)
 
 	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
@@ -320,7 +360,7 @@ func TestACPRouterResumesColdRouteBeforePrompt(t *testing.T) {
 		ResumeParams:    json.RawMessage(`{"cwd":"/work","mcpServers":{"fs":{}}}`),
 		Version:         1,
 	})
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slot)
 
 	done := make(chan error, 1)
@@ -352,7 +392,7 @@ func TestACPRouterLocalizesPaxConversationMCPServerOnColdResume(t *testing.T) {
 		ResumeParams:    json.RawMessage(`{"cwd":"/work","mcpServers":[{"name":"pax-conversation","command":"/usr/local/bin/paxd","args":["mcp","conversation","serve"],"env":[{"name":"PAX_SESSION_ID","value":"session_cold"}]}]}`),
 		Version:         1,
 	})
-	router := NewACPRouter(
+	router := newTestACPRouter(
 		"conn_1",
 		store,
 		WithACPRouterExecutablePath(func() (string, error) {
@@ -389,7 +429,7 @@ func TestACPRouterResumeFailureDoesNotCreateReplacementSession(t *testing.T) {
 		ResumeParams:    json.RawMessage(`{"cwd":"/work","mcpServers":{}}`),
 		Version:         1,
 	})
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slot)
 
 	done := make(chan error, 1)
@@ -415,7 +455,7 @@ func TestACPRouterIncompleteColdResumeDescriptorDoesNotReachSlot(t *testing.T) {
 		ResumeParams:    json.RawMessage(`{"sessionId":"session_cold"}`),
 		Version:         1,
 	})
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slot)
 
 	err := router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":20,"method":"session/prompt","params":{"sessionId":"session_cold","prompt":[]}}`))
@@ -482,7 +522,7 @@ func TestACPRouterValidatesWorkerRequestSourceBySessionAndRawID(t *testing.T) {
 	store := newFakeACPRouteStore("conn_1")
 	slotA := newFakeRouterSlot("slot_a", "epoch_a", 0)
 	slotB := newFakeRouterSlot("slot_b", "epoch_b", 1)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slotA)
 	router.UpsertSlot(slotB)
 
@@ -502,7 +542,7 @@ func TestACPRouterUnknownRouteDoesNotReachSlot(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
-	router := NewACPRouter("conn_1", store)
+	router := newTestACPRouter("conn_1", store)
 	router.UpsertSlot(slot)
 
 	err := router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"missing","prompt":[]}}`))
@@ -515,7 +555,7 @@ func TestACPRouterExplicitResumeCreatesMissingRouteBeforeReply(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	managerFrames := make(chan []byte, 1)
-	router := NewACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(_ context.Context, nativeSessionID string, payload []byte) error {
+	router := newTestACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(_ context.Context, nativeSessionID string, payload []byte) error {
 		require.Equal(t, "session_legacy", nativeSessionID)
 		managerFrames <- append([]byte(nil), payload...)
 		return nil
