@@ -349,6 +349,61 @@ func TestACPRouterEnforcesOneActivePromptPerSessionAndSlot(t *testing.T) {
 	assert.Len(t, slot.writes, 2)
 }
 
+func TestACPRouterProjectsCanonicalRuntimeFromPromptLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	store.seedRoute(ACPRoute{
+		ConnectionID: "conn_1", NativeSessionID: "session_1",
+		BoundSlotID: "slot_a", BoundProcessEpoch: "epoch_a",
+		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
+	})
+	router := newTestACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+	snapshot := router.RuntimeSnapshot()
+	require.Len(t, snapshot.ActiveTurns, 1)
+	turn := snapshot.ActiveTurns[0]
+	assert.Equal(t, SessionRuntimeRunning, turn.RuntimeStatus)
+	assert.JSONEq(t, `10`, string(turn.PromptRequestID))
+
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":"approval-1","method":"session/request_permission","params":{"sessionId":"session_1"}}`)))
+	snapshot = router.RuntimeSnapshot()
+	require.Len(t, snapshot.ActiveTurns, 1)
+	assert.Equal(t, turn.TurnInstanceID, snapshot.ActiveTurns[0].TurnInstanceID)
+	assert.Equal(t, SessionRuntimeWaitingApproval, snapshot.ActiveTurns[0].RuntimeStatus)
+
+	require.NoError(t, router.HandleManagerFrameForSession(ctx, "session_1", []byte(`{"jsonrpc":"2.0","id":"approval-1","result":{"outcome":"cancelled"}}`)))
+	snapshot = router.RuntimeSnapshot()
+	require.Len(t, snapshot.ActiveTurns, 1)
+	assert.Equal(t, SessionRuntimeRunning, snapshot.ActiveTurns[0].RuntimeStatus, "permission rejection is not terminal")
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session_1"}}`)))
+	assert.Len(t, router.RuntimeSnapshot().ActiveTurns, 1, "a cancellation request waits for terminal confirmation")
+
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":10,"result":{"stopReason":"cancelled"}}`)))
+	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
+}
+
+func TestACPRouterSlotExitTerminatesProjectedTurn(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	store.seedRoute(ACPRoute{
+		ConnectionID: "conn_1", NativeSessionID: "session_1",
+		BoundSlotID: "slot_a", BoundProcessEpoch: "epoch_a",
+		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
+	})
+	router := newTestACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+
+	router.RemoveSlot("slot_a", "epoch_a")
+
+	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
+}
+
 func TestACPRouterResumesColdRouteBeforePrompt(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
