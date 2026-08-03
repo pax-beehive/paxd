@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -109,4 +110,19 @@ func TestSessionRuntimeProjectorResetSuppressesOnlyExpectedTurn(t *testing.T) {
 		require.Len(t, snapshot.ActiveTurns, 1)
 		assert.Equal(t, newTurn.TurnInstanceID, snapshot.ActiveTurns[0].TurnInstanceID)
 	})
+}
+
+func TestSessionRuntimeProjectorResetAlwaysRequestsACompleteSnapshot(t *testing.T) {
+	projector := NewSessionRuntimeProjector()
+	_, changes, unsubscribe := projector.SnapshotAndSubscribe()
+	defer unsubscribe()
+
+	result := projector.Reset("missing", "turn_missing")
+
+	assert.Equal(t, SessionRuntimeResetNotFound, result.Status)
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		require.Fail(t, "a not-found reset must still trigger a self-healing complete snapshot")
+	}
 }

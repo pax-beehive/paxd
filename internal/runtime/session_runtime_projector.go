@@ -251,6 +251,10 @@ func (p *SessionRuntimeTurnProjector) Reset(nativeSessionID string, expectedTurn
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Every reset attempt requests a complete self-healing snapshot. A stale
+	// manager projection can otherwise remain visible when the compared turn
+	// already completed or was replaced before the command arrived.
+	p.markChangedLocked()
 	key := runtimeTurnKey(nativeSessionID, expectedTurnInstanceID)
 	if _, terminal := p.terminal[key]; terminal {
 		return SessionRuntimeResetResult{Status: SessionRuntimeResetAlreadyTerminal, Revision: p.revision}
@@ -266,7 +270,6 @@ func (p *SessionRuntimeTurnProjector) Reset(nativeSessionID string, expectedTurn
 		return SessionRuntimeResetResult{Status: SessionRuntimeResetAlreadySuppressed, Revision: p.revision}
 	}
 	p.suppressed[key] = struct{}{}
-	p.markChangedLocked()
 	return SessionRuntimeResetResult{Status: SessionRuntimeResetSuppressed, Revision: p.revision}
 }
 
