@@ -30,12 +30,15 @@ type ACPPoolRegistry struct {
 	mu          sync.Mutex
 	routeStores ACPRouteStoreFactory
 	pools       map[string]*ACPPool
+	subscribers map[uint64]chan struct{}
+	nextSubID   uint64
 }
 
 func NewACPPoolRegistry(routeStores ACPRouteStoreFactory) *ACPPoolRegistry {
 	return &ACPPoolRegistry{
 		routeStores: routeStores,
 		pools:       make(map[string]*ACPPool),
+		subscribers: make(map[uint64]chan struct{}),
 	}
 }
 
@@ -60,7 +63,74 @@ func (r *ACPPoolRegistry) Get(connectionID string) (*ACPPool, error) {
 	}
 	pool := NewACPPool(connectionID, routeStore)
 	r.pools[connectionID] = pool
+	_, changes, _ := pool.RuntimeSnapshotAndSubscribe()
+	go r.forwardSessionRuntimeChanges(changes)
 	return pool, nil
+}
+
+func (r *ACPPoolRegistry) SessionRuntimeSnapshot(connectionID string) (ActiveTurnsSnapshot, bool) {
+	if r == nil {
+		return ActiveTurnsSnapshot{}, false
+	}
+	r.mu.Lock()
+	pool := r.pools[connectionID]
+	r.mu.Unlock()
+	if pool == nil {
+		return ActiveTurnsSnapshot{}, false
+	}
+	return pool.RuntimeSnapshot(), true
+}
+
+func (r *ACPPoolRegistry) ResetSessionRuntime(
+	connectionID string,
+	nativeSessionID string,
+	expectedTurnInstanceID string,
+) SessionRuntimeResetResult {
+	if r == nil {
+		return SessionRuntimeResetResult{Status: SessionRuntimeResetNotFound}
+	}
+	r.mu.Lock()
+	pool := r.pools[connectionID]
+	r.mu.Unlock()
+	if pool == nil {
+		return SessionRuntimeResetResult{Status: SessionRuntimeResetNotFound}
+	}
+	return pool.ResetRuntimeProjection(nativeSessionID, expectedTurnInstanceID)
+}
+
+func (r *ACPPoolRegistry) SubscribeSessionRuntime(_ string) (<-chan struct{}, func()) {
+	if r == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed, func() {}
+	}
+	r.mu.Lock()
+	r.nextSubID++
+	id := r.nextSubID
+	changes := make(chan struct{}, 1)
+	r.subscribers[id] = changes
+	r.mu.Unlock()
+	var once sync.Once
+	return changes, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.subscribers, id)
+			r.mu.Unlock()
+		})
+	}
+}
+
+func (r *ACPPoolRegistry) forwardSessionRuntimeChanges(changes <-chan struct{}) {
+	for range changes {
+		r.mu.Lock()
+		for _, subscriber := range r.subscribers {
+			select {
+			case subscriber <- struct{}{}:
+			default:
+			}
+		}
+		r.mu.Unlock()
+	}
 }
 
 type ACPPool struct {
@@ -198,6 +268,29 @@ func (p *ACPPool) HandleSlotFrame(ctx context.Context, slotID string, processEpo
 		return fmt.Errorf("acp pool is required")
 	}
 	return p.router.HandleSlotFrame(ctx, slotID, processEpoch, payload)
+}
+
+func (p *ACPPool) RuntimeSnapshot() ActiveTurnsSnapshot {
+	if p == nil || p.router == nil {
+		return ActiveTurnsSnapshot{}
+	}
+	return p.router.RuntimeSnapshot()
+}
+
+func (p *ACPPool) RuntimeSnapshotAndSubscribe() (ActiveTurnsSnapshot, <-chan struct{}, func()) {
+	if p == nil || p.router == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return ActiveTurnsSnapshot{}, closed, func() {}
+	}
+	return p.router.RuntimeSnapshotAndSubscribe()
+}
+
+func (p *ACPPool) ResetRuntimeProjection(nativeSessionID string, expectedTurnInstanceID string) SessionRuntimeResetResult {
+	if p == nil || p.router == nil {
+		return SessionRuntimeResetResult{Status: SessionRuntimeResetNotFound}
+	}
+	return p.router.ResetRuntimeProjection(nativeSessionID, expectedTurnInstanceID)
 }
 
 func (p *ACPPool) OutputSinkForEngine(spec AgentConnectionSpec, engine ReliableEngine) ACPRouterOutputSink {

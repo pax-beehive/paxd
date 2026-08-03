@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -118,4 +119,30 @@ func TestACPPoolOutputSinkDetachUsesAttachmentToken(t *testing.T) {
 
 	assert.NotPanics(t, detachSecond)
 	assert.Nil(t, pool.outputSink)
+}
+
+func TestACPPoolRegistryPublishesRuntimeSnapshotsWithoutMissingFirstMutation(t *testing.T) {
+	store := newFakeACPRouteStore("conn_1")
+	store.seedRoute(ACPRoute{
+		ConnectionID: "conn_1", NativeSessionID: "session_1",
+		BoundSlotID: "slot_1", BoundProcessEpoch: "epoch_1",
+		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
+	})
+	registry := NewACPPoolRegistry(ACPRouteStoreFactoryFunc(func(string) ACPRouteStore { return store }))
+	changes, unsubscribe := registry.SubscribeSessionRuntime("remote_prod")
+	defer unsubscribe()
+	pool, err := registry.Get("conn_1")
+	require.NoError(t, err)
+	pool.UpsertSlot(newFakeRouterSlot("slot_1", "epoch_1", 0))
+
+	require.NoError(t, pool.HandleManagerFrame(t.Context(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		require.Fail(t, "registry did not publish the runtime mutation")
+	}
+	snapshot, ok := registry.SessionRuntimeSnapshot("conn_1")
+	require.True(t, ok)
+	require.Len(t, snapshot.ActiveTurns, 1)
+	assert.Equal(t, "session_1", snapshot.ActiveTurns[0].NativeSessionID)
 }

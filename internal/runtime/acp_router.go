@@ -84,6 +84,7 @@ type ACPRouter struct {
 	output       ACPRouterOutputSink
 	executable   func() (string, error)
 	workspace    func(string) (string, error)
+	projector    *SessionRuntimeTurnProjector
 
 	mu                 sync.Mutex
 	slots              map[string]ACPRouterSlot
@@ -138,13 +139,17 @@ type pendingNewSession struct {
 
 type pendingPrompt struct {
 	nativeSessionID string
+	turnInstanceID  string
 	slotID          string
 	processEpoch    string
 }
 
 type pendingWorkerRequest struct {
-	slotID       string
-	processEpoch string
+	slotID          string
+	processEpoch    string
+	nativeSessionID string
+	turnInstanceID  string
+	runtimeApproval bool
 }
 
 type slotDrain struct {
@@ -160,6 +165,7 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		output:             ACPRouterOutputSinkFunc(nil),
 		executable:         os.Executable,
 		workspace:          resolveSessionWorkspace,
+		projector:          NewSessionRuntimeProjector(),
 		slots:              make(map[string]ACPRouterSlot),
 		pendingNew:         make(map[string]pendingNewSession),
 		pendingPrompts:     make(map[string]pendingPrompt),
@@ -235,6 +241,7 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 			delete(r.pendingPrompts, id)
 			delete(r.activeSessionTurns, prompt.nativeSessionID)
 			delete(r.activeSlotPrompts, slotID)
+			r.projector.CompleteTurn(prompt.nativeSessionID, prompt.turnInstanceID)
 		}
 	}
 	for id, pending := range r.pendingNew {
@@ -250,6 +257,29 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 
 func (r *ACPRouter) HandleManagerFrame(ctx context.Context, payload []byte) error {
 	return r.HandleManagerFrameForSession(ctx, "", payload)
+}
+
+func (r *ACPRouter) RuntimeSnapshot() ActiveTurnsSnapshot {
+	if r == nil || r.projector == nil {
+		return ActiveTurnsSnapshot{}
+	}
+	return r.projector.Snapshot()
+}
+
+func (r *ACPRouter) RuntimeSnapshotAndSubscribe() (ActiveTurnsSnapshot, <-chan struct{}, func()) {
+	if r == nil || r.projector == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return ActiveTurnsSnapshot{}, closed, func() {}
+	}
+	return r.projector.SnapshotAndSubscribe()
+}
+
+func (r *ACPRouter) ResetRuntimeProjection(nativeSessionID string, expectedTurnInstanceID string) SessionRuntimeResetResult {
+	if r == nil || r.projector == nil {
+		return SessionRuntimeResetResult{Status: SessionRuntimeResetNotFound}
+	}
+	return r.projector.Reset(nativeSessionID, expectedTurnInstanceID)
 }
 
 func (r *ACPRouter) HandleManagerFrameForSession(ctx context.Context, nativeSessionID string, payload []byte) error {
@@ -356,7 +386,17 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		if nativeSessionID != "" {
 			key := workerRequestKey(nativeSessionID, msg.ID)
 			r.mu.Lock()
-			r.pendingWorkerReqs[key] = pendingWorkerRequest{slotID: slotID, processEpoch: processEpoch}
+			pending := pendingWorkerRequest{
+				slotID: slotID, processEpoch: processEpoch, nativeSessionID: nativeSessionID,
+			}
+			if isRuntimeApprovalMethod(msg.Method) {
+				if turn, active := r.projector.ActiveTurn(nativeSessionID); active {
+					pending.turnInstanceID = turn.TurnInstanceID
+					pending.runtimeApproval = true
+					r.projector.WaitForApproval(nativeSessionID, turn.TurnInstanceID, msg.ID)
+				}
+			}
+			r.pendingWorkerReqs[key] = pending
 			r.mu.Unlock()
 		}
 	}
@@ -468,6 +508,9 @@ func (r *ACPRouter) handleManagerResponse(ctx context.Context, nativeSessionID s
 		return ACPRouterError{Code: "worker_request_source_stale", Message: "worker request source is no longer live"}
 	}
 	err := slot.Send(ctx, append([]byte(nil), payload...))
+	if err == nil && source.runtimeApproval {
+		r.projector.ResolveApproval(source.nativeSessionID, source.turnInstanceID)
+	}
 	r.notifySlotDrain(source.slotID)
 	return err
 }
@@ -785,10 +828,15 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	if key == "" {
 		return ACPRouterError{Code: "request_id_required", Message: "session/prompt requires an id"}
 	}
+	turn, err := r.projector.StartTurn(nativeSessionID, requestID, slot.SlotID(), slot.ProcessEpoch())
+	if err != nil {
+		return ACPRouterError{Code: "runtime_projection_failed", Message: err.Error()}
+	}
 	r.activeSessionTurns[nativeSessionID] = key
 	r.activeSlotPrompts[slot.SlotID()] = nativeSessionID
 	r.pendingPrompts[key] = pendingPrompt{
 		nativeSessionID: nativeSessionID,
+		turnInstanceID:  turn.TurnInstanceID,
 		slotID:          slot.SlotID(),
 		processEpoch:    slot.ProcessEpoch(),
 	}
@@ -803,6 +851,7 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 		delete(r.pendingPrompts, key)
 		delete(r.activeSessionTurns, pending.nativeSessionID)
 		delete(r.activeSlotPrompts, slotID)
+		r.projector.CompleteTurn(pending.nativeSessionID, pending.turnInstanceID)
 		r.signalSlotDrainIfIdleLocked(slotID)
 	}
 	r.mu.Unlock()
@@ -814,11 +863,24 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 
 func (r *ACPRouter) releasePrompt(nativeSessionID string, slotID string, requestKey string) {
 	r.mu.Lock()
+	pending := r.pendingPrompts[requestKey]
 	delete(r.pendingPrompts, requestKey)
 	delete(r.activeSessionTurns, nativeSessionID)
 	delete(r.activeSlotPrompts, slotID)
 	r.signalSlotDrainIfIdleLocked(slotID)
 	r.mu.Unlock()
+	if pending.turnInstanceID != "" {
+		r.projector.CompleteTurn(nativeSessionID, pending.turnInstanceID)
+	}
+}
+
+func isRuntimeApprovalMethod(method string) bool {
+	switch method {
+	case "session/request_permission", "permission/request":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *ACPRouter) slotDrainingLocked(slot ACPRouterSlot) bool {

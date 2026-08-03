@@ -107,7 +107,7 @@ func TestACPSlotSessionCancellationStopsStubbornProcessGroup(t *testing.T) {
 
 func TestExecProcessWaitKillsDescendantsAfterLeaderExit(t *testing.T) {
 	proc, err := ExecLocalACPProcessRunner{}.Start(context.Background(), LocalACPProcessSpec{
-		Command: []string{"/bin/sh", "-c", "trap '' INT; sleep 30 & printf ready; exec /bin/true"},
+		Command: []string{"/bin/sh", "-c", "trap '' INT; sleep 30 & printf ready; exit 0"},
 	})
 	require.NoError(t, err)
 	ready := make([]byte, len("ready"))
