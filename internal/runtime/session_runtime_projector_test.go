@@ -80,6 +80,27 @@ func TestSessionRuntimeProjectorSnapshotSubscriptionHasNoGap(t *testing.T) {
 	assert.Greater(t, projector.Snapshot().Revision, initial.Revision)
 }
 
+func TestSessionRuntimeProjectorCompletesOnlyMatchingSlotEpoch(t *testing.T) {
+	projector := NewSessionRuntimeProjector()
+	matching, err := projector.StartTurn("native_matching", json.RawMessage(`1`), "slot_1", "epoch_1")
+	require.NoError(t, err)
+	otherEpoch, err := projector.StartTurn("native_other_epoch", json.RawMessage(`2`), "slot_1", "epoch_2")
+	require.NoError(t, err)
+	_, err = projector.StartTurn("native_other_slot", json.RawMessage(`3`), "slot_2", "epoch_1")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, projector.CompleteSlot("slot_1", "epoch_1"))
+	_, matchingActive := projector.ActiveTurn("native_matching")
+	assert.False(t, matchingActive)
+	_, otherEpochActive := projector.ActiveTurn("native_other_epoch")
+	assert.True(t, otherEpochActive)
+	assert.Equal(t, SessionRuntimeResetAlreadyTerminal, projector.Reset("native_matching", matching.TurnInstanceID).Status)
+
+	assert.Equal(t, 1, projector.CompleteSlot("slot_1", ""))
+	assert.Equal(t, SessionRuntimeResetAlreadyTerminal, projector.Reset("native_other_epoch", otherEpoch.TurnInstanceID).Status)
+	require.Len(t, projector.Snapshot().ActiveTurns, 1)
+}
+
 func TestSessionRuntimeProjectorResetSuppressesOnlyExpectedTurn(t *testing.T) {
 	t.Run("Given an active turn when reset repeats then it is idempotent without deleting router lifecycle state", func(t *testing.T) {
 		projector := NewSessionRuntimeProjector()
