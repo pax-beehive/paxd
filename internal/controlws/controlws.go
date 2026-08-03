@@ -72,14 +72,16 @@ type CommandResultWatcher interface {
 }
 
 type ReportOptions struct {
-	HeartbeatInterval   time.Duration
-	SnapshotInterval    time.Duration
-	SendInitialSnapshot bool
-	Now                 func() time.Time
-	NewID               func(prefix string) string
-	StatusSubscribe     func(remoteID string) (<-chan struct{}, func())
-	AttachmentSubscribe func(remoteID string) (<-chan control.AttachmentLocalState, func())
-	PokeDebounce        time.Duration
+	HeartbeatInterval                 time.Duration
+	SnapshotInterval                  time.Duration
+	SendInitialSnapshot               bool
+	Now                               func() time.Time
+	NewID                             func(prefix string) string
+	StatusSubscribe                   func(remoteID string) (<-chan struct{}, func())
+	AttachmentSubscribe               func(remoteID string) (<-chan control.AttachmentLocalState, func())
+	PokeDebounce                      time.Duration
+	SessionRuntimeSnapshotInterval    time.Duration
+	SendInitialSessionRuntimeSnapshot bool
 }
 
 type Runner struct {
@@ -137,7 +139,8 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 }
 
 func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
-	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil {
+	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil &&
+		opts.SessionRuntimeSnapshotInterval <= 0 && !opts.SendInitialSessionRuntimeSnapshot {
 		return
 	}
 	now := opts.Now
@@ -206,6 +209,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 			}()
 		}
 	}
+	startSessionRuntimeReportPump(ctx, cancel, writer, remoteID, nodeID, service, opts, now, newID)
 	reporter, ok := service.(control.ReportService)
 	if !ok {
 		return
@@ -283,6 +287,81 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 			}()
 		}
 	}
+}
+
+func startSessionRuntimeReportPump(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	writer *frameWriter,
+	remoteID string,
+	nodeID string,
+	service control.Service,
+	opts ReportOptions,
+	now func() time.Time,
+	newID func(string) string,
+) {
+	reporter, ok := service.(control.SessionRuntimeReportService)
+	if !ok || opts.SessionRuntimeSnapshotInterval <= 0 && !opts.SendInitialSessionRuntimeSnapshot {
+		return
+	}
+	go func() {
+		changes, unsubscribe := reporter.SubscribeSessionRuntime(remoteID)
+		if unsubscribe != nil {
+			defer unsubscribe()
+		}
+		var ticker *time.Ticker
+		var tickerC <-chan time.Time
+		if opts.SessionRuntimeSnapshotInterval > 0 {
+			ticker = time.NewTicker(opts.SessionRuntimeSnapshotInterval)
+			tickerC = ticker.C
+			defer ticker.Stop()
+		}
+		sequence := int64(0)
+		send := func() bool {
+			snapshots, err := reporter.BuildSessionRuntimeSnapshots(ctx, remoteID, nodeID)
+			if err != nil {
+				return true
+			}
+			for i := range snapshots {
+				sequence++
+				snapshot := snapshots[i]
+				snapshot.Sequence = sequence
+				snapshot.GeneratedAt = now().UTC().Format(time.RFC3339Nano)
+				frame := reportFrame(newID("rpt"), control.Report{
+					Type:                   control.ReportSessionRuntimeSnapshot,
+					RemoteID:               remoteID,
+					NodeID:                 nodeID,
+					SentAt:                 now().UTC().Format(time.RFC3339Nano),
+					SessionRuntimeSnapshot: &snapshot,
+				})
+				if err := writer.write(frame); err != nil {
+					cancel()
+					return false
+				}
+			}
+			return true
+		}
+		if opts.SendInitialSessionRuntimeSnapshot && !send() {
+			return
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-changes:
+				if changes == nil {
+					continue
+				}
+				if !ok || !send() {
+					return
+				}
+			case <-tickerC:
+				if !send() {
+					return
+				}
+			}
+		}
+	}()
 }
 
 func reportFrame(reportID string, report control.Report) ReportFrame {

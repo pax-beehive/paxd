@@ -94,6 +94,7 @@ type ServiceOptions struct {
 	ACPPoolCapabilities ACPPoolCapabilitySource
 	Diagnostics         DiagnosticsProvider
 	Attachments         AttachmentLocalizer
+	SessionRuntime      SessionRuntimeReportService
 }
 
 type ControlService struct {
@@ -105,6 +106,7 @@ type ControlService struct {
 	acpPoolCapabilities ACPPoolCapabilitySource
 	diagnostics         DiagnosticsProvider
 	attachments         AttachmentLocalizer
+	sessionRuntime      SessionRuntimeReportService
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -117,7 +119,26 @@ func NewService(opts ServiceOptions) *ControlService {
 		acpPoolCapabilities: opts.ACPPoolCapabilities,
 		diagnostics:         opts.Diagnostics,
 		attachments:         opts.Attachments,
+		sessionRuntime:      opts.SessionRuntime,
 	}
+}
+
+func (s *ControlService) BuildSessionRuntimeSnapshots(
+	ctx context.Context,
+	remoteID string,
+	nodeID string,
+) ([]SessionRuntimeSnapshotReport, error) {
+	if s.sessionRuntime == nil {
+		return nil, nil
+	}
+	return s.sessionRuntime.BuildSessionRuntimeSnapshots(ctx, remoteID, nodeID)
+}
+
+func (s *ControlService) SubscribeSessionRuntime(remoteID string) (<-chan struct{}, func()) {
+	if s.sessionRuntime == nil {
+		return nil, func() {}
+	}
+	return s.sessionRuntime.SubscribeSessionRuntime(remoteID)
 }
 
 func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Command) (CommandAck, error) {

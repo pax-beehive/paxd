@@ -133,6 +133,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		ACPPoolCapabilities: supervisors.acpCapabilityReports,
 		Diagnostics:         supervisors,
 		Attachments:         attachments,
+		SessionRuntime:      supervisors,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)

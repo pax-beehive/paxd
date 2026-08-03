@@ -47,9 +47,11 @@ type runtimeSupervisors struct {
 	transportProducers interface {
 		Close(context.Context) error
 	}
-	transportStats *runtimes.TransportStatsTracker
-	startedAt      time.Time
-	logFilePath    string
+	transportStats  *runtimes.TransportStatsTracker
+	startedAt       time.Time
+	logFilePath     string
+	store           *daemonstore.Store
+	acpPoolRegistry *runtimes.ACPPoolRegistry
 }
 
 type transportJournalPruner interface {
@@ -81,6 +83,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	if service == nil {
 		return errors.New("control service is required")
 	}
+	s.store = store
 	sqlDB, err := openTransportDB()
 	if err != nil {
 		return fmt.Errorf("open reliable transport database: %w", err)
@@ -121,10 +124,12 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	dialer := runtimes.GorillaWebSocketDialer{}
 	runner := controlws.NewRunner(service)
 	runner.Reports = controlws.ReportOptions{
-		HeartbeatInterval:   10 * time.Second,
-		SnapshotInterval:    30 * time.Second,
-		SendInitialSnapshot: true,
-		PokeDebounce:        500 * time.Millisecond,
+		HeartbeatInterval:                 10 * time.Second,
+		SnapshotInterval:                  30 * time.Second,
+		SendInitialSnapshot:               true,
+		PokeDebounce:                      500 * time.Millisecond,
+		SessionRuntimeSnapshotInterval:    30 * time.Second,
+		SendInitialSessionRuntimeSnapshot: true,
 	}
 	if s.statusHub != nil {
 		runner.Reports.StatusSubscribe = s.statusHub.Subscribe
@@ -135,6 +140,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	acpPoolRegistry := runtimes.NewACPPoolRegistry(runtimes.ACPRouteStoreFactoryFunc(func(connectionID string) runtimes.ACPRouteStore {
 		return acpRouteStoreAdapter{store: store}
 	}))
+	s.acpPoolRegistry = acpPoolRegistry
 
 	remoteFactory := &remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner}
 	remote := supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
@@ -186,6 +192,56 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		},
 	})
 	return nil
+}
+
+func (s *runtimeSupervisors) BuildSessionRuntimeSnapshots(
+	ctx context.Context,
+	remoteID string,
+	nodeID string,
+) ([]control.SessionRuntimeSnapshotReport, error) {
+	if s == nil || s.store == nil || s.acpPoolRegistry == nil {
+		return nil, nil
+	}
+	connections, err := s.store.ListAgentConnections(ctx, control.ListAgentConnectionsQuery{
+		RemoteID: remoteID, IncludeDisabled: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reports := make([]control.SessionRuntimeSnapshotReport, 0, len(connections))
+	for _, connection := range connections {
+		if strings.TrimSpace(connection.CloudAgentID) == "" {
+			continue
+		}
+		pool, err := s.acpPoolRegistry.Get(connection.ID)
+		if err != nil {
+			return nil, err
+		}
+		snapshot := pool.RuntimeSnapshot()
+		report := control.SessionRuntimeSnapshotReport{
+			AgentID: connection.CloudAgentID, ConnectionID: connection.ID,
+			SchemaVersion: 1,
+			ActiveTurns:   make([]control.SessionActiveTurnReport, 0, len(snapshot.ActiveTurns)),
+		}
+		for _, turn := range snapshot.ActiveTurns {
+			report.ActiveTurns = append(report.ActiveTurns, control.SessionActiveTurnReport{
+				NativeSessionID: turn.NativeSessionID, TurnInstanceID: turn.TurnInstanceID,
+				PromptRequestID:   append(json.RawMessage(nil), turn.PromptRequestID...),
+				RuntimeStatus:     string(turn.RuntimeStatus),
+				PendingApprovalID: append(json.RawMessage(nil), turn.PendingApprovalID...),
+				SlotID:            turn.SlotID, ProcessEpoch: turn.ProcessEpoch,
+			})
+		}
+		reports = append(reports, report)
+	}
+	return reports, nil
+}
+
+func (s *runtimeSupervisors) SubscribeSessionRuntime(remoteID string) (<-chan struct{}, func()) {
+	if s == nil || s.acpPoolRegistry == nil {
+		return nil, func() {}
+	}
+	return s.acpPoolRegistry.SubscribeSessionRuntime(remoteID)
 }
 
 func openTransportDB() (*sql.DB, error) {

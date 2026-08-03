@@ -384,6 +384,54 @@ func TestInitialRuntimeSnapshotReportUsesControlLayer(t *testing.T) {
 	assert.Equal(t, "conn_codex", got.Report.RuntimeSnapshot.Agents[0].ConnectionID)
 }
 
+func TestSessionRuntimeSnapshotPumpSerializesInitialAndChangedReports(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changes := make(chan struct{}, 1)
+	service := &reportingService{
+		sessionRuntimeChanges: changes,
+		sessionRuntimeSnapshots: []control.SessionRuntimeSnapshotReport{{
+			AgentID: "agent_123", ConnectionID: "conn_codex",
+			ActiveTurns: []control.SessionActiveTurnReport{{
+				NativeSessionID: "native_1", TurnInstanceID: "turn_1",
+				PromptRequestID: json.RawMessage(`1`), RuntimeStatus: "running",
+			}},
+		}},
+	}
+	conn := newBlockingFakeWebSocketConn()
+	runner := Runner{
+		Service: service,
+		Reports: ReportOptions{
+			SendInitialSessionRuntimeSnapshot: true,
+			SessionRuntimeSnapshotInterval:    time.Hour,
+			Now: func() time.Time {
+				return time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+			},
+			NewID: fixedReportID("rpt_session_runtime"),
+		},
+	}
+	done := make(chan runtimes.Exit, 1)
+	go func() {
+		done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+	}()
+
+	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, 2*time.Second, 10*time.Millisecond)
+	changes <- struct{}{}
+	require.Eventually(t, func() bool { return len(conn.writes()) == 2 }, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+
+	first := decodeReportFrame(t, conn.writes()[0])
+	second := decodeReportFrame(t, conn.writes()[1])
+	assert.Equal(t, control.ReportSessionRuntimeSnapshot, first.Report.Type)
+	require.NotNil(t, first.Report.SessionRuntimeSnapshot)
+	assert.Equal(t, int64(1), first.Report.SessionRuntimeSnapshot.Sequence)
+	assert.Equal(t, int64(2), second.Report.SessionRuntimeSnapshot.Sequence)
+	assert.Equal(t, "agent_123", first.Report.SessionRuntimeSnapshot.AgentID)
+	require.Len(t, first.Report.SessionRuntimeSnapshot.ActiveTurns, 1)
+	assert.JSONEq(t, `1`, string(first.Report.SessionRuntimeSnapshot.ActiveTurns[0].PromptRequestID))
+}
+
 func TestInitialSnapshotDoesNotBlockReadLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -538,11 +586,23 @@ func (s *resultWatchingService) WatchCommandResults(context.Context, control.Sou
 }
 
 type reportingService struct {
-	snapshot          control.RuntimeSnapshotReport
-	snapshotErr       error
-	blockSnapshot     <-chan struct{}
-	snapshotRemoteIDs []string
-	snapshotNodeIDs   []string
+	snapshot                control.RuntimeSnapshotReport
+	snapshotErr             error
+	blockSnapshot           <-chan struct{}
+	snapshotRemoteIDs       []string
+	snapshotNodeIDs         []string
+	sessionRuntimeSnapshots []control.SessionRuntimeSnapshotReport
+	sessionRuntimeChanges   <-chan struct{}
+}
+
+func (s *reportingService) BuildSessionRuntimeSnapshots(context.Context, string, string) ([]control.SessionRuntimeSnapshotReport, error) {
+	result := make([]control.SessionRuntimeSnapshotReport, len(s.sessionRuntimeSnapshots))
+	copy(result, s.sessionRuntimeSnapshots)
+	return result, nil
+}
+
+func (s *reportingService) SubscribeSessionRuntime(string) (<-chan struct{}, func()) {
+	return s.sessionRuntimeChanges, func() {}
 }
 
 func (s *reportingService) HandleCommand(context.Context, control.Source, control.Command) (control.CommandAck, error) {

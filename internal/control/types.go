@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -25,6 +26,11 @@ type Service interface {
 
 type ReportService interface {
 	BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (RuntimeSnapshotReport, error)
+}
+
+type SessionRuntimeReportService interface {
+	BuildSessionRuntimeSnapshots(ctx context.Context, remoteID string, nodeID string) ([]SessionRuntimeSnapshotReport, error)
+	SubscribeSessionRuntime(remoteID string) (<-chan struct{}, func())
 }
 
 type HostMetricsProvider interface {
@@ -291,9 +297,10 @@ type CommandResult struct {
 type ReportType string
 
 const (
-	ReportHeartbeat            ReportType = "heartbeat"
-	ReportRuntimeSnapshot      ReportType = "runtime.snapshot"
-	ReportAttachmentLocalState ReportType = "attachment.local_state"
+	ReportHeartbeat              ReportType = "heartbeat"
+	ReportRuntimeSnapshot        ReportType = "runtime.snapshot"
+	ReportSessionRuntimeSnapshot ReportType = "session_runtime.snapshot"
+	ReportAttachmentLocalState   ReportType = "attachment.local_state"
 )
 
 type Report struct {
@@ -302,9 +309,29 @@ type Report struct {
 	NodeID   string     `json:"node_id,omitempty"`
 	SentAt   string     `json:"sent_at"`
 
-	Heartbeat            *HeartbeatReport       `json:"heartbeat,omitempty"`
-	RuntimeSnapshot      *RuntimeSnapshotReport `json:"runtime_snapshot,omitempty"`
-	AttachmentLocalState *AttachmentLocalState  `json:"attachment_local_state,omitempty"`
+	Heartbeat              *HeartbeatReport              `json:"heartbeat,omitempty"`
+	RuntimeSnapshot        *RuntimeSnapshotReport        `json:"runtime_snapshot,omitempty"`
+	SessionRuntimeSnapshot *SessionRuntimeSnapshotReport `json:"session_runtime_snapshot,omitempty"`
+	AttachmentLocalState   *AttachmentLocalState         `json:"attachment_local_state,omitempty"`
+}
+
+type SessionRuntimeSnapshotReport struct {
+	AgentID       string                    `json:"agent_id"`
+	ConnectionID  string                    `json:"connection_id,omitempty"`
+	Sequence      int64                     `json:"sequence"`
+	GeneratedAt   string                    `json:"generated_at"`
+	SchemaVersion int                       `json:"schema_version"`
+	ActiveTurns   []SessionActiveTurnReport `json:"active_turns"`
+}
+
+type SessionActiveTurnReport struct {
+	NativeSessionID   string          `json:"native_session_id"`
+	TurnInstanceID    string          `json:"turn_instance_id"`
+	PromptRequestID   json.RawMessage `json:"prompt_request_id"`
+	RuntimeStatus     string          `json:"runtime_status"`
+	PendingApprovalID json.RawMessage `json:"pending_approval_id,omitempty"`
+	SlotID            string          `json:"slot_id,omitempty"`
+	ProcessEpoch      string          `json:"process_epoch,omitempty"`
 }
 
 type HeartbeatReport struct{}
