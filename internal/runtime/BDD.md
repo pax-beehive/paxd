@@ -260,6 +260,46 @@ And includes safe process exit diagnostics
 
 ## ACP slot and router core
 
+### Scenario: prompt lease creates one projected active turn
+
+Given the router acquires a prompt lease for a native session
+When it forwards `session/prompt`
+Then the runtime projector records one globally unique turn instance
+And preserves the original string or numeric JSON-RPC request id
+And publishes the turn as `running`
+
+### Scenario: approval waiting is a state transition, not a new turn
+
+Given a projected turn is running
+When the agent requests permission
+Then the same turn instance becomes `waiting_approval`
+And approval resolution returns it to `running`
+And approval rejection alone does not release the prompt lease
+
+### Scenario: terminal lifecycle removes the projected turn
+
+Given a projected turn is active
+When prompt success, prompt failure, or slot/process termination occurs
+Then the active turn is removed
+And cancellation intent alone does not remove it before terminal completion
+
+### Scenario: snapshot subscription has no missed-change window
+
+Given a reporter needs the current active-turn set and future changes
+When it acquires a snapshot subscription
+Then subscription is established before the initial snapshot is returned
+And a racing projector change is either in the initial snapshot or delivered
+as a later revision
+
+### Scenario: compare-and-reset suppresses projection only
+
+Given a native session has an active projected turn
+When reset carries the matching turn instance
+Then the projector suppresses that turn from complete snapshots
+And it does not delete the router lease, slot lifecycle, or ACP task
+And late events for the suppressed terminal turn cannot resurrect it
+And a new prompt with a new turn instance is visible normally
+
 ### Scenario: ACP slot initializes before becoming ready
 
 Given an `ACPSlot` starts a local ACP stdio process

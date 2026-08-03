@@ -108,6 +108,24 @@ And it does not apply the new mutation
 
 ## Remote commands
 
+### Scenario: session runtime reset compares the active turn
+
+Given the authenticated runtime connection owns the requested cloud agent
+And its projector contains the native session and expected turn instance
+When `session_runtime.reset` is handled
+Then the projector suppresses only that matching projection
+And the command acknowledgement reports the suppression result immediately
+And every reset outcome advances the projection revision so a complete
+snapshot is republished
+
+### Scenario: session runtime reset rejects a mismatched binding
+
+Given the command names an agent or connection outside the active runtime
+binding
+When `session_runtime.reset` is handled
+Then the command is rejected
+And no session projection is mutated
+
 ### Scenario: creates a remote
 
 Given no remote exists for `https://api.example.test`  

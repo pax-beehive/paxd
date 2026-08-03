@@ -134,6 +134,24 @@ And `controlws` does not retry result delivery by itself unless a higher-level p
 
 ## Ordering and backpressure
 
+### Scenario: one writer pumps complete runtime snapshots
+
+Given the control WebSocket is connected
+When initial state, projector changes, periodic refresh, or reset triggers a
+session runtime report
+Then one report pump serializes complete `active_turns` snapshots
+And allocates a strictly increasing connection-scoped sequence to each emitted
+snapshot
+And a racing change cannot be lost beyond the next emitted snapshot
+
+### Scenario: reconnect begins with a complete snapshot
+
+Given node control reconnects while turns are active
+When the new connection report pump starts
+Then it subscribes before reading the initial projector snapshot
+And sends that complete snapshot without treating disconnect as turn
+completion
+
 ### Scenario: serializes writes to the WebSocket
 
 Given multiple goroutines may attempt to write ACK, query response, and command result frames  
