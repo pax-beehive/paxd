@@ -77,6 +77,7 @@ func (cmd Command) Validate() error {
 		{CommandAgentConnectionRestart, cmd.RestartAgentConnection != nil, validatePtr(cmd.RestartAgentConnection)},
 		{CommandUpgradePaxd, cmd.UpgradePaxd != nil, validatePtr(cmd.UpgradePaxd)},
 		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
+		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
 	}
 
 	count := 0
@@ -290,6 +291,24 @@ func (cmd EnsureAttachmentLocalCommand) Validate() error {
 	return nil
 }
 
+func (cmd ResetSessionRuntimeCommand) Validate() error {
+	checks := []struct {
+		field string
+		value string
+	}{
+		{"reset_session_runtime.agent_id", cmd.AgentID},
+		{"reset_session_runtime.connection_id", cmd.ConnectionID},
+		{"reset_session_runtime.native_session_id", cmd.NativeSessionID},
+		{"reset_session_runtime.expected_turn_instance_id", cmd.ExpectedTurnInstanceID},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.value) == "" {
+			return invalid(check.field, "value is required")
+		}
+	}
+	return nil
+}
+
 func (query Query) Validate() error {
 	if query.Type == "" {
 		return invalid("type", "query type is required")
@@ -480,7 +499,8 @@ func knownCommandType(typ CommandType) bool {
 		CommandAgentConnectionDelete,
 		CommandAgentConnectionRestart,
 		CommandUpgradePaxd,
-		CommandAttachmentEnsureLocal:
+		CommandAttachmentEnsureLocal,
+		CommandSessionRuntimeReset:
 		return true
 	default:
 		return false

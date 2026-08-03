@@ -244,6 +244,44 @@ func (s *runtimeSupervisors) SubscribeSessionRuntime(remoteID string) (<-chan st
 	return s.acpPoolRegistry.SubscribeSessionRuntime(remoteID)
 }
 
+func (s *runtimeSupervisors) ResetSessionRuntime(
+	ctx context.Context,
+	remoteID string,
+	command control.ResetSessionRuntimeCommand,
+) (control.SessionRuntimeResetResult, error) {
+	if s == nil || s.store == nil || s.acpPoolRegistry == nil {
+		return control.SessionRuntimeResetResult{}, control.ControlError{
+			Code: control.ErrCodeInternal, Message: "session runtime source is not configured",
+		}
+	}
+	connections, err := s.store.ListAgentConnections(ctx, control.ListAgentConnectionsQuery{
+		RemoteID: remoteID, IncludeDisabled: true,
+	})
+	if err != nil {
+		return control.SessionRuntimeResetResult{}, err
+	}
+	authorized := false
+	for _, connection := range connections {
+		if connection.ID == command.ConnectionID && connection.CloudAgentID == command.AgentID {
+			authorized = true
+			break
+		}
+	}
+	if !authorized {
+		return control.SessionRuntimeResetResult{}, control.ControlError{
+			Code: control.ErrCodeNotFound, Message: "agent connection is not bound to this remote",
+		}
+	}
+	result := s.acpPoolRegistry.ResetSessionRuntime(
+		command.ConnectionID,
+		command.NativeSessionID,
+		command.ExpectedTurnInstanceID,
+	)
+	return control.SessionRuntimeResetResult{
+		Status: string(result.Status), ProjectionRevision: result.Revision,
+	}, nil
+}
+
 func openTransportDB() (*sql.DB, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

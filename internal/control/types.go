@@ -33,6 +33,10 @@ type SessionRuntimeReportService interface {
 	SubscribeSessionRuntime(remoteID string) (<-chan struct{}, func())
 }
 
+type SessionRuntimeResetService interface {
+	ResetSessionRuntime(ctx context.Context, remoteID string, command ResetSessionRuntimeCommand) (SessionRuntimeResetResult, error)
+}
+
 type HostMetricsProvider interface {
 	CurrentHostMetrics(ctx context.Context) (*HostMetricsReport, error)
 }
@@ -72,6 +76,7 @@ const (
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
+	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
 )
 
 type CommandStatus string
@@ -103,6 +108,19 @@ type Command struct {
 
 	UpgradePaxd           *UpgradePaxdCommand           `json:"upgrade_paxd,omitempty"`
 	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
+	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
+}
+
+type ResetSessionRuntimeCommand struct {
+	AgentID                string `json:"agent_id"`
+	ConnectionID           string `json:"connection_id"`
+	NativeSessionID        string `json:"native_session_id"`
+	ExpectedTurnInstanceID string `json:"expected_turn_instance_id"`
+}
+
+type SessionRuntimeResetResult struct {
+	Status             string `json:"status"`
+	ProjectionRevision uint64 `json:"projection_revision"`
 }
 
 type AttachmentDescriptor struct {
@@ -289,9 +307,10 @@ type CommandAck struct {
 }
 
 type CommandResult struct {
-	Remote          *RemoteView          `json:"remote,omitempty"`
-	AgentConnection *AgentConnectionView `json:"agent_connection,omitempty"`
-	Command         *CommandView         `json:"command,omitempty"`
+	Remote              *RemoteView                `json:"remote,omitempty"`
+	AgentConnection     *AgentConnectionView       `json:"agent_connection,omitempty"`
+	Command             *CommandView               `json:"command,omitempty"`
+	SessionRuntimeReset *SessionRuntimeResetResult `json:"session_runtime_reset,omitempty"`
 }
 
 type ReportType string

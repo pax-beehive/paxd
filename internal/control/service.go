@@ -95,6 +95,7 @@ type ServiceOptions struct {
 	Diagnostics         DiagnosticsProvider
 	Attachments         AttachmentLocalizer
 	SessionRuntime      SessionRuntimeReportService
+	SessionRuntimeReset SessionRuntimeResetService
 }
 
 type ControlService struct {
@@ -107,6 +108,7 @@ type ControlService struct {
 	diagnostics         DiagnosticsProvider
 	attachments         AttachmentLocalizer
 	sessionRuntime      SessionRuntimeReportService
+	sessionRuntimeReset SessionRuntimeResetService
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -120,6 +122,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		diagnostics:         opts.Diagnostics,
 		attachments:         opts.Attachments,
 		sessionRuntime:      opts.SessionRuntime,
+		sessionRuntimeReset: opts.SessionRuntimeReset,
 	}
 }
 
@@ -144,6 +147,9 @@ func (s *ControlService) SubscribeSessionRuntime(remoteID string) (<-chan struct
 func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
 	if err := cmd.Validate(); err != nil {
 		return rejectedAck(cmd.CommandID, "", "", controlErr(err)), nil
+	}
+	if cmd.Type == CommandSessionRuntimeReset {
+		return s.handleSessionRuntimeReset(ctx, src, cmd)
 	}
 	if s.store == nil {
 		return failedAck(cmd.CommandID, "", "", ControlError{Code: ErrCodeInternal, Message: "control store is not configured"}), nil
@@ -226,6 +232,23 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 		}
 	}
 	return ack, nil
+}
+
+func (s *ControlService) handleSessionRuntimeReset(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
+	if s.sessionRuntimeReset == nil {
+		return failedAck(cmd.CommandID, "session", cmd.ResetSessionRuntime.NativeSessionID, ControlError{
+			Code: ErrCodeInternal, Message: "session runtime reset is not configured",
+		}), nil
+	}
+	result, err := s.sessionRuntimeReset.ResetSessionRuntime(ctx, src.RemoteID, *cmd.ResetSessionRuntime)
+	if err != nil {
+		return failedAck(cmd.CommandID, "session", cmd.ResetSessionRuntime.NativeSessionID, errorToControlError(err)), nil
+	}
+	return CommandAck{
+		CommandID: cmd.CommandID, OK: true, Status: CommandStatusApplied,
+		TargetType: "session", TargetID: cmd.ResetSessionRuntime.NativeSessionID,
+		Result: &CommandResult{SessionRuntimeReset: &result},
+	}, nil
 }
 
 func isDesiredSlotsOnlyUpdate(cmd Command) bool {
@@ -563,6 +586,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
 	case CommandAttachmentEnsureLocal:
 		return "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID
+	case CommandSessionRuntimeReset:
+		return "session", cmd.ResetSessionRuntime.NativeSessionID
 	default:
 		return "", ""
 	}

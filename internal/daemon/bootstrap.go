@@ -134,6 +134,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Diagnostics:         supervisors,
 		Attachments:         attachments,
 		SessionRuntime:      supervisors,
+		SessionRuntimeReset: supervisors,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
