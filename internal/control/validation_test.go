@@ -343,6 +343,7 @@ func TestRestartPaxdCommandValidation(t *testing.T) {
 	valid := []RestartPaxdCommand{
 		{},
 		{Mode: PaxdRestartImmediate},
+		{Mode: PaxdRestartWhenIdle, IdleGraceSeconds: 5, DrainTimeoutSeconds: 120},
 		{Mode: PaxdRestartImmediate, ShutdownGraceSeconds: 60, Reason: "operator requested"},
 	}
 	for _, command := range valid {
@@ -350,7 +351,7 @@ func TestRestartPaxdCommandValidation(t *testing.T) {
 	}
 
 	invalid := []RestartPaxdCommand{
-		{Mode: PaxdRestartMode("when_idle")},
+		{Mode: PaxdRestartMode("opportunistic")},
 		{ShutdownGraceSeconds: -1},
 		{ShutdownGraceSeconds: 61},
 		{Reason: strings.Repeat("x", 513)},

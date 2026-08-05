@@ -1498,6 +1498,7 @@ func commandView(cmd ControlCommand) control.CommandView {
 		DesiredGeneration: desired,
 		ErrorCode:         cmd.ErrorCode,
 		ErrorMessage:      cmd.ErrorMessage,
+		Result:            json.RawMessage(cmd.ResultJSON),
 		ReceivedAt:        cmd.ReceivedAt.Format(time.RFC3339Nano),
 		UpdatedAt:         cmd.UpdatedAt.Format(time.RFC3339Nano),
 	}

@@ -156,10 +156,10 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	if cmd.Type == CommandSessionRuntimeReset {
 		return s.handleSessionRuntimeReset(ctx, src, cmd)
 	}
-	if cmd.Type == CommandRestartPaxd {
+	if isPaxdMaintenanceCommand(cmd.Type) {
 		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
 			return rejectedAck(cmd.CommandID, "paxd", "", ControlError{
-				Code: ErrCodeInvalidArgument, Message: "paxd restart requires an authenticated remote node-control source",
+				Code: ErrCodeInvalidArgument, Message: "paxd maintenance requires an authenticated remote node-control source",
 			}), nil
 		}
 		if s.paxdLifecycle == nil {
@@ -190,8 +190,8 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 			}), nil
 		}
 		ack := ackFromRecord(*existing)
-		if cmd.Type == CommandRestartPaxd {
-			return s.prepareRestartAck(ctx, cmd, *existing, ack), nil
+		if isDeferredPaxdMaintenance(cmd.Type) {
+			return s.prepareMaintenanceAck(ctx, cmd, *existing, ack), nil
 		}
 		return ack, nil
 	}
@@ -223,12 +223,21 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 		}
 		return failedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
 	}
-	if cmd.Type == CommandRestartPaxd {
+	if isDeferredPaxdMaintenance(cmd.Type) {
 		rec, lookupErr := s.store.GetCommandRecord(ctx, cmd.CommandID)
 		if lookupErr != nil {
 			return failedAck(cmd.CommandID, "paxd", "", errorToControlError(lookupErr)), nil
 		}
-		ack = s.prepareRestartAck(ctx, cmd, *rec, ack)
+		ack = s.prepareMaintenanceAck(ctx, cmd, *rec, ack)
+	}
+	if cmd.Type == CommandCancelPaxdMaintenance {
+		if cancelErr := s.paxdLifecycle.Cancel(cmd.CancelPaxdMaintenance.MaintenanceCommandID); cancelErr != nil {
+			controlErr := errorToControlError(cancelErr)
+			_ = s.store.CompleteCommand(ctx, cmd.CommandID, CommandCompletion{Status: CommandStatusFailed, ErrorCode: controlErr.Code, ErrorMessage: cancelErr.Error()})
+			return failedAck(cmd.CommandID, "paxd", cmd.CancelPaxdMaintenance.MaintenanceCommandID, controlErr), nil
+		}
+		_ = s.store.CompleteCommand(ctx, cmd.CommandID, CommandCompletion{Status: CommandStatusApplied})
+		ack.Status = CommandStatusApplied
 	}
 	wakeACPSlots := wakeAgents
 	if isDesiredSlotsOnlyUpdate(cmd) {
@@ -372,7 +381,9 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Comma
 	case CommandRestartPaxd:
 		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
 	case CommandUpgradePaxd:
-		return CommandAck{}, false, false, ErrNotFound
+		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
+	case CommandCancelPaxdMaintenance:
+		return receivedAck(cmd.CommandID, "paxd", cmd.CancelPaxdMaintenance.MaintenanceCommandID), false, false, nil
 	case CommandAttachmentEnsureLocal:
 		if s.attachments == nil {
 			return CommandAck{}, false, false, errors.New("attachment localizer is not configured")
@@ -614,8 +625,10 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.DeleteAgentConnection.ConnectionID
 	case CommandAgentConnectionRestart:
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
-	case CommandRestartPaxd:
+	case CommandRestartPaxd, CommandUpgradePaxd:
 		return "paxd", ""
+	case CommandCancelPaxdMaintenance:
+		return "paxd", cmd.CancelPaxdMaintenance.MaintenanceCommandID
 	case CommandAttachmentEnsureLocal:
 		return "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID
 	case CommandSessionRuntimeReset:
@@ -673,13 +686,7 @@ func (s *ControlService) ConfirmCommandAckDelivered(commandID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	rec, err := s.store.GetCommandRecord(ctx, commandID)
-	if err != nil || rec.Type != CommandRestartPaxd || rec.Status != CommandStatusReceived {
-		return
-	}
-	if err := s.store.CompleteCommand(ctx, commandID, CommandCompletion{
-		Status: CommandStatusApplied, ResultJSON: rec.ResultJSON,
-	}); err != nil {
-		log.Printf("[paxd] confirm restart ACK command_id=%s failed: %v", commandID, err)
+	if err != nil || !isDeferredPaxdMaintenance(rec.Type) || rec.Status != CommandStatusReceived {
 		return
 	}
 	s.paxdLifecycle.ConfirmAckDelivered(commandID)

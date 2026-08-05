@@ -34,7 +34,9 @@ type DeferredCommandAction interface {
 // durable command ACK has been delivered.
 type PaxdLifecycle interface {
 	BootID() string
-	ScheduleRestart(commandID string, command RestartPaxdCommand)
+	ScheduleRestart(commandID string, command RestartPaxdCommand) error
+	ScheduleUpgrade(commandID string, command UpgradePaxdCommand) error
+	Cancel(commandID string) error
 	ConfirmAckDelivered(commandID string)
 }
 
@@ -90,6 +92,7 @@ const (
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
 	CommandRestartPaxd            CommandType = "paxd.restart"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
+	CommandCancelPaxdMaintenance  CommandType = "paxd.maintenance.cancel"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
 	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
 )
@@ -123,6 +126,7 @@ type Command struct {
 
 	RestartPaxd           *RestartPaxdCommand           `json:"restart_paxd,omitempty"`
 	UpgradePaxd           *UpgradePaxdCommand           `json:"upgrade_paxd,omitempty"`
+	CancelPaxdMaintenance *CancelPaxdMaintenanceCommand `json:"cancel_paxd_maintenance,omitempty"`
 	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
 	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
 }
@@ -308,17 +312,41 @@ type RestartAgentConnectionCommand struct {
 
 type PaxdRestartMode string
 
-const PaxdRestartImmediate PaxdRestartMode = "immediate"
+const (
+	PaxdRestartImmediate PaxdRestartMode = "immediate"
+	PaxdRestartWhenIdle  PaxdRestartMode = "when_idle"
+)
 
 type RestartPaxdCommand struct {
 	Mode                 PaxdRestartMode `json:"mode,omitempty"`
 	ShutdownGraceSeconds int             `json:"shutdown_grace_seconds,omitempty"`
+	IdleGraceSeconds     int             `json:"idle_grace_seconds,omitempty"`
+	DrainTimeoutSeconds  int             `json:"drain_timeout_seconds,omitempty"`
+	ForceAtDeadline      bool            `json:"force_at_deadline,omitempty"`
 	Reason               string          `json:"reason,omitempty"`
 }
 
+type PaxdUpgradeMode string
+
+const (
+	PaxdUpgradeImmediate     PaxdUpgradeMode = "immediate"
+	PaxdUpgradeWhenIdle      PaxdUpgradeMode = "when_idle"
+	PaxdUpgradeOpportunistic PaxdUpgradeMode = "opportunistic"
+)
+
 type UpgradePaxdCommand struct {
-	Version string `json:"version,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Version              string          `json:"version,omitempty"`
+	Tag                  string          `json:"tag,omitempty"`
+	Mode                 PaxdUpgradeMode `json:"mode,omitempty"`
+	ShutdownGraceSeconds int             `json:"shutdown_grace_seconds,omitempty"`
+	IdleGraceSeconds     int             `json:"idle_grace_seconds,omitempty"`
+	DrainTimeoutSeconds  int             `json:"drain_timeout_seconds,omitempty"`
+	ForceAtDeadline      bool            `json:"force_at_deadline,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
+}
+
+type CancelPaxdMaintenanceCommand struct {
+	MaintenanceCommandID string `json:"maintenance_command_id"`
 }
 
 type CommandAck struct {
@@ -334,6 +362,7 @@ type CommandAck struct {
 
 type CommandResult struct {
 	PaxdRestart         *PaxdRestartResult         `json:"paxd_restart,omitempty"`
+	PaxdUpgrade         *PaxdUpgradeResult         `json:"paxd_upgrade,omitempty"`
 	Remote              *RemoteView                `json:"remote,omitempty"`
 	AgentConnection     *AgentConnectionView       `json:"agent_connection,omitempty"`
 	Command             *CommandView               `json:"command,omitempty"`
@@ -342,6 +371,15 @@ type CommandResult struct {
 
 type PaxdRestartResult struct {
 	RequestedBootID string `json:"requested_boot_id"`
+	Phase           string `json:"phase,omitempty"`
+}
+
+type PaxdUpgradeResult struct {
+	RequestedBootID string `json:"requested_boot_id"`
+	TargetVersion   string `json:"target_version,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	StagedPath      string `json:"staged_path,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
 }
 
 type ReportType string
@@ -772,16 +810,17 @@ type LocalSessionSyncResult struct {
 }
 
 type CommandView struct {
-	CommandID         string        `json:"command_id"`
-	Source            Source        `json:"source"`
-	Type              CommandType   `json:"type"`
-	TargetType        string        `json:"target_type,omitempty"`
-	TargetID          string        `json:"target_id,omitempty"`
-	Status            CommandStatus `json:"status"`
-	DesiredGeneration int64         `json:"desired_generation,omitempty"`
-	ErrorCode         string        `json:"error_code,omitempty"`
-	ErrorMessage      string        `json:"error_message,omitempty"`
-	ReceivedAt        string        `json:"received_at,omitempty"`
-	AppliedAt         string        `json:"applied_at,omitempty"`
-	UpdatedAt         string        `json:"updated_at,omitempty"`
+	CommandID         string          `json:"command_id"`
+	Source            Source          `json:"source"`
+	Type              CommandType     `json:"type"`
+	TargetType        string          `json:"target_type,omitempty"`
+	TargetID          string          `json:"target_id,omitempty"`
+	Status            CommandStatus   `json:"status"`
+	DesiredGeneration int64           `json:"desired_generation,omitempty"`
+	ErrorCode         string          `json:"error_code,omitempty"`
+	ErrorMessage      string          `json:"error_message,omitempty"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	ReceivedAt        string          `json:"received_at,omitempty"`
+	AppliedAt         string          `json:"applied_at,omitempty"`
+	UpdatedAt         string          `json:"updated_at,omitempty"`
 }

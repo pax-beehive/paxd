@@ -139,12 +139,12 @@ func TestServiceRemotePaxdRestartCommitsOnlyAfterAckDelivery(t *testing.T) {
 	service.ConfirmCommandAckDelivered(cmd.CommandID)
 	record, err = store.GetCommandRecord(ctx, cmd.CommandID)
 	require.NoError(t, err)
-	assert.Equal(t, control.CommandStatusApplied, record.Status)
+	assert.Equal(t, control.CommandStatusReceived, record.Status)
 	assert.Equal(t, 1, lifecycle.confirmedCount())
 
 	duplicate, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
 	require.NoError(t, err)
-	assert.Equal(t, control.CommandStatusApplied, duplicate.Status)
+	assert.Equal(t, control.CommandStatusReceived, duplicate.Status)
 	assert.Equal(t, 1, lifecycle.scheduledCount(), "applied command must not schedule another restart")
 }
 
@@ -1146,10 +1146,28 @@ type fakePaxdLifecycle struct {
 
 func (f *fakePaxdLifecycle) BootID() string { return f.bootID }
 
-func (f *fakePaxdLifecycle) ScheduleRestart(commandID string, _ control.RestartPaxdCommand) {
+func (f *fakePaxdLifecycle) ScheduleRestart(commandID string, _ control.RestartPaxdCommand) error {
+	return f.schedule(commandID)
+}
+
+func (f *fakePaxdLifecycle) ScheduleUpgrade(commandID string, _ control.UpgradePaxdCommand) error {
+	return f.schedule(commandID)
+}
+
+func (f *fakePaxdLifecycle) schedule(commandID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, scheduled := range f.scheduled {
+		if scheduled == commandID {
+			return nil
+		}
+	}
 	f.scheduled = append(f.scheduled, commandID)
+	return nil
+}
+
+func (f *fakePaxdLifecycle) Cancel(_ string) error {
+	return nil
 }
 
 func (f *fakePaxdLifecycle) ConfirmAckDelivered(commandID string) {

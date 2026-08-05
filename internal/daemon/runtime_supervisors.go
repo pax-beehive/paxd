@@ -35,6 +35,7 @@ type runtimeSupervisors struct {
 	paxdVersion          string
 	bootID               string
 	acpCapabilityReports *acpCapabilityReports
+	maintenance          *lifecycleCoordinator
 	transportDB          *sql.DB
 	transportPruner      transportJournalPruner
 	transportGCConfig    transportGCConfig
@@ -133,7 +134,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		SendInitialHeartbeat: true,
 		Heartbeat: func() control.HeartbeatReport {
 			return control.HeartbeatReport{
-				BootID: s.bootID, PaxdVersion: s.paxdVersion, DaemonPhase: "running",
+				BootID: s.bootID, PaxdVersion: s.paxdVersion, DaemonPhase: s.daemonPhase(),
 			}
 		},
 		SnapshotInterval:                  30 * time.Second,
@@ -152,6 +153,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		return acpRouteStoreAdapter{store: store}
 	}))
 	s.acpPoolRegistry = acpPoolRegistry
+	acpPoolRegistry.SetBootID(s.bootID)
 
 	remoteFactory := &remoteControlSessionFactory{headers: headers, dialer: dialer, runner: runner}
 	remote := supervisor.NewRemoteSupervisor(supervisor.RemoteSupervisorOptions{
@@ -203,6 +205,13 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		},
 	})
 	return nil
+}
+
+func (s *runtimeSupervisors) daemonPhase() string {
+	if s == nil || s.maintenance == nil {
+		return "running"
+	}
+	return s.maintenance.DaemonPhase()
 }
 
 func (s *runtimeSupervisors) BuildSessionRuntimeSnapshots(

@@ -32,6 +32,11 @@ type ACPPoolRegistry struct {
 	pools       map[string]*ACPPool
 	subscribers map[uint64]chan struct{}
 	nextSubID   uint64
+	admissionMu sync.Mutex
+	bootID      string
+	inFlight    int
+	drain       *DaemonDrainLease
+	cutover     string
 }
 
 func NewACPPoolRegistry(routeStores ACPRouteStoreFactory) *ACPPoolRegistry {
@@ -63,6 +68,7 @@ func (r *ACPPoolRegistry) Get(connectionID string) (*ACPPool, error) {
 	}
 	pool := NewACPPool(connectionID, routeStore)
 	r.pools[connectionID] = pool
+	pool.registry = r
 	_, changes, _ := pool.RuntimeSnapshotAndSubscribe()
 	go r.forwardSessionRuntimeChanges(changes)
 	return pool, nil
@@ -138,6 +144,7 @@ type ACPPool struct {
 	routeStore   ACPRouteStore
 	router       *ACPRouter
 
+	registry        *ACPPoolRegistry
 	mu              sync.Mutex
 	outputSink      ACPRouterOutputSink
 	outputSinkToken uint64
@@ -214,7 +221,12 @@ func (p *ACPPool) HandleManagerFrameForSession(ctx context.Context, nativeSessio
 	if p == nil {
 		return fmt.Errorf("acp pool is required")
 	}
-	err := p.router.HandleManagerFrameForSession(ctx, nativeSessionID, payload)
+	release, err := p.registry.beginAdmission(payload)
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = p.router.HandleManagerFrameForSession(ctx, nativeSessionID, payload)
 	if err == nil {
 		return nil
 	}
@@ -243,7 +255,7 @@ func acpRouterErrorResponse(payload []byte, err error) ([]byte, bool) {
 	case "session_route_missing":
 		code = -32002
 		data["requiresResume"] = true
-	case "slot_unavailable", "slot_draining":
+	case "slot_unavailable", "slot_draining", "daemon_draining", "daemon_restarting":
 		code = -32003
 		data["retryable"] = true
 	}

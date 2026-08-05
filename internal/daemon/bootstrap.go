@@ -24,6 +24,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
+	"github.com/pax-beehive/paxd/internal/updater"
 )
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
@@ -114,6 +115,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("generate daemon boot id: %w", err)
 	}
 	maintenance := newLifecycleCoordinator(bootID)
+	paxdUpdater := updater.New(updater.Options{
+		CurrentVersion: opts.PaxdVersion,
+		StateDir:       filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "updates"),
+	})
 	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
 		Store:      store,
 		RootDir:    cfg.Daemon.ArtifactSpoolDir,
@@ -125,6 +130,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		paxdVersion:          opts.PaxdVersion,
 		bootID:               bootID,
 		acpCapabilityReports: newACPCapabilityReports(),
+		maintenance:          maintenance,
 		startedAt:            time.Now().UTC(),
 		logFilePath:          cfg.Daemon.LogFile,
 		transportGCConfig: transportGCConfig{
@@ -152,6 +158,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
 	}
 	var reports interface{ Start(context.Context) }
+	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
 		reports = sessionreporter.New(sessionreporter.Options{
 			RuntimeSource: supervisors.agentRuntimeSource,
