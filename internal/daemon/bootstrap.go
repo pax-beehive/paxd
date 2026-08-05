@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/artifactpublisher"
@@ -23,6 +24,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
+	"github.com/pax-beehive/paxd/internal/updater"
 )
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
@@ -32,14 +34,18 @@ func DefaultControlSocketPath() string {
 }
 
 type Runtime struct {
-	Store          *daemonstore.Store
-	Control        control.Service
-	LocalHandler   http.Handler
-	supervisors    *runtimeSupervisors
-	harnesses      control.HarnessRegistry
-	hostMetrics    interface{ Start(context.Context) }
-	sessionReports interface{ Start(context.Context) }
-	artifactJobs   interface{ Start(context.Context) }
+	Store            *daemonstore.Store
+	Control          control.Service
+	LocalHandler     http.Handler
+	supervisors      *runtimeSupervisors
+	harnesses        control.HarnessRegistry
+	hostMetrics      interface{ Start(context.Context) }
+	sessionReports   interface{ Start(context.Context) }
+	artifactJobs     interface{ Start(context.Context) }
+	lifecycleMu      sync.Mutex
+	lifecycleCancel  context.CancelFunc
+	lifecycleStarted bool
+	maintenance      *lifecycleCoordinator
 }
 
 type Options struct {
@@ -104,6 +110,15 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Manager:  artifactpublisher.NewHTTPManager(nil),
 		Uploader: artifactpublisher.NewResumableUploader(nil),
 	})
+	bootID, err := newBootID()
+	if err != nil {
+		return nil, fmt.Errorf("generate daemon boot id: %w", err)
+	}
+	maintenance := newLifecycleCoordinator(bootID)
+	paxdUpdater := updater.New(updater.Options{
+		CurrentVersion: opts.PaxdVersion,
+		StateDir:       filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "updates"),
+	})
 	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
 		Store:      store,
 		RootDir:    cfg.Daemon.ArtifactSpoolDir,
@@ -113,7 +128,9 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		statusHub:            newStatusHub(),
 		attachmentStates:     attachmentStates,
 		paxdVersion:          opts.PaxdVersion,
+		bootID:               bootID,
 		acpCapabilityReports: newACPCapabilityReports(),
+		maintenance:          maintenance,
 		startedAt:            time.Now().UTC(),
 		logFilePath:          cfg.Daemon.LogFile,
 		transportGCConfig: transportGCConfig{
@@ -135,11 +152,13 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Attachments:         attachments,
 		SessionRuntime:      supervisors,
 		SessionRuntimeReset: supervisors,
+		PaxdLifecycle:       maintenance,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
 	}
 	var reports interface{ Start(context.Context) }
+	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
 		reports = sessionreporter.New(sessionreporter.Options{
 			RuntimeSource: supervisors.agentRuntimeSource,
@@ -160,6 +179,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		hostMetrics:    metricsStarter,
 		sessionReports: reports,
 		artifactJobs:   artifactJobs,
+		maintenance:    maintenance,
 	}, nil
 }
 

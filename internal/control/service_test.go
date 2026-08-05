@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/pax-beehive/paxd/internal/control"
@@ -106,6 +107,85 @@ func TestServiceDuplicateCommandIDIsIdempotent(t *testing.T) {
 	if len(remotes) != 1 || remotes[0].Remote.ID != "remote_prod" {
 		t.Fatalf("remotes after rejected duplicate = %+v, want only original remote", remotes)
 	}
+}
+
+func TestServiceRemotePaxdRestartCommitsOnlyAfterAckDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	lifecycle := &fakePaxdLifecycle{bootID: "boot_a"}
+	service := control.NewService(control.ServiceOptions{Store: store, PaxdLifecycle: lifecycle})
+	cmd := control.Command{
+		CommandID: "cmd_restart_paxd_1",
+		Type:      control.CommandRestartPaxd,
+		RestartPaxd: &control.RestartPaxdCommand{
+			Mode: control.PaxdRestartImmediate, ShutdownGraceSeconds: 12, Reason: "operator requested",
+		},
+	}
+
+	ack, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
+	require.NoError(t, err)
+	require.True(t, ack.OK)
+	assert.Equal(t, control.CommandStatusReceived, ack.Status)
+	assert.Equal(t, "paxd", ack.TargetType)
+	require.NotNil(t, ack.Result)
+	require.NotNil(t, ack.Result.PaxdRestart)
+	assert.Equal(t, "boot_a", ack.Result.PaxdRestart.RequestedBootID)
+	assert.Equal(t, 1, lifecycle.scheduledCount())
+	assert.Equal(t, 0, lifecycle.confirmedCount())
+	record, err := store.GetCommandRecord(ctx, cmd.CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusReceived, record.Status)
+
+	service.ConfirmCommandAckDelivered(cmd.CommandID)
+	record, err = store.GetCommandRecord(ctx, cmd.CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusReceived, record.Status)
+	assert.Equal(t, 1, lifecycle.confirmedCount())
+
+	duplicate, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusReceived, duplicate.Status)
+	assert.Equal(t, 1, lifecycle.scheduledCount(), "applied command must not schedule another restart")
+}
+
+func TestServicePaxdRestartTreatsOldBootIntentAsApplied(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	cmd := control.Command{
+		CommandID:   "cmd_restart_old_boot",
+		Type:        control.CommandRestartPaxd,
+		RestartPaxd: &control.RestartPaxdCommand{Mode: control.PaxdRestartImmediate},
+	}
+	first := &fakePaxdLifecycle{bootID: "boot_old"}
+	service := control.NewService(control.ServiceOptions{Store: store, PaxdLifecycle: first})
+	_, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
+	require.NoError(t, err)
+
+	current := &fakePaxdLifecycle{bootID: "boot_new"}
+	service = control.NewService(control.ServiceOptions{Store: store, PaxdLifecycle: current})
+	ack, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusApplied, ack.Status)
+	assert.Equal(t, 0, current.scheduledCount(), "old-boot intent must not restart the new boot")
+}
+
+func TestServicePaxdRestartRequiresRemoteSourceAndLifecycle(t *testing.T) {
+	store := openControlTestStore(t)
+	cmd := control.Command{
+		CommandID:   "cmd_restart_paxd_auth",
+		Type:        control.CommandRestartPaxd,
+		RestartPaxd: &control.RestartPaxdCommand{Mode: control.PaxdRestartImmediate},
+	}
+
+	service := control.NewService(control.ServiceOptions{Store: store, PaxdLifecycle: &fakePaxdLifecycle{bootID: "boot_a"}})
+	ack, err := service.HandleCommand(context.Background(), control.Source{Kind: control.SourceLocal}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusRejected, ack.Status)
+
+	service = control.NewService(control.ServiceOptions{Store: store})
+	ack, err = service.HandleCommand(context.Background(), control.Source{Kind: control.SourceRemote, RemoteID: "remote_prod"}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusFailed, ack.Status)
 }
 
 func TestServiceDuplicateRejectedCommandReturnsStoredAck(t *testing.T) {
@@ -1055,4 +1135,55 @@ func TestHandleDiagnosticsQuery(t *testing.T) {
 	assert.Equal(t, "test-version", result.Diagnostics.PaxdVersion)
 	require.Len(t, result.Diagnostics.TransportQueues, 1)
 	assert.Equal(t, int64(3), result.Diagnostics.TransportQueues[0].Unacked)
+}
+
+type fakePaxdLifecycle struct {
+	mu        sync.Mutex
+	bootID    string
+	scheduled []string
+	confirmed []string
+}
+
+func (f *fakePaxdLifecycle) BootID() string { return f.bootID }
+
+func (f *fakePaxdLifecycle) ScheduleRestart(commandID string, _ control.RestartPaxdCommand) error {
+	return f.schedule(commandID)
+}
+
+func (f *fakePaxdLifecycle) ScheduleUpgrade(commandID string, _ control.UpgradePaxdCommand) error {
+	return f.schedule(commandID)
+}
+
+func (f *fakePaxdLifecycle) schedule(commandID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, scheduled := range f.scheduled {
+		if scheduled == commandID {
+			return nil
+		}
+	}
+	f.scheduled = append(f.scheduled, commandID)
+	return nil
+}
+
+func (f *fakePaxdLifecycle) Cancel(_ string) error {
+	return nil
+}
+
+func (f *fakePaxdLifecycle) ConfirmAckDelivered(commandID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.confirmed = append(f.confirmed, commandID)
+}
+
+func (f *fakePaxdLifecycle) scheduledCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.scheduled)
+}
+
+func (f *fakePaxdLifecycle) confirmedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.confirmed)
 }

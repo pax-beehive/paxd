@@ -75,7 +75,9 @@ func (cmd Command) Validate() error {
 		{CommandAgentConnectionUpdate, cmd.UpdateAgentConnection != nil, validatePtr(cmd.UpdateAgentConnection)},
 		{CommandAgentConnectionDelete, cmd.DeleteAgentConnection != nil, validatePtr(cmd.DeleteAgentConnection)},
 		{CommandAgentConnectionRestart, cmd.RestartAgentConnection != nil, validatePtr(cmd.RestartAgentConnection)},
+		{CommandRestartPaxd, cmd.RestartPaxd != nil, validatePtr(cmd.RestartPaxd)},
 		{CommandUpgradePaxd, cmd.UpgradePaxd != nil, validatePtr(cmd.UpgradePaxd)},
+		{CommandCancelPaxdMaintenance, cmd.CancelPaxdMaintenance != nil, validatePtr(cmd.CancelPaxdMaintenance)},
 		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
 		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
 	}
@@ -266,9 +268,53 @@ func (cmd RestartAgentConnectionCommand) Validate() error {
 	return nil
 }
 
+func (cmd RestartPaxdCommand) Validate() error {
+	mode := PaxdRestartMode(strings.TrimSpace(string(cmd.Mode)))
+	if mode != "" && mode != PaxdRestartImmediate && mode != PaxdRestartWhenIdle {
+		return invalid("restart_paxd.mode", "mode must be immediate or when_idle")
+	}
+	if cmd.ShutdownGraceSeconds < 0 || cmd.ShutdownGraceSeconds > 60 {
+		return invalid("restart_paxd.shutdown_grace_seconds", "shutdown grace must be between 1 and 60 seconds")
+	}
+	if cmd.IdleGraceSeconds < 0 || cmd.IdleGraceSeconds > 60 {
+		return invalid("restart_paxd.idle_grace_seconds", "idle grace must be between 1 and 60 seconds")
+	}
+	if cmd.DrainTimeoutSeconds < 0 || cmd.DrainTimeoutSeconds > 3600 {
+		return invalid("restart_paxd.drain_timeout_seconds", "drain timeout must be between 1 and 3600 seconds")
+	}
+	if len(cmd.Reason) > 512 {
+		return invalid("restart_paxd.reason", "reason must not exceed 512 bytes")
+	}
+	return nil
+}
+
 func (cmd UpgradePaxdCommand) Validate() error {
-	if strings.TrimSpace(cmd.Version) == "" && strings.TrimSpace(cmd.URL) == "" {
-		return invalid("upgrade_paxd", "version or url is required")
+	if strings.TrimSpace(cmd.Version) == "" {
+		return invalid("upgrade_paxd.version", "explicit target version is required")
+	}
+	mode := PaxdUpgradeMode(strings.TrimSpace(string(cmd.Mode)))
+	if mode != "" && mode != PaxdUpgradeImmediate && mode != PaxdUpgradeWhenIdle &&
+		mode != PaxdUpgradeOpportunistic {
+		return invalid("upgrade_paxd.mode", "mode must be immediate, when_idle, or opportunistic")
+	}
+	if cmd.ShutdownGraceSeconds < 0 || cmd.ShutdownGraceSeconds > 60 {
+		return invalid("upgrade_paxd.shutdown_grace_seconds", "shutdown grace must be between 1 and 60 seconds")
+	}
+	if cmd.IdleGraceSeconds < 0 || cmd.IdleGraceSeconds > 60 {
+		return invalid("upgrade_paxd.idle_grace_seconds", "idle grace must be between 1 and 60 seconds")
+	}
+	if cmd.DrainTimeoutSeconds < 0 || cmd.DrainTimeoutSeconds > 3600 {
+		return invalid("upgrade_paxd.drain_timeout_seconds", "drain timeout must be between 1 and 3600 seconds")
+	}
+	if len(cmd.Reason) > 512 {
+		return invalid("upgrade_paxd.reason", "reason must not exceed 512 bytes")
+	}
+	return nil
+}
+
+func (cmd CancelPaxdMaintenanceCommand) Validate() error {
+	if strings.TrimSpace(cmd.MaintenanceCommandID) == "" {
+		return invalid("cancel_paxd_maintenance.maintenance_command_id", "maintenance command id is required")
 	}
 	return nil
 }
@@ -498,7 +544,9 @@ func knownCommandType(typ CommandType) bool {
 		CommandAgentConnectionUpdate,
 		CommandAgentConnectionDelete,
 		CommandAgentConnectionRestart,
+		CommandRestartPaxd,
 		CommandUpgradePaxd,
+		CommandCancelPaxdMaintenance,
 		CommandAttachmentEnsureLocal,
 		CommandSessionRuntimeReset:
 		return true

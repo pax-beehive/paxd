@@ -42,6 +42,8 @@ import (
 
 var version = "dev"
 
+const daemonShutdownTimeout = 30 * time.Second
+
 type remoteLoginFunc func(context.Context, remotelogin.LoginSpec, remotelogin.Options) (remotelogin.LoginResult, error)
 
 var runRemoteLogin remoteLoginFunc = remotelogin.Login
@@ -442,9 +444,22 @@ func cmdRun(args []string) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	sig := <-sigCh
-	log.Printf("[paxd] received signal: %v", sig)
+	shutdownTimeout := daemonShutdownTimeout
+	select {
+	case sig := <-sigCh:
+		log.Printf("[paxd] received signal: %v", sig)
+	case request := <-daemonRuntime.ExitRequests():
+		if request.ShutdownGrace > 0 {
+			shutdownTimeout = request.ShutdownGrace
+		}
+		log.Printf("[paxd] remote restart committed command_id=%s shutdown_grace=%s", request.CommandID, shutdownTimeout)
+	}
 	_ = sm.Transition(state.STOPPING)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	if err := daemonRuntime.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[paxd] graceful shutdown incomplete: %v", err)
+	}
+	shutdownCancel()
 	_ = sm.Transition(state.STOPPED)
 	log.Printf("[paxd] STOPPED")
 }

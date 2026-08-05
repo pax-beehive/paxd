@@ -73,6 +73,8 @@ type CommandResultWatcher interface {
 
 type ReportOptions struct {
 	HeartbeatInterval                 time.Duration
+	SendInitialHeartbeat              bool
+	Heartbeat                         func() control.HeartbeatReport
 	SnapshotInterval                  time.Duration
 	SendInitialSnapshot               bool
 	Now                               func() time.Time
@@ -139,7 +141,7 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 }
 
 func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
-	if opts.HeartbeatInterval <= 0 && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil &&
+	if opts.HeartbeatInterval <= 0 && !opts.SendInitialHeartbeat && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil &&
 		opts.SessionRuntimeSnapshotInterval <= 0 && !opts.SendInitialSessionRuntimeSnapshot {
 		return
 	}
@@ -153,8 +155,32 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 			return fmt.Sprintf("%s_%d", prefix, time.Now().UTC().UnixNano())
 		}
 	}
-	if opts.HeartbeatInterval > 0 {
+	if opts.HeartbeatInterval > 0 || opts.SendInitialHeartbeat {
 		go func() {
+			send := func() bool {
+				heartbeat := control.HeartbeatReport{}
+				if opts.Heartbeat != nil {
+					heartbeat = opts.Heartbeat()
+				}
+				frame := reportFrame(newID("rpt"), control.Report{
+					Type:      control.ReportHeartbeat,
+					RemoteID:  remoteID,
+					NodeID:    nodeID,
+					SentAt:    now().UTC().Format(time.RFC3339Nano),
+					Heartbeat: &heartbeat,
+				})
+				if err := writer.write(frame); err != nil {
+					cancel()
+					return false
+				}
+				return true
+			}
+			if opts.SendInitialHeartbeat && !send() {
+				return
+			}
+			if opts.HeartbeatInterval <= 0 {
+				return
+			}
 			ticker := time.NewTicker(opts.HeartbeatInterval)
 			defer ticker.Stop()
 			for {
@@ -162,15 +188,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					frame := reportFrame(newID("rpt"), control.Report{
-						Type:      control.ReportHeartbeat,
-						RemoteID:  remoteID,
-						NodeID:    nodeID,
-						SentAt:    now().UTC().Format(time.RFC3339Nano),
-						Heartbeat: &control.HeartbeatReport{},
-					})
-					if err := writer.write(frame); err != nil {
-						cancel()
+					if !send() {
 						return
 					}
 				}
@@ -428,7 +446,15 @@ func handleCommandFrame(ctx context.Context, writer *frameWriter, src control.So
 	if err != nil {
 		return writer.write(ErrorFrame{Kind: KindError, RequestID: frame.RequestID, CommandID: frame.Command.CommandID, Error: internalFrameError("control command failed")})
 	}
-	return writer.write(AckFrame{Kind: KindAck, CommandID: ack.CommandID, CommandAck: ack})
+	if err := writer.write(AckFrame{Kind: KindAck, CommandID: ack.CommandID, CommandAck: ack}); err != nil {
+		return err
+	}
+	if ack.OK && ack.Status == control.CommandStatusReceived {
+		if deferred, ok := service.(control.DeferredCommandAction); ok {
+			deferred.ConfirmCommandAckDelivered(ack.CommandID)
+		}
+	}
+	return nil
 }
 
 func handleQueryFrame(ctx context.Context, writer *frameWriter, src control.Source, service control.Service, frame IncomingFrame) error {
