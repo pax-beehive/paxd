@@ -371,9 +371,18 @@ func newBaseSupervisor[S any](listDesired func(context.Context) ([]S, error), op
 	}
 }
 
-func (s *baseSupervisor[S]) Start(ctx context.Context) error {
+func (s *baseSupervisor[S]) Start(ctx context.Context) (err error) {
 	log.Printf("[paxd] %s supervisor starting interval=%s", s.name, s.interval)
-	if err := s.Reconcile(ctx); err != nil {
+	defer func() {
+		reason := "supervisor_stopped"
+		if ctx.Err() != nil {
+			reason = ctx.Err().Error()
+		} else if err != nil {
+			reason = err.Error()
+		}
+		s.stopAllAndWait(reason)
+	}()
+	if err = s.Reconcile(ctx); err != nil {
 		log.Printf("[paxd] %s supervisor initial reconcile failed: %v", s.name, err)
 		return err
 	}
@@ -383,7 +392,6 @@ func (s *baseSupervisor[S]) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			log.Printf("[paxd] %s supervisor stopping: %v", s.name, ctx.Err())
-			s.stopAll(ctx)
 			return ctx.Err()
 		case <-s.wake:
 			log.Printf("[paxd] %s supervisor wake received", s.name)
@@ -503,11 +511,34 @@ func (s *baseSupervisor[S]) handleSessionEvent(id string, event runtimes.Session
 }
 
 func (s *baseSupervisor[S]) stopAll(ctx context.Context) {
+	reason := "supervisor_stopped"
+	if ctx != nil && ctx.Err() != nil {
+		reason = ctx.Err().Error()
+	}
+	for _, slot := range s.allSlots() {
+		slot.Stop(reason)
+	}
+}
+
+func (s *baseSupervisor[S]) stopAllAndWait(reason string) {
+	slots := s.allSlots()
+	done := make([]<-chan struct{}, 0, len(slots))
+	for _, slot := range slots {
+		done = append(done, slot.stopAndDone(reason))
+	}
+	for _, ch := range done {
+		<-ch
+	}
+}
+
+func (s *baseSupervisor[S]) allSlots() []*runtimeSlot[S] {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	slots := make([]*runtimeSlot[S], 0, len(s.slots))
 	for _, slot := range s.slots {
-		slot.Stop(ctx.Err().Error())
+		slots = append(slots, slot)
 	}
+	return slots
 }
 
 type slotOps[S any] struct {
@@ -547,6 +578,7 @@ type runtimeSlot[S any] struct {
 	currentSpec    S
 	hasCurrentSpec bool
 	currentCancel  context.CancelFunc
+	currentDone    <-chan struct{}
 	currentAttempt int64
 	reconnects     int
 	timer          Timer
@@ -621,6 +653,22 @@ func (s *runtimeSlot[S]) ApplyDesired(spec S) {
 func (s *runtimeSlot[S]) Stop(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stopLocked(reason)
+}
+
+func (s *runtimeSlot[S]) stopAndDone(reason string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopLocked(reason)
+	if s.currentDone != nil {
+		return s.currentDone
+	}
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func (s *runtimeSlot[S]) stopLocked(reason string) {
 	log.Printf("[paxd] %s slot id=%s stop requested reason=%s", s.supervisorName, s.id, reason)
 	if !s.hasDesired && (!s.draining || reason == "not_desired") {
 		return
@@ -748,7 +796,9 @@ func (s *runtimeSlot[S]) startLocked() {
 		}))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	s.currentCancel = cancel
+	s.currentDone = done
 	s.currentAttempt++
 	attemptID := s.currentAttempt
 	s.pending = false
@@ -772,6 +822,7 @@ func (s *runtimeSlot[S]) startLocked() {
 	go func() {
 		exit := session.Run(ctx)
 		s.handleExit(attemptID, spec, exit)
+		close(done)
 	}()
 }
 
@@ -818,6 +869,7 @@ func (s *runtimeSlot[S]) handleExit(attemptID int64, spec S, exit runtimes.Exit)
 		return
 	}
 	s.currentCancel = nil
+	s.currentDone = nil
 	s.hasCurrentSpec = false
 	if !s.hasDesired {
 		if s.draining {

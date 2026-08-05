@@ -1,6 +1,11 @@
 package control
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestCommandValidateAcceptsMatchingPayload(t *testing.T) {
 	cmd := Command{
@@ -331,6 +336,27 @@ func TestCommandValidateRejectsInvalidPayloadFields(t *testing.T) {
 				t.Fatal("Validate() error = nil, want error")
 			}
 		})
+	}
+}
+
+func TestRestartPaxdCommandValidation(t *testing.T) {
+	valid := []RestartPaxdCommand{
+		{},
+		{Mode: PaxdRestartImmediate},
+		{Mode: PaxdRestartImmediate, ShutdownGraceSeconds: 60, Reason: "operator requested"},
+	}
+	for _, command := range valid {
+		require.NoError(t, command.Validate())
+	}
+
+	invalid := []RestartPaxdCommand{
+		{Mode: PaxdRestartMode("when_idle")},
+		{ShutdownGraceSeconds: -1},
+		{ShutdownGraceSeconds: 61},
+		{Reason: strings.Repeat("x", 513)},
+	}
+	for _, command := range invalid {
+		require.Error(t, command.Validate())
 	}
 }
 

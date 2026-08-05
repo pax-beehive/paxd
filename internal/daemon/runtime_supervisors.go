@@ -33,6 +33,7 @@ type runtimeSupervisors struct {
 	statusHub            *statusHub
 	attachmentStates     *attachmentStateHub
 	paxdVersion          string
+	bootID               string
 	acpCapabilityReports *acpCapabilityReports
 	transportDB          *sql.DB
 	transportPruner      transportJournalPruner
@@ -52,6 +53,10 @@ type runtimeSupervisors struct {
 	logFilePath     string
 	store           *daemonstore.Store
 	acpPoolRegistry *runtimes.ACPPoolRegistry
+	lifecycleMu     sync.Mutex
+	lifecycleCancel context.CancelFunc
+	lifecycleDone   chan struct{}
+	lifecycleErr    error
 }
 
 type transportJournalPruner interface {
@@ -124,7 +129,13 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 	dialer := runtimes.GorillaWebSocketDialer{}
 	runner := controlws.NewRunner(service)
 	runner.Reports = controlws.ReportOptions{
-		HeartbeatInterval:                 10 * time.Second,
+		HeartbeatInterval:    10 * time.Second,
+		SendInitialHeartbeat: true,
+		Heartbeat: func() control.HeartbeatReport {
+			return control.HeartbeatReport{
+				BootID: s.bootID, PaxdVersion: s.paxdVersion, DaemonPhase: "running",
+			}
+		},
 		SnapshotInterval:                  30 * time.Second,
 		SendInitialSnapshot:               true,
 		PokeDebounce:                      500 * time.Millisecond,
@@ -406,21 +417,48 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 	if r == nil {
 		return
 	}
+	r.lifecycleMu.Lock()
+	if r.lifecycleStarted {
+		r.lifecycleMu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	r.lifecycleStarted = true
+	r.lifecycleCancel = cancel
+	r.lifecycleMu.Unlock()
+
 	if r.artifactJobs != nil {
-		r.artifactJobs.Start(ctx)
+		r.artifactJobs.Start(runCtx)
 	}
 	if r.supervisors == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}
 	if r.hostMetrics != nil {
-		r.hostMetrics.Start(ctx)
+		r.hostMetrics.Start(runCtx)
 	}
-	startHarnessRefresh(ctx, r.harnesses)
+	startHarnessRefresh(runCtx, r.harnesses)
 	if r.sessionReports != nil {
-		r.sessionReports.Start(ctx)
+		r.sessionReports.Start(runCtx)
 	}
-	r.supervisors.Start(ctx)
+	r.supervisors.Start(runCtx)
+}
+
+func (r *Runtime) Shutdown(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.lifecycleMu.Lock()
+	cancel := r.lifecycleCancel
+	supervisors := r.supervisors
+	r.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if supervisors == nil {
+		return nil
+	}
+	return supervisors.Shutdown(ctx)
 }
 
 func startHarnessRefresh(ctx context.Context, harnesses control.HarnessRegistry) {
@@ -452,46 +490,97 @@ func (s *runtimeSupervisors) Start(ctx context.Context) {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
 	}
-	s.startTransportGC(ctx)
-	if s.transportFlusher != nil || s.transportDB != nil || s.transportGCDone != nil {
-		go func() {
-			<-ctx.Done()
-			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if s.transportGCDone != nil {
-				select {
-				case <-s.transportGCDone:
-				case <-closeCtx.Done():
-					log.Printf("[paxd] timed out waiting for transport journal GC to stop")
-				}
-			}
-			if s.transportProducers != nil {
-				if err := s.transportProducers.Close(closeCtx); err != nil {
-					log.Printf("[paxd] acp transport producer registry close failed: %v", err)
-				}
-			}
-			if s.transportFlusher != nil {
-				if err := s.transportFlusher.Close(closeCtx); err != nil {
-					stats := s.transportFlusher.Stats()
-					log.Printf(
-						"[paxd] acp transport producer write-behind close failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d",
-						err,
-						stats.DirtyFrames,
-						stats.DirtyPatches,
-						stats.DirtyBytes,
-					)
-				}
-			}
-			if s.transportDB != nil {
-				if err := s.transportDB.Close(); err != nil {
-					log.Printf("[paxd] close reliable transport database failed: %v", err)
-				}
-			}
-		}()
+	s.lifecycleMu.Lock()
+	if s.lifecycleDone != nil {
+		s.lifecycleMu.Unlock()
+		return
 	}
-	startSupervisor(ctx, "remote", s.remote)
-	startSupervisor(ctx, "agent_connection", s.agent)
-	startSupervisor(ctx, "acp_slot", s.acpSlots)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.lifecycleCancel = cancel
+	s.lifecycleDone = done
+	s.lifecycleMu.Unlock()
+
+	s.startTransportGC(runCtx)
+	var supervisors sync.WaitGroup
+	startSupervisor(runCtx, "remote", s.remote, &supervisors)
+	startSupervisor(runCtx, "agent_connection", s.agent, &supervisors)
+	startSupervisor(runCtx, "acp_slot", s.acpSlots, &supervisors)
+	go func() {
+		<-runCtx.Done()
+		supervisors.Wait()
+		shutdownErr := s.closeTransport()
+		s.lifecycleMu.Lock()
+		s.lifecycleErr = shutdownErr
+		close(done)
+		s.lifecycleMu.Unlock()
+	}()
+}
+
+func (s *runtimeSupervisors) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.lifecycleMu.Lock()
+	cancel := s.lifecycleCancel
+	done := s.lifecycleDone
+	s.lifecycleMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case <-done:
+		s.lifecycleMu.Lock()
+		err := s.lifecycleErr
+		s.lifecycleMu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *runtimeSupervisors) closeTransport() error {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var result error
+	if s.transportGCDone != nil {
+		select {
+		case <-s.transportGCDone:
+		case <-closeCtx.Done():
+			err := errors.New("timed out waiting for transport journal GC to stop")
+			log.Printf("[paxd] %v", err)
+			result = errors.Join(result, err)
+		}
+	}
+	if s.transportProducers != nil {
+		if err := s.transportProducers.Close(closeCtx); err != nil {
+			log.Printf("[paxd] acp transport producer registry close failed: %v", err)
+			result = errors.Join(result, fmt.Errorf("close transport producer registry: %w", err))
+		}
+	}
+	if s.transportFlusher != nil {
+		if err := s.transportFlusher.Close(closeCtx); err != nil {
+			stats := s.transportFlusher.Stats()
+			log.Printf(
+				"[paxd] acp transport producer write-behind close failed: %v dirty_frames=%d dirty_patches=%d dirty_bytes=%d",
+				err,
+				stats.DirtyFrames,
+				stats.DirtyPatches,
+				stats.DirtyBytes,
+			)
+			result = errors.Join(result, fmt.Errorf("close transport flusher: %w", err))
+		}
+	}
+	if s.transportDB != nil {
+		if err := s.transportDB.Close(); err != nil {
+			log.Printf("[paxd] close reliable transport database failed: %v", err)
+			result = errors.Join(result, fmt.Errorf("close transport database: %w", err))
+		}
+	}
+	return result
 }
 
 func (s *runtimeSupervisors) startTransportGC(ctx context.Context) {
@@ -548,12 +637,14 @@ func (s *runtimeSupervisors) pruneTransportJournal(ctx context.Context) {
 	}
 }
 
-func startSupervisor(ctx context.Context, name string, sup supervisor.Supervisor) {
+func startSupervisor(ctx context.Context, name string, sup supervisor.Supervisor, wg *sync.WaitGroup) {
 	if sup == nil {
 		log.Printf("[paxd] %s supervisor is not configured", name)
 		return
 	}
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err := sup.Start(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("[paxd] %s supervisor exited: %v", name, err)

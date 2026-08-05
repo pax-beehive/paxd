@@ -24,6 +24,20 @@ type Service interface {
 	HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error)
 }
 
+// DeferredCommandAction is notified only after a command ACK has been written
+// successfully to its transport.
+type DeferredCommandAction interface {
+	ConfirmCommandAckDelivered(commandID string)
+}
+
+// PaxdLifecycle schedules process-level actions that must not begin until their
+// durable command ACK has been delivered.
+type PaxdLifecycle interface {
+	BootID() string
+	ScheduleRestart(commandID string, command RestartPaxdCommand)
+	ConfirmAckDelivered(commandID string)
+}
+
 type ReportService interface {
 	BuildRuntimeSnapshot(ctx context.Context, remoteID string, nodeID string) (RuntimeSnapshotReport, error)
 }
@@ -74,6 +88,7 @@ const (
 	CommandAgentConnectionUpdate  CommandType = "agent_connection.update"
 	CommandAgentConnectionDelete  CommandType = "agent_connection.delete"
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
+	CommandRestartPaxd            CommandType = "paxd.restart"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
 	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
@@ -106,6 +121,7 @@ type Command struct {
 	DeleteAgentConnection  *DeleteAgentConnectionCommand  `json:"delete_agent_connection,omitempty"`
 	RestartAgentConnection *RestartAgentConnectionCommand `json:"restart_agent_connection,omitempty"`
 
+	RestartPaxd           *RestartPaxdCommand           `json:"restart_paxd,omitempty"`
 	UpgradePaxd           *UpgradePaxdCommand           `json:"upgrade_paxd,omitempty"`
 	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
 	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
@@ -290,6 +306,16 @@ type RestartAgentConnectionCommand struct {
 	ConnectionID string `json:"connection_id"`
 }
 
+type PaxdRestartMode string
+
+const PaxdRestartImmediate PaxdRestartMode = "immediate"
+
+type RestartPaxdCommand struct {
+	Mode                 PaxdRestartMode `json:"mode,omitempty"`
+	ShutdownGraceSeconds int             `json:"shutdown_grace_seconds,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
+}
+
 type UpgradePaxdCommand struct {
 	Version string `json:"version,omitempty"`
 	URL     string `json:"url,omitempty"`
@@ -307,10 +333,15 @@ type CommandAck struct {
 }
 
 type CommandResult struct {
+	PaxdRestart         *PaxdRestartResult         `json:"paxd_restart,omitempty"`
 	Remote              *RemoteView                `json:"remote,omitempty"`
 	AgentConnection     *AgentConnectionView       `json:"agent_connection,omitempty"`
 	Command             *CommandView               `json:"command,omitempty"`
 	SessionRuntimeReset *SessionRuntimeResetResult `json:"session_runtime_reset,omitempty"`
+}
+
+type PaxdRestartResult struct {
+	RequestedBootID string `json:"requested_boot_id"`
 }
 
 type ReportType string
@@ -353,7 +384,11 @@ type SessionActiveTurnReport struct {
 	ProcessEpoch      string          `json:"process_epoch,omitempty"`
 }
 
-type HeartbeatReport struct{}
+type HeartbeatReport struct {
+	BootID      string `json:"boot_id,omitempty"`
+	PaxdVersion string `json:"paxd_version,omitempty"`
+	DaemonPhase string `json:"daemon_phase,omitempty"`
+}
 
 type RuntimeSnapshotReport struct {
 	SnapshotID string               `json:"snapshot_id"`

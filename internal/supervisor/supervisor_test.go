@@ -264,6 +264,43 @@ func TestACPSlotSupervisorDaemonStopInterruptsDrain(t *testing.T) {
 	}
 }
 
+func TestACPSlotSupervisorStartWaitsForActiveSessionShutdown(t *testing.T) {
+	store := newFakeACPSlotStore()
+	store.setDesired([]runtimes.ACPSlotSpec{acpSlotSpec("slot_1", "conn_1", 1, 0)})
+	cancelGate := make(chan struct{})
+	var releaseGate sync.Once
+	defer releaseGate.Do(func() { close(cancelGate) })
+	factory := &fakeACPSlotFactory{
+		makeSession: func(runtimes.ACPSlotSpec, int) *scriptedSession {
+			session := blockingSession()
+			session.cancelGate = cancelGate
+			return session
+		},
+	}
+	sup := NewACPSlotSupervisor(ACPSlotSupervisorOptions{
+		Store: store, Factory: factory, Clock: newFakeClock(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan error, 1)
+	go func() { startDone <- sup.Start(ctx) }()
+	factory.waitSession(t, 0).waitStarted(t)
+
+	cancel()
+	select {
+	case err := <-startDone:
+		t.Fatalf("Start() returned before active session cleanup completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseGate.Do(func() { close(cancelGate) })
+	select {
+	case err := <-startDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() did not return after active session cleanup completed")
+	}
+}
+
 func TestACPSlotSupervisorScalesHighestOrdinalsFirstAndReusesSlotIDs(t *testing.T) {
 	desired := func(count int) []runtimes.ACPSlotSpec {
 		specs := make([]runtimes.ACPSlotSpec, 0, count)

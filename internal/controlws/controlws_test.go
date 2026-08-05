@@ -34,6 +34,31 @@ func TestCommandFrameMapsToControlAndWritesAck(t *testing.T) {
 	assert.Equal(t, response, decodeWrittenFrame(t, conn.writes()[0]))
 }
 
+func TestCommandFrameConfirmsOnlyAfterAckWriteSucceeds(t *testing.T) {
+	cmd := controltest.LoadCommandRequest(t, "agent_connection_create")
+	ack := controltest.LoadCommandResponse(t, "agent_connection_create")
+
+	base := controltest.NewMockService(t)
+	base.ExpectCommandFrom(remoteSource(), cmd).ReturnCommandAck(ack)
+	service := &confirmingService{Service: base}
+	conn := newFakeWebSocketConn(framePayload(t, IncomingFrame{
+		Kind: KindCommand, CommandID: cmd.CommandID, Command: &cmd,
+	}))
+	Run(context.Background(), conn, remoteSource(), service)
+	assert.Equal(t, []string{cmd.CommandID}, service.confirmedIDs())
+
+	base = controltest.NewMockService(t)
+	base.ExpectCommandFrom(remoteSource(), cmd).ReturnCommandAck(ack)
+	service = &confirmingService{Service: base}
+	conn = newFakeWebSocketConn(framePayload(t, IncomingFrame{
+		Kind: KindCommand, CommandID: cmd.CommandID, Command: &cmd,
+	}))
+	conn.writeErr = errors.New("broken pipe")
+	exit := Run(context.Background(), conn, remoteSource(), service)
+	assert.Equal(t, "node_control_write_failed", exit.Code)
+	assert.Empty(t, service.confirmedIDs())
+}
+
 func TestQueryFrameMapsToControlAndWritesResponse(t *testing.T) {
 	request := controltest.LoadControlWSFrameRequest(t, "query_remotes_list_frame")
 	response := controltest.LoadControlWSFrameResponse(t, "query_remotes_list_frame")
@@ -292,9 +317,15 @@ func TestHeartbeatReportFrameHasNoClientTTL(t *testing.T) {
 	runner := Runner{
 		Service: service,
 		Reports: ReportOptions{
-			HeartbeatInterval: time.Millisecond,
-			Now:               func() time.Time { return now },
-			NewID:             fixedReportID("rpt_heartbeat"),
+			HeartbeatInterval:    time.Hour,
+			SendInitialHeartbeat: true,
+			Heartbeat: func() control.HeartbeatReport {
+				return control.HeartbeatReport{
+					BootID: "boot_123", PaxdVersion: "1.2.3", DaemonPhase: "running",
+				}
+			},
+			Now:   func() time.Time { return now },
+			NewID: fixedReportID("rpt_heartbeat"),
 		},
 	}
 	done := make(chan runtimes.Exit, 1)
@@ -317,6 +348,9 @@ func TestHeartbeatReportFrameHasNoClientTTL(t *testing.T) {
 	assert.Equal(t, "node_123", got.Report.NodeID)
 	assert.Equal(t, "2026-06-24T12:00:00Z", got.Report.SentAt)
 	require.NotNil(t, got.Report.Heartbeat)
+	assert.Equal(t, "boot_123", got.Report.Heartbeat.BootID)
+	assert.Equal(t, "1.2.3", got.Report.Heartbeat.PaxdVersion)
+	assert.Equal(t, "running", got.Report.Heartbeat.DaemonPhase)
 	assert.Nil(t, got.Report.RuntimeSnapshot)
 	raw := string(conn.writes()[0].payload)
 	assert.NotContains(t, raw, "lease_ttl")
@@ -729,4 +763,22 @@ func (c *fakeWebSocketConn) readStarted() bool {
 	default:
 		return false
 	}
+}
+
+type confirmingService struct {
+	control.Service
+	mu        sync.Mutex
+	confirmed []string
+}
+
+func (s *confirmingService) ConfirmCommandAckDelivered(commandID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.confirmed = append(s.confirmed, commandID)
+}
+
+func (s *confirmingService) confirmedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.confirmed...)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,7 @@ const (
 type Store interface {
 	WithTx(ctx context.Context, fn func(TxStore) error) error
 	GetCommandRecord(ctx context.Context, commandID string) (*CommandRecord, error)
+	CompleteCommand(ctx context.Context, commandID string, completion CommandCompletion) error
 	StoreReader
 }
 
@@ -96,6 +98,7 @@ type ServiceOptions struct {
 	Attachments         AttachmentLocalizer
 	SessionRuntime      SessionRuntimeReportService
 	SessionRuntimeReset SessionRuntimeResetService
+	PaxdLifecycle       PaxdLifecycle
 }
 
 type ControlService struct {
@@ -109,6 +112,7 @@ type ControlService struct {
 	attachments         AttachmentLocalizer
 	sessionRuntime      SessionRuntimeReportService
 	sessionRuntimeReset SessionRuntimeResetService
+	paxdLifecycle       PaxdLifecycle
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -123,6 +127,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		attachments:         opts.Attachments,
 		sessionRuntime:      opts.SessionRuntime,
 		sessionRuntimeReset: opts.SessionRuntimeReset,
+		paxdLifecycle:       opts.PaxdLifecycle,
 	}
 }
 
@@ -151,6 +156,18 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	if cmd.Type == CommandSessionRuntimeReset {
 		return s.handleSessionRuntimeReset(ctx, src, cmd)
 	}
+	if cmd.Type == CommandRestartPaxd {
+		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
+			return rejectedAck(cmd.CommandID, "paxd", "", ControlError{
+				Code: ErrCodeInvalidArgument, Message: "paxd restart requires an authenticated remote node-control source",
+			}), nil
+		}
+		if s.paxdLifecycle == nil {
+			return failedAck(cmd.CommandID, "paxd", "", ControlError{
+				Code: ErrCodeInternal, Message: "paxd lifecycle is not configured",
+			}), nil
+		}
+	}
 	if s.store == nil {
 		return failedAck(cmd.CommandID, "", "", ControlError{Code: ErrCodeInternal, Message: "control store is not configured"}), nil
 	}
@@ -172,7 +189,11 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 				Target:  "command_id",
 			}), nil
 		}
-		return ackFromRecord(*existing), nil
+		ack := ackFromRecord(*existing)
+		if cmd.Type == CommandRestartPaxd {
+			return s.prepareRestartAck(ctx, cmd, *existing, ack), nil
+		}
+		return ack, nil
 	}
 
 	targetType, targetID := commandTarget(cmd)
@@ -201,6 +222,13 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 			return rejectedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
 		}
 		return failedAck(cmd.CommandID, targetType, targetID, errorToControlError(err)), nil
+	}
+	if cmd.Type == CommandRestartPaxd {
+		rec, lookupErr := s.store.GetCommandRecord(ctx, cmd.CommandID)
+		if lookupErr != nil {
+			return failedAck(cmd.CommandID, "paxd", "", errorToControlError(lookupErr)), nil
+		}
+		ack = s.prepareRestartAck(ctx, cmd, *rec, ack)
 	}
 	wakeACPSlots := wakeAgents
 	if isDesiredSlotsOnlyUpdate(cmd) {
@@ -341,6 +369,8 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Comma
 	case CommandAgentConnectionRestart:
 		view, err := tx.RestartAgentConnection(ctx, *cmd.RestartAgentConnection)
 		return receivedAgentConnectionAck(cmd.CommandID, view), false, true, err
+	case CommandRestartPaxd:
+		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
 	case CommandUpgradePaxd:
 		return CommandAck{}, false, false, ErrNotFound
 	case CommandAttachmentEnsureLocal:
@@ -584,6 +614,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.DeleteAgentConnection.ConnectionID
 	case CommandAgentConnectionRestart:
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
+	case CommandRestartPaxd:
+		return "paxd", ""
 	case CommandAttachmentEnsureLocal:
 		return "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID
 	case CommandSessionRuntimeReset:
@@ -591,6 +623,66 @@ func commandTarget(cmd Command) (string, string) {
 	default:
 		return "", ""
 	}
+}
+
+func (s *ControlService) prepareRestartAck(ctx context.Context, cmd Command, rec CommandRecord, ack CommandAck) CommandAck {
+	if rec.Status != CommandStatusReceived {
+		return decorateRestartAck(ack, rec.ResultJSON)
+	}
+	result := PaxdRestartResult{RequestedBootID: s.paxdLifecycle.BootID()}
+	if rec.ResultJSON != "" && rec.ResultJSON != "{}" {
+		_ = json.Unmarshal([]byte(rec.ResultJSON), &result)
+	}
+	if result.RequestedBootID != "" && result.RequestedBootID != s.paxdLifecycle.BootID() {
+		if err := s.store.CompleteCommand(ctx, cmd.CommandID, CommandCompletion{
+			Status: CommandStatusApplied, ResultJSON: rec.ResultJSON,
+		}); err != nil {
+			return failedAck(cmd.CommandID, "paxd", "", errorToControlError(err))
+		}
+		ack.Status = CommandStatusApplied
+		return decorateRestartAck(ack, rec.ResultJSON)
+	}
+	if rec.ResultJSON == "" || rec.ResultJSON == "{}" {
+		raw, err := json.Marshal(result)
+		if err != nil {
+			return failedAck(cmd.CommandID, "paxd", "", ControlError{Code: ErrCodeInternal, Message: "failed to encode paxd restart result"})
+		}
+		rec.ResultJSON = string(raw)
+		if err := s.store.CompleteCommand(ctx, cmd.CommandID, CommandCompletion{
+			Status: CommandStatusReceived, ResultJSON: rec.ResultJSON,
+		}); err != nil {
+			return failedAck(cmd.CommandID, "paxd", "", errorToControlError(err))
+		}
+	}
+	s.paxdLifecycle.ScheduleRestart(cmd.CommandID, *cmd.RestartPaxd)
+	return decorateRestartAck(ack, rec.ResultJSON)
+}
+
+func decorateRestartAck(ack CommandAck, resultJSON string) CommandAck {
+	var result PaxdRestartResult
+	if json.Unmarshal([]byte(resultJSON), &result) == nil && result.RequestedBootID != "" {
+		ack.Result = &CommandResult{PaxdRestart: &result}
+	}
+	return ack
+}
+
+func (s *ControlService) ConfirmCommandAckDelivered(commandID string) {
+	if s == nil || s.store == nil || s.paxdLifecycle == nil || strings.TrimSpace(commandID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	rec, err := s.store.GetCommandRecord(ctx, commandID)
+	if err != nil || rec.Type != CommandRestartPaxd || rec.Status != CommandStatusReceived {
+		return
+	}
+	if err := s.store.CompleteCommand(ctx, commandID, CommandCompletion{
+		Status: CommandStatusApplied, ResultJSON: rec.ResultJSON,
+	}); err != nil {
+		log.Printf("[paxd] confirm restart ACK command_id=%s failed: %v", commandID, err)
+		return
+	}
+	s.paxdLifecycle.ConfirmAckDelivered(commandID)
 }
 
 func receivedRemoteAck(commandID string, view RemoteView) CommandAck {

@@ -97,6 +97,48 @@ func TestBootstrapClearsStaleACPSessionBindingsAndPreservesResumeDescriptor(t *t
 	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[]}`, route.ResumeParamsJSON)
 }
 
+func TestBootstrapWiresRemotePaxdRestartLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := openTestStore(t)
+	cfg := config.DefaultConfig()
+	runtime, err := Bootstrap(context.Background(), Options{
+		Config: &cfg, Store: store, PaxdVersion: "1.2.3",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = runtime.supervisors.closeTransport() })
+	require.NotEmpty(t, runtime.maintenance.BootID())
+	assert.Equal(t, runtime.maintenance.BootID(), runtime.supervisors.bootID)
+
+	cmd := control.Command{
+		CommandID: "cmd_bootstrap_restart",
+		Type:      control.CommandRestartPaxd,
+		RestartPaxd: &control.RestartPaxdCommand{
+			Mode: control.PaxdRestartImmediate, ShutdownGraceSeconds: 9,
+		},
+	}
+	ack, err := runtime.Control.HandleCommand(context.Background(), control.Source{
+		Kind: control.SourceRemote, RemoteID: "remote_prod",
+	}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusReceived, ack.Status)
+	select {
+	case request := <-runtime.ExitRequests():
+		t.Fatalf("restart emitted before ACK delivery: %+v", request)
+	default:
+	}
+
+	deferred, ok := runtime.Control.(control.DeferredCommandAction)
+	require.True(t, ok)
+	deferred.ConfirmCommandAckDelivered(cmd.CommandID)
+	select {
+	case request := <-runtime.ExitRequests():
+		assert.Equal(t, cmd.CommandID, request.CommandID)
+		assert.Equal(t, 9*time.Second, request.ShutdownGrace)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bootstrap lifecycle exit request")
+	}
+}
+
 func TestBootstrapRequiresConfig(t *testing.T) {
 	rt, err := Bootstrap(context.Background(), Options{})
 
@@ -168,7 +210,10 @@ func TestStartDebugHTTPServesAndCloses(t *testing.T) {
 func TestRuntimeSupervisorValidationAndNilBranches(t *testing.T) {
 	var nilRuntime *Runtime
 	nilRuntime.StartSupervisors(context.Background())
-	(&Runtime{}).StartSupervisors(context.Background())
+	require.NoError(t, nilRuntime.Shutdown(context.Background()))
+	emptyRuntime := &Runtime{}
+	emptyRuntime.StartSupervisors(context.Background())
+	require.NoError(t, emptyRuntime.Shutdown(context.Background()))
 
 	empty := &runtimeSupervisors{}
 	empty.WakeRemotes()
@@ -230,6 +275,36 @@ func TestRuntimeSupervisorsStartIgnoresCanceledAndDeadlineErrors(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return remote.startedCount() == 1 && agent.startedCount() == 1
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestRuntimeShutdownWaitsForSupervisors(t *testing.T) {
+	remote := newGatedDaemonSupervisor()
+	rt := &Runtime{supervisors: &runtimeSupervisors{remote: remote}}
+	rt.StartSupervisors(context.Background())
+	select {
+	case <-remote.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for supervisor to start")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- rt.Shutdown(shutdownCtx) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown() returned before supervisor cleanup completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(remote.release)
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown() did not return after supervisor cleanup completed")
+	}
+	require.NoError(t, rt.Shutdown(context.Background()))
 }
 
 func TestTransportJournalGCRunsBoundedRetentionAndStops(t *testing.T) {
@@ -374,6 +449,32 @@ func (f *fakeTransportJournalPruner) lastOptions() sqlstore.AckedOutboundPruneOp
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.options
+}
+
+type gatedDaemonSupervisor struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newGatedDaemonSupervisor() *gatedDaemonSupervisor {
+	return &gatedDaemonSupervisor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *gatedDaemonSupervisor) Start(ctx context.Context) error {
+	f.once.Do(func() { close(f.started) })
+	<-ctx.Done()
+	<-f.release
+	return ctx.Err()
+}
+
+func (f *gatedDaemonSupervisor) Wake() {}
+
+func (f *gatedDaemonSupervisor) Snapshot() supervisor.Snapshot {
+	return supervisor.Snapshot{}
 }
 
 type fakeDaemonSupervisor struct {

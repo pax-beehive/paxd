@@ -75,6 +75,7 @@ func (cmd Command) Validate() error {
 		{CommandAgentConnectionUpdate, cmd.UpdateAgentConnection != nil, validatePtr(cmd.UpdateAgentConnection)},
 		{CommandAgentConnectionDelete, cmd.DeleteAgentConnection != nil, validatePtr(cmd.DeleteAgentConnection)},
 		{CommandAgentConnectionRestart, cmd.RestartAgentConnection != nil, validatePtr(cmd.RestartAgentConnection)},
+		{CommandRestartPaxd, cmd.RestartPaxd != nil, validatePtr(cmd.RestartPaxd)},
 		{CommandUpgradePaxd, cmd.UpgradePaxd != nil, validatePtr(cmd.UpgradePaxd)},
 		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
 		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
@@ -262,6 +263,20 @@ func (cmd DeleteAgentConnectionCommand) Validate() error {
 func (cmd RestartAgentConnectionCommand) Validate() error {
 	if strings.TrimSpace(cmd.ConnectionID) == "" {
 		return invalid("restart_agent_connection.connection_id", "connection id is required")
+	}
+	return nil
+}
+
+func (cmd RestartPaxdCommand) Validate() error {
+	mode := PaxdRestartMode(strings.TrimSpace(string(cmd.Mode)))
+	if mode != "" && mode != PaxdRestartImmediate {
+		return invalid("restart_paxd.mode", "only immediate restart is currently supported")
+	}
+	if cmd.ShutdownGraceSeconds < 0 || cmd.ShutdownGraceSeconds > 60 {
+		return invalid("restart_paxd.shutdown_grace_seconds", "shutdown grace must be between 1 and 60 seconds")
+	}
+	if len(cmd.Reason) > 512 {
+		return invalid("restart_paxd.reason", "reason must not exceed 512 bytes")
 	}
 	return nil
 }
@@ -498,6 +513,7 @@ func knownCommandType(typ CommandType) bool {
 		CommandAgentConnectionUpdate,
 		CommandAgentConnectionDelete,
 		CommandAgentConnectionRestart,
+		CommandRestartPaxd,
 		CommandUpgradePaxd,
 		CommandAttachmentEnsureLocal,
 		CommandSessionRuntimeReset:
