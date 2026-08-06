@@ -169,6 +169,75 @@ func TestRunOnceSkipsRuntimeWithoutCloudAgentID(t *testing.T) {
 	assert.Empty(t, reporter.calls)
 }
 
+func TestRunOnceDisabledLocalReportingKeepsOnlyManagerCreatedACPSessions(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1", RemoteID: "remote_1", CloudAPIURL: "https://one.example",
+			CloudAgentID: "agent_1",
+		},
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{
+		{SessionID: "codex:local", NativeID: "local"},
+		{SessionID: "codex:managed", NativeID: "managed"},
+	}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource:   source,
+		Scanner:         scanner,
+		Reporter:        reporter,
+		ManagedSessions: fakeManagedSessionSource{reportLocalSessions: false, ids: map[string]struct{}{"managed": {}}},
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, reporter.calls, 1)
+	require.Len(t, reporter.calls[0].sessions, 1)
+	assert.Equal(t, "codex:managed", reporter.calls[0].sessions[0].SessionID)
+}
+
+func TestRunOnceSharedCloudURLNeverCrossReportsUnownedLocalSessions(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "conn_husband", RemoteID: "remote_husband", CloudAPIURL: "https://manager.example.com/", CloudAgentID: "agent_husband"}},
+		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "conn_wife", RemoteID: "remote_wife", CloudAPIURL: "https://MANAGER.example.com", CloudAgentID: "agent_wife"}},
+	}}
+	scanner := &fakeScanner{sessionsByConnection: map[string][]model.SessionInfo{
+		"conn_husband": {
+			{SessionID: "codex:husband", NativeID: "husband"},
+			{SessionID: "codex:wife", NativeID: "wife"},
+		},
+		"conn_wife": {
+			{SessionID: "codex:husband", NativeID: "husband"},
+			{SessionID: "codex:wife", NativeID: "wife"},
+		},
+	}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		ManagedSessions: fakeManagedSessionSource{
+			reportLocalSessions: true,
+			sharedCloudTarget:   true,
+			idsByConnection: map[string]map[string]struct{}{
+				"conn_husband": {"husband": {}},
+				"conn_wife":    {"wife": {}},
+			},
+		},
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, reporter.calls, 2)
+	byAgent := make(map[string][]cloud.SessionStatus)
+	for _, call := range reporter.calls {
+		byAgent[call.agentID] = call.sessions
+	}
+	require.Len(t, byAgent["agent_husband"], 1)
+	assert.Equal(t, "codex:husband", byAgent["agent_husband"][0].SessionID)
+	require.Len(t, byAgent["agent_wife"], 1)
+	assert.Equal(t, "codex:wife", byAgent["agent_wife"][0].SessionID)
+}
+
 func TestRunOnceContinuesAfterScanFailure(t *testing.T) {
 	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{
 		{Spec: runtimes.AgentConnectionSpec{ConnectionID: "bad", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_bad"}},
@@ -277,6 +346,28 @@ func TestStartSkipsOverlappingRunsPerRemote(t *testing.T) {
 
 type fakeRuntimeSource struct {
 	runtimes []supervisor.ObservedAgentRuntime
+}
+
+type fakeManagedSessionSource struct {
+	reportLocalSessions bool
+	sharedCloudTarget   bool
+	ids                 map[string]struct{}
+	idsByConnection     map[string]map[string]struct{}
+}
+
+func (s fakeManagedSessionSource) ReportLocalSessionsEnabled(context.Context, string) (bool, error) {
+	return s.reportLocalSessions, nil
+}
+
+func (s fakeManagedSessionSource) CloudTargetSharedByMultipleRemotes(context.Context, string) (bool, error) {
+	return s.sharedCloudTarget, nil
+}
+
+func (s fakeManagedSessionSource) ListACPSessionRouteNativeIDs(_ context.Context, connectionID string) (map[string]struct{}, error) {
+	if ids := s.idsByConnection[connectionID]; ids != nil {
+		return ids, nil
+	}
+	return s.ids, nil
 }
 
 func (s fakeRuntimeSource) ObservedAgentRuntimes() []supervisor.ObservedAgentRuntime {
