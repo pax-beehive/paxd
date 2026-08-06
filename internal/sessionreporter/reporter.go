@@ -36,24 +36,32 @@ type Reporter interface {
 	) error
 }
 
+type ManagedSessionSource interface {
+	ReportLocalSessionsEnabled(ctx context.Context, connectionID string) (bool, error)
+	CloudTargetSharedByMultipleRemotes(ctx context.Context, cloudAPIURL string) (bool, error)
+	ListACPSessionRouteNativeIDs(ctx context.Context, connectionID string) (map[string]struct{}, error)
+}
+
 type Options struct {
-	RuntimeSource RuntimeSource
-	Scanner       Scanner
-	Reporter      Reporter
-	Interval      time.Duration
-	ScanTimeout   time.Duration
-	ReportTimeout time.Duration
-	BatchSize     int
+	RuntimeSource   RuntimeSource
+	Scanner         Scanner
+	Reporter        Reporter
+	ManagedSessions ManagedSessionSource
+	Interval        time.Duration
+	ScanTimeout     time.Duration
+	ReportTimeout   time.Duration
+	BatchSize       int
 }
 
 type Service struct {
-	source        RuntimeSource
-	scanner       Scanner
-	reporter      Reporter
-	interval      time.Duration
-	scanTimeout   time.Duration
-	reportTimeout time.Duration
-	batchSize     int
+	source          RuntimeSource
+	scanner         Scanner
+	reporter        Reporter
+	managedSessions ManagedSessionSource
+	interval        time.Duration
+	scanTimeout     time.Duration
+	reportTimeout   time.Duration
+	batchSize       int
 
 	mu       sync.Mutex
 	inFlight map[string]bool
@@ -99,14 +107,15 @@ func New(opts Options) *Service {
 		batchSize = defaultBatchSize
 	}
 	return &Service{
-		source:        opts.RuntimeSource,
-		scanner:       opts.Scanner,
-		reporter:      opts.Reporter,
-		interval:      interval,
-		scanTimeout:   scanTimeout,
-		reportTimeout: reportTimeout,
-		batchSize:     batchSize,
-		inFlight:      make(map[string]bool),
+		source:          opts.RuntimeSource,
+		scanner:         opts.Scanner,
+		reporter:        opts.Reporter,
+		managedSessions: opts.ManagedSessions,
+		interval:        interval,
+		scanTimeout:     scanTimeout,
+		reportTimeout:   reportTimeout,
+		batchSize:       batchSize,
+		inFlight:        make(map[string]bool),
 	}
 }
 
@@ -178,6 +187,34 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 		if len(sessions) == 0 {
 			continue
 		}
+		reportLocalSessions := true
+		if s.managedSessions != nil {
+			policyCtx, policyCancel := context.WithTimeout(ctx, s.scanTimeout)
+			reportLocalSessions, err = s.managedSessions.ReportLocalSessionsEnabled(policyCtx, spec.ConnectionID)
+			policyCancel()
+			if err != nil {
+				log.Printf("[sessionreporter] local session policy lookup failed connection=%q: %v", spec.ConnectionID, err)
+				continue
+			}
+			sharedCtx, sharedCancel := context.WithTimeout(ctx, s.scanTimeout)
+			sharedTarget, sharedErr := s.managedSessions.CloudTargetSharedByMultipleRemotes(sharedCtx, spec.CloudAPIURL)
+			sharedCancel()
+			if sharedErr != nil {
+				log.Printf("[sessionreporter] shared cloud target lookup failed connection=%q: %v", spec.ConnectionID, sharedErr)
+				continue
+			}
+			if sharedTarget {
+				reportLocalSessions = false
+			}
+		}
+		if !reportLocalSessions {
+			lookupCtx, lookupCancel := context.WithTimeout(ctx, s.scanTimeout)
+			sessions = s.managedSessionsOnly(lookupCtx, spec.ConnectionID, sessions)
+			lookupCancel()
+			if len(sessions) == 0 {
+				continue
+			}
+		}
 		statuses := sessionStatuses(spec, sessions)
 		if len(statuses) == 0 {
 			continue
@@ -197,6 +234,25 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 	for _, report := range reports {
 		s.reportAgentBatch(ctx, report)
 	}
+}
+
+func (s *Service) managedSessionsOnly(ctx context.Context, connectionID string, sessions []model.SessionInfo) []model.SessionInfo {
+	if s.managedSessions == nil {
+		return nil
+	}
+	managedIDs, err := s.managedSessions.ListACPSessionRouteNativeIDs(ctx, connectionID)
+	if err != nil {
+		log.Printf("[sessionreporter] managed session lookup failed connection=%q: %v", connectionID, err)
+		return nil
+	}
+	out := make([]model.SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		nativeID := firstNonEmpty(session.NativeID, session.SessionID)
+		if _, ok := managedIDs[nativeID]; ok {
+			out = append(out, session)
+		}
+	}
+	return out
 }
 
 func (s *Service) reportAgentBatch(ctx context.Context, report *pendingAgentReport) {

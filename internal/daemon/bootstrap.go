@@ -161,10 +161,11 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
 		reports = sessionreporter.New(sessionreporter.Options{
-			RuntimeSource: supervisors.agentRuntimeSource,
-			Scanner:       sessionreporter.DefaultScanner{},
-			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
-			BatchSize:     cfg.Daemon.SessionBatchSize,
+			RuntimeSource:   supervisors.agentRuntimeSource,
+			Scanner:         sessionreporter.DefaultScanner{},
+			Reporter:        sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+			ManagedSessions: store,
+			BatchSize:       cfg.Daemon.SessionBatchSize,
 		})
 	}
 	return &Runtime{
