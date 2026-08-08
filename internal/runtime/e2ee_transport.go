@@ -38,12 +38,13 @@ type e2eePendingCanonical struct {
 }
 
 type e2eeTransportBridge struct {
-	rootKey  []byte
-	agentID  string
-	queueID  string
-	receipts E2EECommandStore
-	send     func(context.Context, []byte, reliablemq.Metadata) error
-	history  *e2eeHistoryProjector
+	rootKey         []byte
+	rootKeyProvider e2ee.RootKeyProvider
+	agentID         string
+	queueID         string
+	receipts        E2EECommandStore
+	send            func(context.Context, []byte, reliablemq.Metadata) error
+	history         *e2eeHistoryProjector
 
 	mu             sync.Mutex
 	sendMu         sync.Mutex
@@ -63,11 +64,23 @@ func newE2EETransportBridge(
 	receipts E2EECommandStore,
 	send func(context.Context, []byte, reliablemq.Metadata) error,
 ) *e2eeTransportBridge {
-	if len(rootKey) == 0 || receipts == nil || send == nil {
+	return newE2EETransportBridgeWithProvider(rootKey, nil, agentID, queueID, receipts, send)
+}
+
+func newE2EETransportBridgeWithProvider(
+	rootKey []byte,
+	rootKeyProvider e2ee.RootKeyProvider,
+	agentID string,
+	queueID string,
+	receipts E2EECommandStore,
+	send func(context.Context, []byte, reliablemq.Metadata) error,
+) *e2eeTransportBridge {
+	if (len(rootKey) == 0 && rootKeyProvider == nil) || receipts == nil || send == nil {
 		return nil
 	}
 	return &e2eeTransportBridge{
-		rootKey: append([]byte(nil), rootKey...), agentID: agentID, queueID: queueID,
+		rootKey: append([]byte(nil), rootKey...), rootKeyProvider: rootKeyProvider,
+		agentID: agentID, queueID: queueID,
 		receipts: receipts, send: send, byNative: make(map[string]e2eeSessionContext),
 		bySession: make(map[string]e2eeSessionContext),
 		pending:   make(map[string]e2eeSessionContext), batches: make(map[string]*e2eeOutputBatch),
@@ -76,8 +89,9 @@ func newE2EETransportBridge(
 }
 
 func (s *AgentTunnelSession) newE2EEBridge(engine ReliableEngine) *e2eeTransportBridge {
-	return newE2EETransportBridge(
+	return newE2EETransportBridgeWithProvider(
 		s.deps.E2EERootKey,
+		s.deps.E2EERootKeyProvider,
 		s.spec.CloudAgentID,
 		s.spec.TransportQueueID,
 		s.deps.E2EECommandStore,
@@ -147,7 +161,11 @@ func (b *e2eeTransportBridge) handleCommand(
 	if !accepted {
 		return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
 	}
-	plaintext, err := e2ee.Decrypt(b.rootKey, e2ee.DirectionCommand, envelope)
+	rootKey, err := b.rootKeyForEpoch(ctx, envelope.KeyEpoch)
+	if err != nil {
+		return true, err
+	}
+	plaintext, err := e2ee.Decrypt(rootKey, e2ee.DirectionCommand, envelope)
 	if err != nil {
 		return true, err
 	}
@@ -273,7 +291,12 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 		b.restoreBatch(sessionID, batch)
 		return err
 	}
-	envelope, err := e2ee.Encrypt(b.rootKey, e2ee.DirectionEvent, e2ee.Metadata{
+	rootKey, err := b.rootKeyForEpoch(ctx, session.keyEpoch)
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+		return err
+	}
+	envelope, err := e2ee.Encrypt(rootKey, e2ee.DirectionEvent, e2ee.Metadata{
 		RecordID: recordID, AgentID: b.agentID, SessionID: sessionID,
 		Kind: "acp_event", KeyEpoch: session.keyEpoch,
 	}, plaintext)
@@ -322,7 +345,11 @@ func (b *e2eeTransportBridge) enqueueCanonical(
 		if err != nil {
 			return err
 		}
-		envelope, err := e2ee.Encrypt(b.rootKey, e2ee.DirectionEvent, e2ee.Metadata{
+		rootKey, err := b.rootKeyForEpoch(context.Background(), session.keyEpoch)
+		if err != nil {
+			return err
+		}
+		envelope, err := e2ee.Encrypt(rootKey, e2ee.DirectionEvent, e2ee.Metadata{
 			RecordID: recordID, AgentID: b.agentID, SessionID: session.sessionID,
 			Kind: record.kind, KeyEpoch: session.keyEpoch,
 		}, record.plaintext)
@@ -348,6 +375,19 @@ func (b *e2eeTransportBridge) enqueueCanonical(
 	b.canonical = append(b.canonical, pending...)
 	b.mu.Unlock()
 	return nil
+}
+
+func (b *e2eeTransportBridge) rootKeyForEpoch(
+	ctx context.Context,
+	keyEpoch int64,
+) ([]byte, error) {
+	if len(b.rootKey) > 0 {
+		return append([]byte(nil), b.rootKey...), nil
+	}
+	if b.rootKeyProvider == nil {
+		return nil, errors.New("paxd has no E2EE root key provider")
+	}
+	return b.rootKeyProvider.RootKey(ctx, b.agentID, keyEpoch)
 }
 
 func (b *e2eeTransportBridge) flushCanonical(ctx context.Context) error {

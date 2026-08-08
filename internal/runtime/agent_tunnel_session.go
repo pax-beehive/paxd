@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/auth"
+	"github.com/pax-beehive/paxd/internal/e2ee"
 	"github.com/pax-beehive/paxkit/reliablemq"
 )
 
@@ -34,6 +35,7 @@ type AgentTunnelSessionDeps struct {
 	Heartbeat             HeartbeatConfig
 	SessionEventSink      SessionEventSink
 	E2EERootKey           []byte
+	E2EERootKeyProvider   e2ee.RootKeyProvider
 	E2EECommandStore      E2EECommandStore
 	ACPSessionBindings    ACPSessionBindingStore
 }

@@ -16,8 +16,46 @@ import (
 const commandIDHeader = "X-Pax-Command-Id"
 
 type Handler struct {
-	service control.Service
-	mux     *http.ServeMux
+	service     control.Service
+	e2eePairing E2EEPairingService
+	mux         *http.ServeMux
+}
+
+type completeE2EEPairingRequest struct {
+	AgentID       string `json:"agent_id"`
+	PairingSecret string `json:"pairing_secret"`
+}
+
+func (h *Handler) routeE2EEPairingComplete(w http.ResponseWriter, r *http.Request) {
+	if h.e2eePairing == nil {
+		writeControlError(w, http.StatusServiceUnavailable, control.ControlError{
+			Code: control.ErrCodeInternal, Message: "E2EE pairing is not configured",
+		})
+		return
+	}
+	var payload completeE2EEPairingRequest
+	if !decodeBody(w, r, &payload) {
+		return
+	}
+	if strings.TrimSpace(payload.AgentID) == "" ||
+		strings.TrimSpace(payload.PairingSecret) == "" ||
+		strings.TrimSpace(r.PathValue("pairing_id")) == "" {
+		writeControlError(w, http.StatusBadRequest, control.ControlError{
+			Code:    control.ErrCodeInvalidArgument,
+			Message: "agent_id, pairing_id, and pairing_secret are required",
+		})
+		return
+	}
+	result, err := h.e2eePairing.CompletePairing(
+		r.Context(), payload.AgentID, r.PathValue("pairing_id"), payload.PairingSecret,
+	)
+	if err != nil {
+		writeControlError(w, http.StatusBadRequest, control.ControlError{
+			Code: control.ErrCodeInvalidArgument, Message: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) routeStatusGet(w http.ResponseWriter, r *http.Request) {

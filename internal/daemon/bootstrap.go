@@ -20,6 +20,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/e2ee"
+	"github.com/pax-beehive/paxd/internal/e2eepairing"
 	"github.com/pax-beehive/paxd/internal/harnessregistry"
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
@@ -119,6 +120,20 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	var e2eeRootKeyProvider e2ee.RootKeyProvider
+	var e2eeDistributionKeys e2ee.RootKeyProvider
+	if len(e2eeRootKey) == 0 {
+		nodeSeed, seedErr := e2ee.LoadOrCreateNodeSeed(
+			ctx, e2eeNodeSeedPath(cfg.Daemon.DBPath), nil,
+		)
+		if seedErr != nil {
+			return nil, fmt.Errorf("load E2EE node seed: %w", seedErr)
+		}
+		e2eeRootKeyProvider = e2ee.DerivedAgentRootKeyProvider{NodeSeed: nodeSeed}
+		e2eeDistributionKeys = e2eeRootKeyProvider
+	} else {
+		e2eeDistributionKeys = e2ee.StaticRootKeyProvider{Key: e2eeRootKey}
+	}
 	maintenance := newLifecycleCoordinator(bootID)
 	paxdUpdater := updater.New(updater.Options{
 		CurrentVersion: opts.PaxdVersion,
@@ -139,6 +154,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		startedAt:            time.Now().UTC(),
 		logFilePath:          cfg.Daemon.LogFile,
 		e2eeRootKey:          e2eeRootKey,
+		e2eeRootKeyProvider:  e2eeRootKeyProvider,
 		transportGCConfig: transportGCConfig{
 			Interval:   cfg.Daemon.TransportJournalGCInterval,
 			KeepFor:    cfg.Daemon.TransportJournalKeepAckedFor,
@@ -173,13 +189,16 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 			BatchSize:     cfg.Daemon.SessionBatchSize,
 		})
 	}
+	pairingService := e2eepairing.New(e2eepairing.ServiceOptions{
+		Store: store, Headers: auth.NewProvider(store, nil), RootKeys: e2eeDistributionKeys,
+	})
 	return &Runtime{
 		Store:   store,
 		Control: service,
-		LocalHandler: localapi.NewHandler(artifactControlService{
+		LocalHandler: localapi.NewHandlerWithE2EE(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,
-		}),
+		}, pairingService),
 		supervisors:    supervisors,
 		harnesses:      harnesses,
 		hostMetrics:    metricsStarter,
@@ -199,6 +218,10 @@ func loadE2EERootKeyFromEnvironment() ([]byte, error) {
 		return nil, fmt.Errorf("load E2EE root key from PAX_E2EE_ROOT_KEY: %w", err)
 	}
 	return rootKey, nil
+}
+
+func e2eeNodeSeedPath(databasePath string) string {
+	return filepath.Join(filepath.Dir(databasePath), "secrets", "e2ee_node_seed")
 }
 
 type LocalAPIServer struct {

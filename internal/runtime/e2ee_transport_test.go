@@ -64,6 +64,50 @@ func TestE2EEBridgeDecryptsDeduplicatesAndAcknowledgesCommands(t *testing.T) {
 	assert.Equal(t, 2, acknowledgements)
 }
 
+func TestE2EEBridgeGivenNodeSeedProviderWhenEpochCommandArrivesThenUsesPerAgentRoot(t *testing.T) {
+	t.Parallel()
+	provider := e2ee.DerivedAgentRootKeyProvider{NodeSeed: make([]byte, 32)}
+	rootKey, err := provider.RootKey(context.Background(), "agent_1", 7)
+	require.NoError(t, err)
+	var sent [][]byte
+	bridge := newE2EETransportBridgeWithProvider(
+		nil, provider, "agent_1", "queue_1",
+		&fakeE2EECommandStore{seen: make(map[string]bool)},
+		func(_ context.Context, payload []byte, metadata reliablemq.Metadata) error {
+			if metadata["e2ee_kind"] == "event" {
+				sent = append(sent, append([]byte(nil), payload...))
+			}
+			return nil
+		},
+	)
+	command := []byte(`{"jsonrpc":"2.0","id":"prompt_1","method":"session/prompt","params":{"sessionId":"native_1"}}`)
+	envelope, err := e2ee.Encrypt(rootKey, e2ee.DirectionCommand, e2ee.Metadata{
+		RecordID: "cmd_epoch_7", AgentID: "agent_1", SessionID: "session_1",
+		Kind: "acp_command", KeyEpoch: 7,
+	}, command)
+	require.NoError(t, err)
+	payload, err := json.Marshal(envelope)
+	require.NoError(t, err)
+
+	handled, err := bridge.handleCommand(context.Background(), reliablemq.Frame{
+		Payload: payload, Metadata: reliablemq.Metadata{
+			"command_id": "cmd_epoch_7", "connection_epoch": "1",
+		},
+	}, func(context.Context, string, []byte) (string, error) { return "native_1", nil })
+	require.NoError(t, err)
+	assert.True(t, handled)
+	_, err = bridge.sendOutput(context.Background(), "native_1", []byte(
+		`{"jsonrpc":"2.0","id":"prompt_1","result":{"stopReason":"end_turn"}}`,
+	))
+	require.NoError(t, err)
+	require.Len(t, sent, 1)
+	var event e2ee.Envelope
+	require.NoError(t, json.Unmarshal(sent[0], &event))
+	assert.Equal(t, int64(7), event.KeyEpoch)
+	_, err = e2ee.Decrypt(rootKey, e2ee.DirectionEvent, event)
+	require.NoError(t, err)
+}
+
 func TestE2EEBridgeBatchesStreamingFramesAndFlushesBoundary(t *testing.T) {
 	t.Parallel()
 	rootKey := make([]byte, 32)

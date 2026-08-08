@@ -19,6 +19,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/controlws"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/e2ee"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/pax-beehive/paxkit/reliablemq"
@@ -49,16 +50,17 @@ type runtimeSupervisors struct {
 	transportProducers interface {
 		Close(context.Context) error
 	}
-	transportStats  *runtimes.TransportStatsTracker
-	startedAt       time.Time
-	logFilePath     string
-	store           *daemonstore.Store
-	acpPoolRegistry *runtimes.ACPPoolRegistry
-	e2eeRootKey     []byte
-	lifecycleMu     sync.Mutex
-	lifecycleCancel context.CancelFunc
-	lifecycleDone   chan struct{}
-	lifecycleErr    error
+	transportStats      *runtimes.TransportStatsTracker
+	startedAt           time.Time
+	logFilePath         string
+	store               *daemonstore.Store
+	acpPoolRegistry     *runtimes.ACPPoolRegistry
+	e2eeRootKey         []byte
+	e2eeRootKeyProvider e2ee.RootKeyProvider
+	lifecycleMu         sync.Mutex
+	lifecycleCancel     context.CancelFunc
+	lifecycleDone       chan struct{}
+	lifecycleErr        error
 }
 
 type transportJournalPruner interface {
@@ -170,6 +172,7 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		ACPPoolRegistry:       acpPoolRegistry,
 		ReliableEngineFactory: engineFactory,
 		E2EERootKey:           append([]byte(nil), s.e2eeRootKey...),
+		E2EERootKeyProvider:   s.e2eeRootKeyProvider,
 		E2EECommandStore:      store,
 		ACPSessionBindings:    acpRouteStoreAdapter{store: store},
 	}}
