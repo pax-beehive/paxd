@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -49,13 +50,18 @@ func TestE2EEBridgeDecryptsDeduplicatesAndAcknowledgesCommands(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.Equal(t, 1, dispatched)
-	require.Len(t, sent, 2)
+	var acknowledgements int
 	for _, ackPayload := range sent {
 		var ack map[string]any
 		require.NoError(t, json.Unmarshal(ackPayload, &ack))
+		if ack["type"] != "e2ee_command_ack" {
+			continue
+		}
+		acknowledgements++
 		assert.Equal(t, "e2ee_command_ack", ack["type"])
 		assert.Equal(t, "cmd_1", ack["command_id"])
 	}
+	assert.Equal(t, 2, acknowledgements)
 }
 
 func TestE2EEBridgeBatchesStreamingFramesAndFlushesBoundary(t *testing.T) {
@@ -96,9 +102,16 @@ func TestE2EEBridgeBatchesStreamingFramesAndFlushesBoundary(t *testing.T) {
 	}
 
 	mu.Lock()
-	require.Len(t, sent, 2)
-	eventPayload := append([]byte(nil), sent[1]...)
+	var eventPayload []byte
+	for _, candidate := range sent {
+		var envelope e2ee.Envelope
+		if json.Unmarshal(candidate, &envelope) == nil && envelope.Kind == "acp_event" {
+			eventPayload = append([]byte(nil), candidate...)
+			break
+		}
+	}
 	mu.Unlock()
+	require.NotEmpty(t, eventPayload)
 	var event e2ee.Envelope
 	require.NoError(t, json.Unmarshal(eventPayload, &event))
 	assert.Equal(t, "acp_event", event.Kind)
@@ -112,6 +125,72 @@ func TestE2EEBridgeBatchesStreamingFramesAndFlushesBoundary(t *testing.T) {
 	assert.Contains(t, string(batch.Frames[0]), `"text":"a"`)
 	assert.Contains(t, string(batch.Frames[1]), `"text":"b"`)
 	assert.Contains(t, string(batch.Frames[2]), "end_turn")
+}
+
+func TestE2EEBridgeGivenPromptAndResponseWhenCanonicalHistoryIsSentThenEncryptsCleanRevisionedRecords(t *testing.T) {
+	t.Parallel()
+	rootKey := make([]byte, 32)
+	type sentRecord struct {
+		payload  []byte
+		metadata reliablemq.Metadata
+	}
+	var sent []sentRecord
+	bridge := newE2EETransportBridge(
+		rootKey,
+		"agent_1",
+		"queue_1",
+		&fakeE2EECommandStore{seen: make(map[string]bool)},
+		func(_ context.Context, payload []byte, metadata reliablemq.Metadata) error {
+			if metadata["e2ee_kind"] == "history" {
+				sent = append(sent, sentRecord{
+					payload: append([]byte(nil), payload...), metadata: metadata,
+				})
+			}
+			return nil
+		},
+	)
+	command := []byte(`{"jsonrpc":"2.0","id":"prompt_1","method":"session/prompt","params":{"prompt":[{"type":"text","text":"secret prompt"}]}}`)
+	envelope, err := e2ee.Encrypt(rootKey, e2ee.DirectionCommand, e2ee.Metadata{
+		RecordID: "cmd_1", AgentID: "agent_1", SessionID: "session_1",
+		Kind: "acp_command", KeyEpoch: 3,
+	}, command)
+	require.NoError(t, err)
+	payload, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = bridge.handleCommand(context.Background(), reliablemq.Frame{
+		Payload: payload, Metadata: reliablemq.Metadata{
+			"command_id": "cmd_1", "connection_epoch": "2",
+		},
+	}, func(context.Context, string, []byte) (string, error) { return "native_1", nil })
+	require.NoError(t, err)
+	_, err = bridge.sendOutput(context.Background(), "native_1", []byte(
+		`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"secret answer"}}}}`,
+	))
+	require.NoError(t, err)
+	_, err = bridge.sendOutput(context.Background(), "native_1", []byte(
+		`{"jsonrpc":"2.0","id":"prompt_1","result":{"stopReason":"end_turn"}}`,
+	))
+	require.NoError(t, err)
+
+	require.NotEmpty(t, sent)
+	kinds := make(map[string]int)
+	for _, record := range sent {
+		var encrypted e2ee.Envelope
+		require.NoError(t, json.Unmarshal(record.payload, &encrypted))
+		assert.NotContains(t, string(record.payload), "secret")
+		plaintext, decryptErr := e2ee.Decrypt(rootKey, e2ee.DirectionEvent, encrypted)
+		require.NoError(t, decryptErr)
+		var canonical struct {
+			MessageID string `json:"message_id"`
+			Revision  int64  `json:"revision"`
+		}
+		require.NoError(t, json.Unmarshal(plaintext, &canonical))
+		assert.Equal(t, record.metadata["message_id"], canonical.MessageID)
+		assert.Equal(t, record.metadata["revision"], fmt.Sprint(canonical.Revision))
+		kinds[encrypted.Kind]++
+	}
+	assert.Positive(t, kinds["e2ee_message"])
+	assert.Positive(t, kinds["e2ee_message_part"])
 }
 
 func TestE2EEBridgeEncryptsSessionNewResponseBeforeNativeRouteExists(t *testing.T) {

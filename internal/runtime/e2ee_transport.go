@@ -32,20 +32,28 @@ type e2eeOutputBatch struct {
 	timer  *time.Timer
 }
 
+type e2eePendingCanonical struct {
+	payload  []byte
+	metadata reliablemq.Metadata
+}
+
 type e2eeTransportBridge struct {
 	rootKey  []byte
 	agentID  string
 	queueID  string
 	receipts E2EECommandStore
 	send     func(context.Context, []byte, reliablemq.Metadata) error
+	history  *e2eeHistoryProjector
 
-	mu        sync.Mutex
-	sendMu    sync.Mutex
-	closed    bool
-	byNative  map[string]e2eeSessionContext
-	bySession map[string]e2eeSessionContext
-	pending   map[string]e2eeSessionContext
-	batches   map[string]*e2eeOutputBatch
+	mu             sync.Mutex
+	sendMu         sync.Mutex
+	closed         bool
+	byNative       map[string]e2eeSessionContext
+	bySession      map[string]e2eeSessionContext
+	pending        map[string]e2eeSessionContext
+	batches        map[string]*e2eeOutputBatch
+	canonical      []e2eePendingCanonical
+	retryCanonical *time.Timer
 }
 
 func newE2EETransportBridge(
@@ -63,6 +71,7 @@ func newE2EETransportBridge(
 		receipts: receipts, send: send, byNative: make(map[string]e2eeSessionContext),
 		bySession: make(map[string]e2eeSessionContext),
 		pending:   make(map[string]e2eeSessionContext), batches: make(map[string]*e2eeOutputBatch),
+		history: newE2EEHistoryProjector(agentID, time.Now),
 	}
 }
 
@@ -146,11 +155,19 @@ func (b *e2eeTransportBridge) handleCommand(
 		sessionID: envelope.SessionID, keyEpoch: envelope.KeyEpoch, connectionEpoch: epoch,
 	}
 	b.trackCommand(plaintext, session)
+	historyRecords, err := b.history.projectCommand(envelope.SessionID, plaintext)
+	if err != nil {
+		return true, err
+	}
+	if err := b.enqueueCanonical(session, historyRecords); err != nil {
+		return true, err
+	}
 	nativeSessionID, err := dispatch(ctx, envelope.SessionID, plaintext)
 	if err != nil {
 		return true, err
 	}
 	b.bindNativeSession(nativeSessionID, session)
+	_ = b.flushCanonical(ctx)
 	if err := b.receipts.CompleteE2EECommand(ctx, b.agentID, envelope.RecordID); err != nil {
 		return true, err
 	}
@@ -198,6 +215,10 @@ func (b *e2eeTransportBridge) close(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	b.closed = true
+	if b.retryCanonical != nil {
+		b.retryCanonical.Stop()
+		b.retryCanonical = nil
+	}
 	sessions := make([]string, 0, len(b.batches))
 	for sessionID := range b.batches {
 		sessions = append(sessions, sessionID)
@@ -207,6 +228,19 @@ func (b *e2eeTransportBridge) close(ctx context.Context) error {
 	for _, sessionID := range sessions {
 		result = errors.Join(result, b.flush(ctx, sessionID))
 	}
+	if b.history != nil {
+		recordsBySession, err := b.history.flushAll()
+		result = errors.Join(result, err)
+		for sessionID, records := range recordsBySession {
+			b.mu.Lock()
+			session, ok := b.bySession[sessionID]
+			b.mu.Unlock()
+			if ok {
+				result = errors.Join(result, b.enqueueCanonical(session, records))
+			}
+		}
+	}
+	result = errors.Join(result, b.flushCanonical(ctx))
 	return result
 }
 
@@ -253,15 +287,113 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 		return err
 	}
 	b.sendMu.Lock()
-	defer b.sendMu.Unlock()
 	err = b.send(ctx, payload, reliablemq.Metadata{
 		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID,
 		"connection_epoch": strconv.FormatInt(session.connectionEpoch, 10),
 	})
+	b.sendMu.Unlock()
 	if err != nil {
 		b.restoreBatch(sessionID, batch)
+		return err
 	}
-	return err
+	if b.history != nil {
+		records, projectErr := b.history.projectFrames(sessionID, batch.frames)
+		if projectErr != nil {
+			return projectErr
+		}
+		if enqueueErr := b.enqueueCanonical(session, records); enqueueErr != nil {
+			return enqueueErr
+		}
+		_ = b.flushCanonical(ctx)
+	}
+	return nil
+}
+
+func (b *e2eeTransportBridge) enqueueCanonical(
+	session e2eeSessionContext,
+	records []e2eeCanonicalRecord,
+) error {
+	if b == nil || len(records) == 0 {
+		return nil
+	}
+	pending := make([]e2eePendingCanonical, 0, len(records))
+	for _, record := range records {
+		recordID, err := newE2EEEventID()
+		if err != nil {
+			return err
+		}
+		envelope, err := e2ee.Encrypt(b.rootKey, e2ee.DirectionEvent, e2ee.Metadata{
+			RecordID: recordID, AgentID: b.agentID, SessionID: session.sessionID,
+			Kind: record.kind, KeyEpoch: session.keyEpoch,
+		}, record.plaintext)
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			return err
+		}
+		metadata := reliablemq.Metadata{
+			"agent_id": b.agentID, "e2ee_kind": "history", "local_id": recordID,
+			"message_id":       record.messageID,
+			"revision":         strconv.FormatInt(record.revision, 10),
+			"connection_epoch": strconv.FormatInt(session.connectionEpoch, 10),
+		}
+		if record.partIndex >= 0 {
+			metadata["part_index"] = strconv.Itoa(record.partIndex)
+		}
+		pending = append(pending, e2eePendingCanonical{payload: payload, metadata: metadata})
+	}
+	b.mu.Lock()
+	b.canonical = append(b.canonical, pending...)
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *e2eeTransportBridge) flushCanonical(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	for {
+		b.mu.Lock()
+		if len(b.canonical) == 0 {
+			if b.retryCanonical != nil {
+				b.retryCanonical.Stop()
+				b.retryCanonical = nil
+			}
+			b.mu.Unlock()
+			return nil
+		}
+		item := b.canonical[0]
+		b.mu.Unlock()
+
+		b.sendMu.Lock()
+		err := b.send(ctx, item.payload, item.metadata)
+		b.sendMu.Unlock()
+		if err != nil {
+			b.scheduleCanonicalRetry()
+			return err
+		}
+		b.mu.Lock()
+		if len(b.canonical) > 0 && string(b.canonical[0].payload) == string(item.payload) {
+			b.canonical = b.canonical[1:]
+		}
+		b.mu.Unlock()
+	}
+}
+
+func (b *e2eeTransportBridge) scheduleCanonicalRetry() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.retryCanonical != nil {
+		return
+	}
+	b.retryCanonical = time.AfterFunc(5*time.Second, func() {
+		b.mu.Lock()
+		b.retryCanonical = nil
+		b.mu.Unlock()
+		_ = b.flushCanonical(context.Background())
+	})
 }
 
 func (b *e2eeTransportBridge) restoreBatch(sessionID string, failed *e2eeOutputBatch) {
