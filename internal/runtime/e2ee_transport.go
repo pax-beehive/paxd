@@ -1,0 +1,391 @@
+package runtime
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/pax-beehive/paxd/internal/e2ee"
+	"github.com/pax-beehive/paxkit/reliablemq"
+)
+
+const (
+	e2eeBatchDelay = 75 * time.Millisecond
+	e2eeBatchBytes = 16 * 1024
+)
+
+type e2eeSessionContext struct {
+	sessionID       string
+	keyEpoch        int64
+	connectionEpoch int64
+}
+
+type e2eeOutputBatch struct {
+	frames []json.RawMessage
+	bytes  int
+	timer  *time.Timer
+}
+
+type e2eeTransportBridge struct {
+	rootKey  []byte
+	agentID  string
+	queueID  string
+	receipts E2EECommandStore
+	send     func(context.Context, []byte, reliablemq.Metadata) error
+
+	mu        sync.Mutex
+	sendMu    sync.Mutex
+	closed    bool
+	byNative  map[string]e2eeSessionContext
+	bySession map[string]e2eeSessionContext
+	pending   map[string]e2eeSessionContext
+	batches   map[string]*e2eeOutputBatch
+}
+
+func newE2EETransportBridge(
+	rootKey []byte,
+	agentID string,
+	queueID string,
+	receipts E2EECommandStore,
+	send func(context.Context, []byte, reliablemq.Metadata) error,
+) *e2eeTransportBridge {
+	if len(rootKey) == 0 || receipts == nil || send == nil {
+		return nil
+	}
+	return &e2eeTransportBridge{
+		rootKey: append([]byte(nil), rootKey...), agentID: agentID, queueID: queueID,
+		receipts: receipts, send: send, byNative: make(map[string]e2eeSessionContext),
+		bySession: make(map[string]e2eeSessionContext),
+		pending:   make(map[string]e2eeSessionContext), batches: make(map[string]*e2eeOutputBatch),
+	}
+}
+
+func (s *AgentTunnelSession) newE2EEBridge(engine ReliableEngine) *e2eeTransportBridge {
+	return newE2EETransportBridge(
+		s.deps.E2EERootKey,
+		s.spec.CloudAgentID,
+		s.spec.TransportQueueID,
+		s.deps.E2EECommandStore,
+		func(ctx context.Context, payload []byte, metadata reliablemq.Metadata) error {
+			return engine.Send(ctx, reliablemq.OutboundMessage{
+				QueueID: s.spec.TransportQueueID, Stream: reliablemq.StreamACP,
+				Payload: append([]byte(nil), payload...), Metadata: metadata,
+			})
+		},
+	)
+}
+
+func (s *AgentTunnelSession) sendSessionOutput(
+	ctx context.Context,
+	managerSessionID string,
+	nativeSessionID string,
+	payload []byte,
+	engine ReliableEngine,
+	bridge *e2eeTransportBridge,
+) error {
+	if handled, err := bridge.sendOutput(ctx, nativeSessionID, payload); handled || err != nil {
+		return err
+	}
+	metadata := reliablemq.Metadata{"agent_id": s.spec.CloudAgentID}
+	if managerSessionID != "" {
+		metadata["manager_session_id"] = managerSessionID
+	}
+	if nativeSessionID != "" {
+		metadata["native_session_id"] = nativeSessionID
+	}
+	return engine.Send(ctx, reliablemq.OutboundMessage{
+		QueueID: s.spec.TransportQueueID, Stream: reliablemq.StreamACP,
+		Payload: append([]byte(nil), payload...), Metadata: metadata,
+	})
+}
+
+func (b *e2eeTransportBridge) handleCommand(
+	ctx context.Context,
+	frame reliablemq.Frame,
+	dispatch func(context.Context, string, []byte) (string, error),
+) (bool, error) {
+	if b == nil {
+		var envelope e2ee.Envelope
+		if json.Unmarshal(frame.Payload, &envelope) == nil && envelope.Kind == "acp_command" {
+			return true, errors.New("E2EE command received but paxd has no root key")
+		}
+		return false, nil
+	}
+	var envelope e2ee.Envelope
+	if err := json.Unmarshal(frame.Payload, &envelope); err != nil || envelope.ProtocolVersion == 0 {
+		return false, nil
+	}
+	if envelope.Kind != "acp_command" || envelope.AgentID != b.agentID {
+		return true, errors.New("invalid E2EE command route")
+	}
+	epoch, err := strconv.ParseInt(frame.Metadata["connection_epoch"], 10, 64)
+	if err != nil || epoch < 1 {
+		return true, errors.New("invalid E2EE connection epoch")
+	}
+	if commandID := frame.Metadata["command_id"]; commandID != "" && commandID != envelope.RecordID {
+		return true, errors.New("E2EE command id metadata mismatch")
+	}
+	accepted, err := b.receipts.BeginE2EECommand(ctx, b.agentID, envelope.RecordID, epoch)
+	if err != nil {
+		return true, err
+	}
+	if !accepted {
+		return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
+	}
+	plaintext, err := e2ee.Decrypt(b.rootKey, e2ee.DirectionCommand, envelope)
+	if err != nil {
+		return true, err
+	}
+	session := e2eeSessionContext{
+		sessionID: envelope.SessionID, keyEpoch: envelope.KeyEpoch, connectionEpoch: epoch,
+	}
+	b.trackCommand(plaintext, session)
+	nativeSessionID, err := dispatch(ctx, envelope.SessionID, plaintext)
+	if err != nil {
+		return true, err
+	}
+	b.bindNativeSession(nativeSessionID, session)
+	if err := b.receipts.CompleteE2EECommand(ctx, b.agentID, envelope.RecordID); err != nil {
+		return true, err
+	}
+	return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
+}
+
+func (b *e2eeTransportBridge) sendOutput(ctx context.Context, nativeSessionID string, payload []byte) (bool, error) {
+	if b == nil {
+		return false, nil
+	}
+	session, ok := b.resolveOutput(nativeSessionID, payload)
+	if !ok {
+		return false, nil
+	}
+	frame := append(json.RawMessage(nil), payload...)
+	boundary := e2eeBoundaryFrame(payload)
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return true, errors.New("E2EE bridge is closed")
+	}
+	batch := b.batches[session.sessionID]
+	if batch == nil {
+		batch = &e2eeOutputBatch{}
+		b.batches[session.sessionID] = batch
+	}
+	batch.frames = append(batch.frames, frame)
+	batch.bytes += len(payload)
+	if batch.timer == nil {
+		batch.timer = time.AfterFunc(e2eeBatchDelay, func() {
+			_ = b.flush(context.Background(), session.sessionID)
+		})
+	}
+	flush := boundary || batch.bytes >= e2eeBatchBytes
+	b.mu.Unlock()
+	if flush {
+		return true, b.flush(ctx, session.sessionID)
+	}
+	return true, nil
+}
+
+func (b *e2eeTransportBridge) close(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	b.closed = true
+	sessions := make([]string, 0, len(b.batches))
+	for sessionID := range b.batches {
+		sessions = append(sessions, sessionID)
+	}
+	b.mu.Unlock()
+	var result error
+	for _, sessionID := range sessions {
+		result = errors.Join(result, b.flush(ctx, sessionID))
+	}
+	return result
+}
+
+func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error {
+	b.mu.Lock()
+	batch := b.batches[sessionID]
+	if batch == nil || len(batch.frames) == 0 {
+		b.mu.Unlock()
+		return nil
+	}
+	delete(b.batches, sessionID)
+	if batch.timer != nil {
+		batch.timer.Stop()
+	}
+	session := b.bySession[sessionID]
+	b.mu.Unlock()
+	if session.keyEpoch == 0 {
+		b.restoreBatch(sessionID, batch)
+		return errors.New("missing E2EE session key epoch")
+	}
+	plaintext, err := json.Marshal(struct {
+		Frames []json.RawMessage `json:"frames"`
+	}{Frames: batch.frames})
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+		return err
+	}
+	recordID, err := newE2EEEventID()
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+		return err
+	}
+	envelope, err := e2ee.Encrypt(b.rootKey, e2ee.DirectionEvent, e2ee.Metadata{
+		RecordID: recordID, AgentID: b.agentID, SessionID: sessionID,
+		Kind: "acp_event", KeyEpoch: session.keyEpoch,
+	}, plaintext)
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+		return err
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+		return err
+	}
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	err = b.send(ctx, payload, reliablemq.Metadata{
+		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID,
+		"connection_epoch": strconv.FormatInt(session.connectionEpoch, 10),
+	})
+	if err != nil {
+		b.restoreBatch(sessionID, batch)
+	}
+	return err
+}
+
+func (b *e2eeTransportBridge) restoreBatch(sessionID string, failed *e2eeOutputBatch) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	current := b.batches[sessionID]
+	if current == nil {
+		current = &e2eeOutputBatch{}
+		b.batches[sessionID] = current
+	}
+	current.frames = append(append([]json.RawMessage(nil), failed.frames...), current.frames...)
+	current.bytes += failed.bytes
+	if !b.closed && current.timer == nil {
+		current.timer = time.AfterFunc(e2eeBatchDelay, func() {
+			_ = b.flush(context.Background(), sessionID)
+		})
+	}
+}
+
+func (b *e2eeTransportBridge) trackCommand(payload []byte, session e2eeSessionContext) {
+	msg, ok := parseACPRPCMessage(payload)
+	if !ok {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bySession[session.sessionID] = session
+	if key := rpcIDKey(msg.ID); key != "" {
+		b.pending[key] = session
+	}
+}
+
+func (b *e2eeTransportBridge) bindNativeSession(nativeSessionID string, session e2eeSessionContext) {
+	if nativeSessionID == "" {
+		return
+	}
+	b.mu.Lock()
+	b.byNative[nativeSessionID] = session
+	b.mu.Unlock()
+}
+
+func (b *e2eeTransportBridge) resolveOutput(nativeSessionID string, payload []byte) (e2eeSessionContext, bool) {
+	msg, ok := parseACPRPCMessage(payload)
+	if !ok {
+		return e2eeSessionContext{}, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if nativeSessionID != "" {
+		if session, found := b.byNative[nativeSessionID]; found {
+			return session, true
+		}
+	}
+	if paramsSessionID := firstSessionID("", msg.Params); paramsSessionID != "" {
+		if session, found := b.byNative[paramsSessionID]; found {
+			return session, true
+		}
+	}
+	key := rpcIDKey(msg.ID)
+	session, found := b.pending[key]
+	if !found {
+		return e2eeSessionContext{}, false
+	}
+	delete(b.pending, key)
+	if nativeSessionID != "" {
+		b.byNative[nativeSessionID] = session
+		return session, true
+	}
+	var result struct {
+		SessionID    string `json:"sessionId"`
+		SessionIDAlt string `json:"session_id"`
+	}
+	if len(msg.Result) > 0 && json.Unmarshal(msg.Result, &result) == nil {
+		resolved := firstNonEmpty(result.SessionID, result.SessionIDAlt)
+		if resolved != "" {
+			b.byNative[resolved] = session
+		}
+	}
+	return session, true
+}
+
+func (b *e2eeTransportBridge) sendCommandACK(ctx context.Context, commandID string, epoch int64) error {
+	payload, err := json.Marshal(map[string]any{
+		"type": "e2ee_command_ack", "command_id": commandID, "connection_epoch": epoch,
+	})
+	if err != nil {
+		return err
+	}
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	return b.send(ctx, payload, reliablemq.Metadata{
+		"agent_id": b.agentID, "e2ee_kind": "command_ack", "command_id": commandID,
+	})
+}
+
+func e2eeBoundaryFrame(payload []byte) bool {
+	msg, ok := parseACPRPCMessage(payload)
+	if !ok || msg.Method == "" {
+		return true
+	}
+	if msg.Method != "session/update" {
+		return true
+	}
+	var params struct {
+		Update struct {
+			Type    string `json:"sessionUpdate"`
+			TypeAlt string `json:"session_update"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(msg.Params, &params) != nil {
+		return true
+	}
+	switch firstNonEmpty(params.Update.Type, params.Update.TypeAlt) {
+	case "agent_message_chunk", "agent_thought_chunk", "agent_message_delta", "agent_thought_delta":
+		return false
+	default:
+		return true
+	}
+}
+
+func newE2EEEventID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate E2EE event id: %w", err)
+	}
+	return "evt_" + hex.EncodeToString(value), nil
+}

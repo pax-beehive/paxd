@@ -19,6 +19,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/e2ee"
 	"github.com/pax-beehive/paxd/internal/harnessregistry"
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
@@ -114,6 +115,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate daemon boot id: %w", err)
 	}
+	e2eeRootKey, err := loadE2EERootKeyFromEnvironment()
+	if err != nil {
+		return nil, err
+	}
 	maintenance := newLifecycleCoordinator(bootID)
 	paxdUpdater := updater.New(updater.Options{
 		CurrentVersion: opts.PaxdVersion,
@@ -133,6 +138,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		maintenance:          maintenance,
 		startedAt:            time.Now().UTC(),
 		logFilePath:          cfg.Daemon.LogFile,
+		e2eeRootKey:          e2eeRootKey,
 		transportGCConfig: transportGCConfig{
 			Interval:   cfg.Daemon.TransportJournalGCInterval,
 			KeepFor:    cfg.Daemon.TransportJournalKeepAckedFor,
@@ -181,6 +187,18 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		artifactJobs:   artifactJobs,
 		maintenance:    maintenance,
 	}, nil
+}
+
+func loadE2EERootKeyFromEnvironment() ([]byte, error) {
+	encoded := strings.TrimSpace(os.Getenv("PAX_E2EE_ROOT_KEY"))
+	if encoded == "" {
+		return nil, nil
+	}
+	rootKey, err := e2ee.ParseRootKey(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("load E2EE root key from PAX_E2EE_ROOT_KEY: %w", err)
+	}
+	return rootKey, nil
 }
 
 type LocalAPIServer struct {

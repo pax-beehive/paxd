@@ -810,6 +810,32 @@ func TestACPSessionRouteRepository(t *testing.T) {
 	require.Empty(t, route.BoundProcessEpoch)
 	require.Equal(t, slotID, route.LastSlotID)
 	require.Equal(t, int64(5), route.Version)
+
+	boundManager, err := store.BindACPSessionRouteManagerID(ctx, ACPSessionManagerBinding{
+		ConnectionID:     "conn_codex",
+		ManagerSessionID: "manager_1",
+		NativeSessionID:  "native_1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "manager_1", boundManager.ManagerSessionID)
+	require.Equal(t, int64(6), boundManager.Version)
+	byManager, err := store.GetACPSessionRouteByManagerID(ctx, "conn_codex", "manager_1")
+	require.NoError(t, err)
+	require.Equal(t, "native_1", byManager.NativeSessionID)
+	_, err = store.UpsertACPSessionRoute(ctx, ACPSessionRouteUpsert{
+		ConnectionID: "conn_codex", NativeSessionID: "native_2", ResumeParamsJSON: `{}`,
+	})
+	require.NoError(t, err)
+	_, err = store.BindACPSessionRouteManagerID(ctx, ACPSessionManagerBinding{
+		ConnectionID: "conn_codex", ManagerSessionID: "manager_1", NativeSessionID: "native_2",
+	})
+	require.ErrorIs(t, err, ErrDuplicate)
+	_, err = store.GetACPSessionRouteByManagerID(ctx, "conn_codex", "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = store.BindACPSessionRouteManagerID(ctx, ACPSessionManagerBinding{
+		ConnectionID: "conn_codex", ManagerSessionID: "manager_2", NativeSessionID: "missing",
+	})
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestDesiredSpecsStatusViewsAndRuntimeBinding(t *testing.T) {

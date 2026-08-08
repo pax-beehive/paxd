@@ -316,6 +316,25 @@ API_SERVER_KEY=your-key-here
 
 ## ACP Forwarder
 
+### Staged E2EE payload transport
+
+Set the same development root key in paxd and in the Console Security page:
+
+```bash
+PAX_E2EE_ROOT_KEY=<base64-encoded 32-byte key>
+```
+
+paxd accepts the development root key only through `PAX_E2EE_ROOT_KEY` and
+validates it during startup. The root key is used only at the Browser and paxd
+endpoints; never add it to pax-manager configuration. This manual shared-key
+flow is the first rollout stage and will be replaced by local-confirmation ECDH
+pairing and OS Keychain storage.
+
+With E2EE enabled, the existing reliable ACP WebSocket remains the live
+transport. paxd decrypts encrypted commands immediately before local ACP
+dispatch and encrypts ACP events before reliable WebSocket journaling. Legacy
+non-E2EE traffic remains available during the staged workbench migration.
+
 paxd can also run a stateless Agent Client Protocol forwarder. It assumes
 pax-manager exposes a WebSocket tunnel endpoint, defaulting to
 `/api/v1/agent/tunnel`.

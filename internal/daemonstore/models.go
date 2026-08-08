@@ -69,6 +69,20 @@ type AgentConnection struct {
 	DeletedAt        *time.Time `gorm:"column:deleted_at"`
 }
 
+type E2EEAgentFence struct {
+	AgentID         string    `gorm:"primaryKey;type:text"`
+	ConnectionEpoch int64     `gorm:"not null"`
+	UpdatedAt       time.Time `gorm:"not null"`
+}
+
+type E2EECommandReceipt struct {
+	AgentID         string    `gorm:"primaryKey;type:text"`
+	CommandID       string    `gorm:"primaryKey;type:text"`
+	ConnectionEpoch int64     `gorm:"not null"`
+	CreatedAt       time.Time `gorm:"not null"`
+	CompletedAt     *time.Time
+}
+
 func (AgentConnection) TableName() string { return "agent_connection" }
 
 type AgentConnectionStatus struct {
@@ -113,8 +127,9 @@ type ACPSlotStatus struct {
 func (ACPSlotStatus) TableName() string { return "acp_slot_status" }
 
 type ACPSessionRoute struct {
-	ConnectionID      string    `gorm:"primaryKey;type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL"`
+	ConnectionID      string    `gorm:"primaryKey;type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL;uniqueIndex:idx_acp_session_route_manager,where:manager_session_id <> ''"`
 	NativeSessionID   string    `gorm:"primaryKey;type:text"`
+	ManagerSessionID  string    `gorm:"type:text;not null;default:'';uniqueIndex:idx_acp_session_route_manager,where:manager_session_id <> ''"`
 	BoundSlotID       *string   `gorm:"type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL"`
 	BoundProcessEpoch *string   `gorm:"type:text;index:idx_acp_session_route_process_binding,where:bound_process_epoch IS NOT NULL;check:chk_acp_session_route_binding_pair,(bound_slot_id IS NULL) = (bound_process_epoch IS NULL)"`
 	LastSlotID        string    `gorm:"type:text;not null;default:''"`

@@ -19,6 +19,8 @@ local_session_element    optional local-only timeline cache
 messages                 local message history
 message_parts            local message history parts
 setting                  small daemon key-value settings
+e2ee_agent_fences        highest accepted Manager connection epoch per cloud agent
+e2ee_command_receipts    E2EE business-command processing and completion receipts
 ```
 
 Existing raw-SQL tables that remain outside GORM:
@@ -26,6 +28,18 @@ Existing raw-SQL tables that remain outside GORM:
 ```text
 transport_journal        reliable ACP frame queue
 ```
+
+## E2EE command state
+
+`e2ee_agent_fences` rejects commands from a lower `connection_epoch` after a
+new Manager tunnel has become authoritative.
+
+`e2ee_command_receipts` has composite primary key `(agent_id, command_id)` and
+stores the accepted connection epoch, creation time, and nullable completion
+time. A row with `completed_at IS NULL` is recoverable work and must be retried;
+a completed row suppresses duplicate ACP dispatch while still allowing the ACK
+to be resent. Receipt state is business idempotency and is separate from the
+raw reliable transport journal.
 
 Legacy tables that should not be source of truth in the target model:
 

@@ -378,3 +378,38 @@ Given auth or process setup fails
 When the session returns an exit  
 Then exit code/message are safe for status tables  
 And do not include resolved secrets or raw headers
+
+## End-to-end encrypted ACP transport
+
+### Scenario: encrypted command is decrypted only at local dispatch
+
+Given paxd and the Browser share a valid root key
+And the Manager sends a version-1 encrypted command envelope
+When the current connection epoch accepts the command ID
+Then paxd authenticates the route metadata as AES-GCM AAD
+And dispatches only the decrypted ACP frame to the local process
+And marks the business receipt complete before sending the command ACK
+
+### Scenario: interrupted command is retried without duplicating completed work
+
+Given a command receipt exists without a completion timestamp
+When reliable transport replays the same command ID
+Then paxd retries local ACP dispatch
+But given the receipt is complete
+When the same command is replayed
+Then paxd sends the business ACK without dispatching it again
+
+### Scenario: streaming updates are encrypted in bounded batches
+
+Given ACP output belongs to an E2EE session
+When token-like updates arrive within 75 milliseconds and below 16 KiB
+Then paxd emits one encrypted event batch
+And a tool, permission, completion, or error boundary flushes immediately
+And a failed reliable-journal write restores the plaintext batch for retry
+
+### Scenario: stale Manager connection is fenced
+
+Given paxd has accepted a higher Manager connection epoch
+When a command arrives with a lower epoch
+Then paxd rejects it before ACP dispatch
+And the command ID and event local ID remain independent from transport sequence numbers

@@ -54,6 +54,7 @@ type runtimeSupervisors struct {
 	logFilePath     string
 	store           *daemonstore.Store
 	acpPoolRegistry *runtimes.ACPPoolRegistry
+	e2eeRootKey     []byte
 	lifecycleMu     sync.Mutex
 	lifecycleCancel context.CancelFunc
 	lifecycleDone   chan struct{}
@@ -168,6 +169,9 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Dialer:                dialer,
 		ACPPoolRegistry:       acpPoolRegistry,
 		ReliableEngineFactory: engineFactory,
+		E2EERootKey:           append([]byte(nil), s.e2eeRootKey...),
+		E2EECommandStore:      store,
+		ACPSessionBindings:    acpRouteStoreAdapter{store: store},
 	}}
 	agent := supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
 		Store:      store,
@@ -792,6 +796,29 @@ func (a acpRouteStoreAdapter) CountBoundACPSessionRoutesBySlot(ctx context.Conte
 
 func (a acpRouteStoreAdapter) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {
 	return a.store.ClearACPSessionRoutesForProcess(ctx, connectionID, slotID, processEpoch)
+}
+
+func (a acpRouteStoreAdapter) NativeSessionID(ctx context.Context, connectionID string, managerSessionID string) (string, bool, error) {
+	route, err := a.store.GetACPSessionRouteByManagerID(ctx, connectionID, managerSessionID)
+	if errors.Is(err, daemonstore.ErrNotFound) {
+		return "", false, nil
+	}
+	return route.NativeSessionID, err == nil, err
+}
+
+func (a acpRouteStoreAdapter) ManagerSessionID(ctx context.Context, connectionID string, nativeSessionID string) (string, bool, error) {
+	route, err := a.store.GetACPSessionRoute(ctx, connectionID, nativeSessionID)
+	if errors.Is(err, daemonstore.ErrNotFound) || (err == nil && route.ManagerSessionID == "") {
+		return "", false, nil
+	}
+	return route.ManagerSessionID, err == nil, err
+}
+
+func (a acpRouteStoreAdapter) BindSessionIDs(ctx context.Context, connectionID string, managerSessionID string, nativeSessionID string) error {
+	_, err := a.store.BindACPSessionRouteManagerID(ctx, daemonstore.ACPSessionManagerBinding{
+		ConnectionID: connectionID, ManagerSessionID: managerSessionID, NativeSessionID: nativeSessionID,
+	})
+	return err
 }
 
 func runtimeACPRoute(route daemonstore.ACPSessionRouteView) runtimes.ACPRoute {

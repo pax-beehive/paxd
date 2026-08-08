@@ -598,10 +598,10 @@ func TestAgentTunnelCopyStdoutToWSSendsLinesAndRejectsInvalidJSON(t *testing.T) 
 	require.NoError(t, err)
 	t.Cleanup(binding.Close)
 
-	require.NoError(t, session.copyStdoutToWS(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1}`+"\n"), engine))
+	require.NoError(t, session.copyStdoutToWS(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1}`+"\n"), engine, nil))
 	require.Eventually(t, func() bool { return len(conn.writes()) == 1 }, time.Second, 10*time.Millisecond)
 
-	err = session.copyStdoutToWS(context.Background(), strings.NewReader("not-json\n"), engine)
+	err = session.copyStdoutToWS(context.Background(), strings.NewReader("not-json\n"), engine, nil)
 	require.ErrorContains(t, err, "must be JSON")
 }
 
@@ -914,7 +914,7 @@ func newTestAgentEngine(
 	stdin io.Writer,
 ) (ReliableEngine, *reliablemq.Producer) {
 	t.Helper()
-	engine, producer, err := session.newReliableEngine(context.Background(), stdin)
+	engine, producer, _, err := session.newReliableEngine(context.Background(), stdin)
 	require.NoError(t, err)
 	return engine, producer
 }
