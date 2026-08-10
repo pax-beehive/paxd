@@ -186,6 +186,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 			RuntimeSource: supervisors.agentRuntimeSource,
 			Scanner:       sessionreporter.DefaultScanner{},
 			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+			RouteResolver: sessionReportRouteResolver{store: store},
 			BatchSize:     cfg.Daemon.SessionBatchSize,
 		})
 	}
@@ -206,6 +207,25 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		artifactJobs:   artifactJobs,
 		maintenance:    maintenance,
 	}, nil
+}
+
+type sessionReportRouteResolver struct {
+	store *daemonstore.Store
+}
+
+func (r sessionReportRouteResolver) ResolveManagerSessionID(
+	ctx context.Context,
+	connectionID string,
+	nativeSessionID string,
+) (string, bool, error) {
+	route, err := r.store.GetACPSessionRoute(ctx, connectionID, nativeSessionID)
+	if errors.Is(err, daemonstore.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return route.ManagerSessionID, true, nil
 }
 
 func loadE2EERootKeyFromEnvironment() ([]byte, error) {

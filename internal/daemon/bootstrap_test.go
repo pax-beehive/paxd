@@ -97,6 +97,38 @@ func TestBootstrapClearsStaleACPSessionBindingsAndPreservesResumeDescriptor(t *t
 	assert.JSONEq(t, `{"cwd":"/work","mcpServers":[]}`, route.ResumeParamsJSON)
 }
 
+func TestSessionReportRouteResolverRequiresBoundManagerSession(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	resolver := sessionReportRouteResolver{store: store}
+
+	managerSessionID, found, err := resolver.ResolveManagerSessionID(ctx, "conn_1", "native_1")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, managerSessionID)
+
+	_, err = store.UpsertACPSessionRoute(ctx, daemonstore.ACPSessionRouteUpsert{
+		ConnectionID:    "conn_1",
+		NativeSessionID: "native_1",
+	})
+	require.NoError(t, err)
+	managerSessionID, found, err = resolver.ResolveManagerSessionID(ctx, "conn_1", "native_1")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Empty(t, managerSessionID)
+
+	_, err = store.BindACPSessionRouteManagerID(ctx, daemonstore.ACPSessionManagerBinding{
+		ConnectionID:     "conn_1",
+		NativeSessionID:  "native_1",
+		ManagerSessionID: "sess_manager_1",
+	})
+	require.NoError(t, err)
+	managerSessionID, found, err = resolver.ResolveManagerSessionID(ctx, "conn_1", "native_1")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "sess_manager_1", managerSessionID)
+}
+
 func TestBootstrapWiresRemotePaxdRestartLifecycle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store := openTestStore(t)

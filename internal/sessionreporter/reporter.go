@@ -2,6 +2,7 @@ package sessionreporter
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -36,10 +37,23 @@ type Reporter interface {
 	) error
 }
 
+// ACPRouteResolver translates a harness-native session ID to the Manager
+// session ID assigned by the ACP boundary. A route may exist before that
+// Manager ID has been bound; callers must treat an empty Manager ID as not yet
+// reportable.
+type ACPRouteResolver interface {
+	ResolveManagerSessionID(
+		ctx context.Context,
+		connectionID string,
+		nativeSessionID string,
+	) (managerSessionID string, found bool, err error)
+}
+
 type Options struct {
 	RuntimeSource RuntimeSource
 	Scanner       Scanner
 	Reporter      Reporter
+	RouteResolver ACPRouteResolver
 	Interval      time.Duration
 	ScanTimeout   time.Duration
 	ReportTimeout time.Duration
@@ -50,6 +64,7 @@ type Service struct {
 	source        RuntimeSource
 	scanner       Scanner
 	reporter      Reporter
+	routeResolver ACPRouteResolver
 	interval      time.Duration
 	scanTimeout   time.Duration
 	reportTimeout time.Duration
@@ -102,6 +117,7 @@ func New(opts Options) *Service {
 		source:        opts.RuntimeSource,
 		scanner:       opts.Scanner,
 		reporter:      opts.Reporter,
+		routeResolver: opts.RouteResolver,
 		interval:      interval,
 		scanTimeout:   scanTimeout,
 		reportTimeout: reportTimeout,
@@ -178,7 +194,13 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 		if len(sessions) == 0 {
 			continue
 		}
-		statuses := sessionStatuses(spec, sessions)
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, s.scanTimeout)
+		statuses, err := s.sessionStatuses(resolveCtx, spec, sessions)
+		resolveCancel()
+		if err != nil {
+			log.Printf("[sessionreporter] route resolution failed remote=%q connection=%q agent=%q: %v", spec.RemoteID, spec.ConnectionID, spec.CloudAgentID, err)
+			continue
+		}
 		if len(statuses) == 0 {
 			continue
 		}
@@ -264,17 +286,37 @@ func scannerSpec(observed supervisor.ObservedAgentRuntime) SessionScannerSpec {
 	}
 }
 
-func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cloud.SessionStatus {
+func (s *Service) sessionStatuses(
+	ctx context.Context,
+	spec SessionScannerSpec,
+	sessions []model.SessionInfo,
+) ([]cloud.SessionStatus, error) {
+	if s.routeResolver == nil {
+		return nil, nil
+	}
 	out := make([]cloud.SessionStatus, 0, len(sessions))
 	for _, session := range sessions {
-		if session.SessionID == "" {
+		nativeSessionID := firstNonEmpty(session.NativeID, session.SessionID)
+		if nativeSessionID == "" {
+			continue
+		}
+		managerSessionID, found, err := s.routeResolver.ResolveManagerSessionID(
+			ctx,
+			spec.ConnectionID,
+			nativeSessionID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve native session %q: %w", nativeSessionID, err)
+		}
+		managerSessionID = strings.TrimSpace(managerSessionID)
+		if !found || managerSessionID == "" {
 			continue
 		}
 		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
 		out = append(out, cloud.SessionStatus{
-			SessionID:         session.SessionID,
+			SessionID:         managerSessionID,
 			AgentType:         agentType,
-			NativeID:          firstNonEmpty(session.NativeID, session.SessionID),
+			NativeID:          nativeSessionID,
 			Name:              sessionDisplayName(session),
 			ProjectID:         session.ProjectID,
 			Preview:           session.Preview,
@@ -288,7 +330,7 @@ func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cl
 			Messages:          sessionMessages(session.Messages),
 		})
 	}
-	return out
+	return out, nil
 }
 
 func latestUserMessageAt(messages []model.SessionMessage) string {
