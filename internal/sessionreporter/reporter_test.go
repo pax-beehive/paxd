@@ -68,6 +68,9 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 		RuntimeSource: source,
 		Scanner:       scanner,
 		Reporter:      reporter,
+		RouteResolver: &fakeRouteResolver{routes: map[string]routeResolution{
+			"conn_1/sess_1": {managerSessionID: "sess_manager_1", found: true},
+		}},
 		ScanTimeout:   time.Second,
 		ReportTimeout: time.Second,
 	})
@@ -85,7 +88,8 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, "https://manager.example.com", reporter.calls[0].target.CloudAPIURL)
 	assert.Equal(t, "agent_1", reporter.calls[0].agentID)
 	require.Len(t, reporter.calls[0].sessions, 1)
-	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "sess_manager_1", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "sess_1", reporter.calls[0].sessions[0].NativeID)
 	assert.Equal(t, "cli", reporter.calls[0].sessions[0].Source)
 	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
 	assert.Equal(t, "2026-06-28T11:59:58Z", reporter.calls[0].sessions[0].LastUserMessageAt)
@@ -138,6 +142,7 @@ func TestRunOnceBatchesDuplicateSessionsPerCloudAgent(t *testing.T) {
 		RuntimeSource: source,
 		Scanner:       scanner,
 		Reporter:      reporter,
+		RouteResolver: passThroughRouteResolver{},
 		BatchSize:     2,
 	})
 
@@ -149,9 +154,9 @@ func TestRunOnceBatchesDuplicateSessionsPerCloudAgent(t *testing.T) {
 	require.Len(t, reporter.calls, 1)
 	assert.Equal(t, "agent_1", reporter.calls[0].agentID)
 	require.Len(t, reporter.calls[0].sessions, 2)
-	assert.Equal(t, "codex:sess_1", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "sess_1", reporter.calls[0].sessions[0].SessionID)
 	assert.Equal(t, "First", reporter.calls[0].sessions[0].Name)
-	assert.Equal(t, "codex:sess_2", reporter.calls[0].sessions[1].SessionID)
+	assert.Equal(t, "sess_2", reporter.calls[0].sessions[1].SessionID)
 	assert.Equal(t, "Second", reporter.calls[0].sessions[1].Name)
 }
 
@@ -161,7 +166,7 @@ func TestRunOnceSkipsRuntimeWithoutCloudAgentID(t *testing.T) {
 	}}}
 	scanner := &fakeScanner{sessions: []model.SessionInfo{{SessionID: "sess_1"}}}
 	reporter := &fakeCloudReporter{}
-	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter})
+	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter, RouteResolver: passThroughRouteResolver{}})
 
 	require.NoError(t, service.RunOnce(context.Background()))
 
@@ -250,7 +255,7 @@ func TestRunOnceContinuesAfterScanFailure(t *testing.T) {
 		},
 	}
 	reporter := &fakeCloudReporter{}
-	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter})
+	service := New(Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter, RouteResolver: passThroughRouteResolver{}})
 
 	require.NoError(t, service.RunOnce(context.Background()))
 
@@ -275,6 +280,7 @@ func TestRunOnceScanTimeoutCancelsScannerAndContinues(t *testing.T) {
 		RuntimeSource: source,
 		Scanner:       scanner,
 		Reporter:      reporter,
+		RouteResolver: passThroughRouteResolver{},
 		ScanTimeout:   10 * time.Millisecond,
 	})
 
@@ -300,6 +306,7 @@ func TestStartReturnsImmediatelyAndRunsImmediatePass(t *testing.T) {
 		RuntimeSource: source,
 		Scanner:       scanner,
 		Reporter:      reporter,
+		RouteResolver: passThroughRouteResolver{},
 		Interval:      time.Hour,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -331,6 +338,7 @@ func TestStartSkipsOverlappingRunsPerRemote(t *testing.T) {
 		RuntimeSource: source,
 		Scanner:       scanner,
 		Reporter:      reporter,
+		RouteResolver: passThroughRouteResolver{},
 		Interval:      10 * time.Millisecond,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -344,8 +352,141 @@ func TestStartSkipsOverlappingRunsPerRemote(t *testing.T) {
 	close(reporter.blockCh)
 }
 
+func TestRunOnceReportsOnlySessionsWithBoundACPRoutes(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1",
+			RemoteID:     "remote_1",
+			CloudAgentID: "agent_1",
+		},
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{
+		{SessionID: "codex:untracked", NativeID: "native_untracked"},
+		{SessionID: "codex:pending", NativeID: "native_pending"},
+		{SessionID: "codex:bound", NativeID: "native_bound"},
+	}}
+	routes := &fakeRouteResolver{routes: map[string]routeResolution{
+		"conn_1/native_pending": {found: true},
+		"conn_1/native_bound":   {managerSessionID: "sess_manager", found: true},
+	}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		RouteResolver: routes,
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, reporter.calls, 1)
+	require.Len(t, reporter.calls[0].sessions, 1)
+	assert.Equal(t, "sess_manager", reporter.calls[0].sessions[0].SessionID)
+	assert.Equal(t, "native_bound", reporter.calls[0].sessions[0].NativeID)
+}
+
+func TestRunOnceDefersPendingRouteUntilNextPass(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1",
+			RemoteID:     "remote_1",
+			CloudAgentID: "agent_1",
+		},
+	}}}
+	scanner := &fakeScanner{sessions: []model.SessionInfo{{
+		SessionID: "codex:native_1",
+		NativeID:  "native_1",
+	}}}
+	routes := &fakeRouteResolver{routes: map[string]routeResolution{
+		"conn_1/native_1": {found: true},
+	}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner:       scanner,
+		Reporter:      reporter,
+		RouteResolver: routes,
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+	assert.Empty(t, reporter.calls)
+
+	routes.set("conn_1", "native_1", routeResolution{
+		managerSessionID: "sess_manager_1",
+		found:            true,
+	})
+	require.NoError(t, service.RunOnce(context.Background()))
+
+	require.Len(t, reporter.calls, 1)
+	require.Len(t, reporter.calls[0].sessions, 1)
+	assert.Equal(t, "sess_manager_1", reporter.calls[0].sessions[0].SessionID)
+}
+
+func TestRunOnceDoesNotFallbackWhenRouteResolutionFails(t *testing.T) {
+	source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+		Spec: runtimes.AgentConnectionSpec{
+			ConnectionID: "conn_1",
+			RemoteID:     "remote_1",
+			CloudAgentID: "agent_1",
+		},
+	}}}
+	reporter := &fakeCloudReporter{}
+	service := New(Options{
+		RuntimeSource: source,
+		Scanner: &fakeScanner{sessions: []model.SessionInfo{{
+			SessionID: "codex:native_1",
+			NativeID:  "native_1",
+		}}},
+		Reporter: reporter,
+		RouteResolver: &fakeRouteResolver{routes: map[string]routeResolution{
+			"conn_1/native_1": {err: errors.New("sqlite unavailable")},
+		}},
+	})
+
+	require.NoError(t, service.RunOnce(context.Background()))
+	assert.Empty(t, reporter.calls)
+}
+
 type fakeRuntimeSource struct {
 	runtimes []supervisor.ObservedAgentRuntime
+}
+
+type passThroughRouteResolver struct{}
+
+func (passThroughRouteResolver) ResolveManagerSessionID(
+	_ context.Context,
+	_ string,
+	nativeSessionID string,
+) (string, bool, error) {
+	return nativeSessionID, true, nil
+}
+
+type routeResolution struct {
+	managerSessionID string
+	found            bool
+	err              error
+}
+
+type fakeRouteResolver struct {
+	mu     sync.Mutex
+	routes map[string]routeResolution
+}
+
+func (r *fakeRouteResolver) ResolveManagerSessionID(
+	_ context.Context,
+	connectionID string,
+	nativeSessionID string,
+) (string, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	resolution := r.routes[connectionID+"/"+nativeSessionID]
+	return resolution.managerSessionID, resolution.found, resolution.err
+}
+
+func (r *fakeRouteResolver) set(connectionID string, nativeSessionID string, resolution routeResolution) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routes[connectionID+"/"+nativeSessionID] = resolution
 }
 
 type fakeManagedSessionSource struct {

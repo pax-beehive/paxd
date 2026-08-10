@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/e2eepairing"
 )
 
 type Client struct {
@@ -119,6 +120,46 @@ func (c *Client) UpdateAgentConnection(ctx context.Context, commandID string, co
 
 func (c *Client) RestartAgentConnection(ctx context.Context, commandID string, connectionID string) (control.CommandAck, error) {
 	return c.postCommand(ctx, "/v1/agent-connections/"+url.PathEscape(connectionID)+"/restart", nil, commandID)
+}
+
+func (c *Client) CompleteE2EEPairing(
+	ctx context.Context,
+	agentID string,
+	pairingID string,
+	pairingSecret string,
+) (e2eepairing.Result, error) {
+	raw, err := json.Marshal(completeE2EEPairingRequest{
+		AgentID: agentID, PairingSecret: pairingSecret,
+	})
+	if err != nil {
+		return e2eepairing.Result{}, err
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost,
+		c.baseURL+"/v1/e2ee/pairings/"+url.PathEscape(pairingID)+"/complete",
+		bytes.NewReader(raw),
+	)
+	if err != nil {
+		return e2eepairing.Result{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	httpClient := c.http
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return e2eepairing.Result{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return e2eepairing.Result{}, fmt.Errorf("local API returned %s", response.Status)
+	}
+	var result e2eepairing.Result
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return e2eepairing.Result{}, err
+	}
+	return result, nil
 }
 
 func (c *Client) DeleteAgentConnection(ctx context.Context, commandID string, connectionID string) (control.CommandAck, error) {

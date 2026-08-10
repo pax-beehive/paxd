@@ -109,6 +109,7 @@ type ACPSessionRouteBindingUpdate struct {
 type ACPSessionRouteView struct {
 	ConnectionID      string
 	NativeSessionID   string
+	ManagerSessionID  string
 	BoundSlotID       string
 	BoundProcessEpoch string
 	LastSlotID        string
@@ -117,6 +118,12 @@ type ACPSessionRouteView struct {
 	LastUsedAt        string
 	UpdatedAt         string
 	Version           int64
+}
+
+type ACPSessionManagerBinding struct {
+	ConnectionID     string
+	ManagerSessionID string
+	NativeSessionID  string
 }
 
 type RemoteDesiredSpec = runtimes.RemoteSpec
@@ -1032,6 +1039,34 @@ func (s *Store) GetACPSessionRoute(ctx context.Context, connectionID string, nat
 	return acpSessionRouteView(route), nil
 }
 
+func (s *Store) GetACPSessionRouteByManagerID(ctx context.Context, connectionID string, managerSessionID string) (ACPSessionRouteView, error) {
+	var route ACPSessionRoute
+	if err := s.db.WithContext(ctx).
+		Where("connection_id = ? AND manager_session_id = ?", connectionID, managerSessionID).
+		First(&route).Error; err != nil {
+		return ACPSessionRouteView{}, mapGormErr(err)
+	}
+	return acpSessionRouteView(route), nil
+}
+
+func (s *Store) BindACPSessionRouteManagerID(ctx context.Context, binding ACPSessionManagerBinding) (ACPSessionRouteView, error) {
+	now := s.currentTime()
+	res := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Where("connection_id = ? AND native_session_id = ?", binding.ConnectionID, binding.NativeSessionID).
+		Updates(map[string]any{
+			"manager_session_id": binding.ManagerSessionID,
+			"updated_at":         now,
+			"version":            gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return ACPSessionRouteView{}, mapCreateErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ACPSessionRouteView{}, ErrNotFound
+	}
+	return s.GetACPSessionRoute(ctx, binding.ConnectionID, binding.NativeSessionID)
+}
+
 func (s *Store) ListACPSessionRouteNativeIDs(ctx context.Context, connectionID string) (map[string]struct{}, error) {
 	var nativeIDs []string
 	if err := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
@@ -1669,6 +1704,7 @@ func acpSessionRouteView(route ACPSessionRoute) ACPSessionRouteView {
 	return ACPSessionRouteView{
 		ConnectionID:      route.ConnectionID,
 		NativeSessionID:   route.NativeSessionID,
+		ManagerSessionID:  route.ManagerSessionID,
 		BoundSlotID:       stringValue(route.BoundSlotID),
 		BoundProcessEpoch: stringValue(route.BoundProcessEpoch),
 		LastSlotID:        route.LastSlotID,

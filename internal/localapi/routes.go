@@ -1,13 +1,28 @@
 package localapi
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/e2eepairing"
 )
 
+type E2EEPairingService interface {
+	CompletePairing(
+		ctx context.Context,
+		agentID string,
+		pairingID string,
+		encodedSecret string,
+	) (e2eepairing.Result, error)
+}
+
 func NewHandler(service control.Service) http.Handler {
-	handler := &Handler{service: service, mux: http.NewServeMux()}
+	return NewHandlerWithE2EE(service, nil)
+}
+
+func NewHandlerWithE2EE(service control.Service, pairing E2EEPairingService) http.Handler {
+	handler := &Handler{service: service, e2eePairing: pairing, mux: http.NewServeMux()}
 	handler.routes()
 	return handler
 }
@@ -51,6 +66,7 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /v1/local/sessions/{id}", h.routeLocalSessionGet)
 
 	h.mux.HandleFunc("POST /v1/artifact-publications", h.routeArtifactPublicationCreate)
+	h.mux.HandleFunc("POST /v1/e2ee/pairings/{pairing_id}/complete", h.routeE2EEPairingComplete)
 
 	h.mux.HandleFunc("GET /v1/commands/{id}", h.routeCommandGet)
 	h.mux.HandleFunc("/", h.routeNotFound)

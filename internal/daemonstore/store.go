@@ -138,6 +138,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&MessagePart{},
 		&Setting{},
 		&ArtifactPublishJob{},
+		&E2EEAgentFence{},
+		&E2EECommandReceipt{},
 	)
 }
 

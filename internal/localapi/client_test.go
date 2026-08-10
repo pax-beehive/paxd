@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/e2eepairing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,6 +116,38 @@ func TestClientDeletesRemoteWithCascadeQuery(t *testing.T) {
 	assert.Equal(t, "/v1/remotes/remote%2Fprod", transport.request.URL.EscapedPath())
 	assert.Equal(t, "true", transport.request.URL.Query().Get("cascade_agent_connections"))
 	assert.Equal(t, "cmd_3", transport.request.Header.Get(commandIDHeader))
+}
+
+func TestClientCompletesE2EEPairingWithEscapedPathAndOpaqueSecret(t *testing.T) {
+	transport := &fakeRoundTripper{body: `{"pairing_id":"pair/1","agent_id":"agent_1","device_id":"device_1","key_epoch":1}`}
+	client := &Client{baseURL: "http://paxd", http: &http.Client{Transport: transport}}
+
+	result, err := client.CompleteE2EEPairing(context.Background(), "agent_1", "pair/1", "opaque-secret")
+
+	require.NoError(t, err)
+	assert.Equal(t, e2eepairing.Result{PairingID: "pair/1", AgentID: "agent_1", DeviceID: "device_1", KeyEpoch: 1}, result)
+	assert.Equal(t, "/v1/e2ee/pairings/pair%2F1/complete", transport.request.URL.EscapedPath())
+	var body completeE2EEPairingRequest
+	require.NoError(t, json.NewDecoder(transport.request.Body).Decode(&body))
+	assert.Equal(t, "opaque-secret", body.PairingSecret)
+}
+
+func TestClientCompletesE2EEPairingGivenLocalAPIErrorThenReturnsError(t *testing.T) {
+	transport := &fakeRoundTripper{status: http.StatusBadRequest, body: `{}`}
+	client := &Client{baseURL: "http://paxd", http: &http.Client{Transport: transport}}
+
+	_, err := client.CompleteE2EEPairing(context.Background(), "agent_1", "pair_1", "secret")
+
+	assert.ErrorContains(t, err, "Bad Request")
+}
+
+func TestClientCompletesE2EEPairingGivenMalformedSuccessThenReturnsDecodeError(t *testing.T) {
+	transport := &fakeRoundTripper{body: `not-json`}
+	client := &Client{baseURL: "http://paxd", http: &http.Client{Transport: transport}}
+
+	_, err := client.CompleteE2EEPairing(context.Background(), "agent_1", "pair_1", "secret")
+
+	assert.Error(t, err)
 }
 
 type fakeRoundTripper struct {

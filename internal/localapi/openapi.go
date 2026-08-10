@@ -185,6 +185,8 @@ func localAPIEndpoints() []apiEndpoint {
 		{Method: "POST", Path: "/v1/local/sessions/sync", Summary: "Refresh local session cache.", OperationID: "syncLocalSessions", RequestBody: "SyncLocalSessionsQuery", Response: "QueryResult", Tags: []string{"local"}},
 		{Method: "GET", Path: "/v1/local/sessions/{id}", Summary: "Get one local session.", OperationID: "getLocalSession", Parameters: []apiParameter{pathID}, Response: "QueryResult", Tags: []string{"local"}},
 
+		{Method: "POST", Path: "/v1/e2ee/pairings/{pairing_id}/complete", Summary: "Wrap an agent root key for a browser pairing request.", OperationID: "completeE2EEPairing", Parameters: []apiParameter{{Name: "pairing_id", In: "path", Type: "string", Required: true}}, RequestBody: "CompleteE2EEPairingRequest", Response: "E2EEPairingResult", Tags: []string{"e2ee"}},
+
 		{Method: "GET", Path: "/v1/commands/{id}", Summary: "Get one command audit record.", OperationID: "getCommand", Parameters: []apiParameter{pathID}, Response: "QueryResult", Tags: []string{"commands"}},
 	}
 }
@@ -320,6 +322,11 @@ func requestExample(schema string) map[string]any {
 			"limit":          20,
 			"timeout_millis": 3000,
 		}
+	case "CompleteE2EEPairingRequest":
+		return map[string]any{
+			"agent_id":       "agent_cloud_id",
+			"pairing_secret": "base64-one-time-secret",
+		}
 	default:
 		return nil
 	}
@@ -373,6 +380,14 @@ func openAPISchemas() map[string]any {
 			"message": stringSchema,
 			"target":  stringSchema,
 		}, "code", "message"),
+		"CompleteE2EEPairingRequest": objectSchema(map[string]any{
+			"agent_id": stringSchema, "pairing_secret": stringSchema,
+		}, "agent_id", "pairing_secret"),
+		"E2EEPairingResult": objectSchema(map[string]any{
+			"pairing_id": stringSchema, "agent_id": stringSchema,
+			"device_id": stringSchema,
+			"key_epoch": map[string]any{"type": "integer", "format": "int64"},
+		}, "pairing_id", "agent_id", "device_id", "key_epoch"),
 		"CommandAck": objectSchema(map[string]any{
 			"command_id":         stringSchema,
 			"ok":                 boolSchema,

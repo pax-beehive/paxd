@@ -2,6 +2,7 @@ package sessionreporter
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -36,6 +37,18 @@ type Reporter interface {
 	) error
 }
 
+// ACPRouteResolver translates a harness-native session ID to the Manager
+// session ID assigned by the ACP boundary. A route may exist before that
+// Manager ID has been bound; callers must treat an empty Manager ID as not yet
+// reportable.
+type ACPRouteResolver interface {
+	ResolveManagerSessionID(
+		ctx context.Context,
+		connectionID string,
+		nativeSessionID string,
+	) (managerSessionID string, found bool, err error)
+}
+
 type ManagedSessionSource interface {
 	ReportLocalSessionsEnabled(ctx context.Context, connectionID string) (bool, error)
 	CloudTargetSharedByMultipleRemotes(ctx context.Context, cloudAPIURL string) (bool, error)
@@ -46,6 +59,7 @@ type Options struct {
 	RuntimeSource   RuntimeSource
 	Scanner         Scanner
 	Reporter        Reporter
+	RouteResolver   ACPRouteResolver
 	ManagedSessions ManagedSessionSource
 	Interval        time.Duration
 	ScanTimeout     time.Duration
@@ -57,6 +71,7 @@ type Service struct {
 	source          RuntimeSource
 	scanner         Scanner
 	reporter        Reporter
+	routeResolver   ACPRouteResolver
 	managedSessions ManagedSessionSource
 	interval        time.Duration
 	scanTimeout     time.Duration
@@ -110,6 +125,7 @@ func New(opts Options) *Service {
 		source:          opts.RuntimeSource,
 		scanner:         opts.Scanner,
 		reporter:        opts.Reporter,
+		routeResolver:   opts.RouteResolver,
 		managedSessions: opts.ManagedSessions,
 		interval:        interval,
 		scanTimeout:     scanTimeout,
@@ -215,7 +231,13 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 				continue
 			}
 		}
-		statuses := sessionStatuses(spec, sessions)
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, s.scanTimeout)
+		statuses, err := s.sessionStatuses(resolveCtx, spec, sessions)
+		resolveCancel()
+		if err != nil {
+			log.Printf("[sessionreporter] route resolution failed remote=%q connection=%q agent=%q: %v", spec.RemoteID, spec.ConnectionID, spec.CloudAgentID, err)
+			continue
+		}
 		if len(statuses) == 0 {
 			continue
 		}
@@ -318,6 +340,53 @@ func scannerSpec(observed supervisor.ObservedAgentRuntime) SessionScannerSpec {
 		RestartNonce:  spec.RestartNonce,
 		ObservedPhase: observed.Phase,
 	}
+}
+
+func (s *Service) sessionStatuses(
+	ctx context.Context,
+	spec SessionScannerSpec,
+	sessions []model.SessionInfo,
+) ([]cloud.SessionStatus, error) {
+	if s.routeResolver == nil {
+		return sessionStatuses(spec, sessions), nil
+	}
+	out := make([]cloud.SessionStatus, 0, len(sessions))
+	for _, session := range sessions {
+		nativeSessionID := firstNonEmpty(session.NativeID, session.SessionID)
+		if nativeSessionID == "" {
+			continue
+		}
+		managerSessionID, found, err := s.routeResolver.ResolveManagerSessionID(
+			ctx,
+			spec.ConnectionID,
+			nativeSessionID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve native session %q: %w", nativeSessionID, err)
+		}
+		managerSessionID = strings.TrimSpace(managerSessionID)
+		if !found || managerSessionID == "" {
+			continue
+		}
+		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
+		out = append(out, cloud.SessionStatus{
+			SessionID:         managerSessionID,
+			AgentType:         agentType,
+			NativeID:          nativeSessionID,
+			Name:              sessionDisplayName(session),
+			ProjectID:         session.ProjectID,
+			Preview:           session.Preview,
+			WorkspaceRoots:    append([]string(nil), session.WorkspaceRoots...),
+			Source:            session.Source,
+			Status:            session.Status,
+			CurrentTask:       session.CurrentTask,
+			TokenUsage:        cloud.TokenUsage{TotalTokens: session.TokenUsage},
+			LastMessageAt:     firstNonEmpty(session.UpdatedAt, session.LastActive),
+			LastUserMessageAt: latestUserMessageAt(session.Messages),
+			Messages:          sessionMessages(session.Messages),
+		})
+	}
+	return out, nil
 }
 
 func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cloud.SessionStatus {

@@ -78,6 +78,36 @@ to stdin, avoid dispatching duplicate frames, and replay `received` but not
 or `agent_id` is remote manager metadata for routing/debugging, not the local
 runtime slot identity.
 
+## E2EE bridge
+
+When a 32-byte root key is configured, `AgentTunnelSession` recognizes version-1
+encrypted command envelopes without exposing plaintext to the Manager. The
+runtime derives separate command and event keys with HKDF-SHA-256, authenticates
+the routing metadata as AES-256-GCM AAD, decrypts immediately before local ACP
+dispatch, and encrypts attributable ACP output before it enters the reliable
+outbound journal.
+
+Business IDs are independent from reliable transport sequence numbers:
+
+- `command_id` is persisted in `e2ee_command_receipts`. An incomplete receipt is
+  retried after a dispatch error or restart; a completed receipt is ACKed without
+  dispatching the ACP command again.
+- `local_id` is generated once for each encrypted event handed to the reliable
+  journal. Reliable replay preserves that envelope and ID for Manager-side
+  deduplication.
+- `connection_epoch` fences commands from old Manager WebSocket connections.
+
+Streaming `session/update` text/thought deltas are collected per canonical PAX
+session and flushed after 75 ms or 16 KiB. Turn boundaries, tool calls,
+permission requests, completion responses, and errors flush immediately. A
+failed reliable-journal write restores the batch for retry. This first rollout
+uses bounded in-memory plaintext batching; a process crash can therefore lose
+at most the current batching window. A future SQLite plaintext-frame to
+encrypted-outbox transaction can remove that bounded gap.
+
+Outputs that cannot be attributed to an E2EE session retain the legacy raw ACP
+path so staged and legacy sessions can coexist during migration.
+
 ## Primary Interfaces
 
 Implementation note: the directory is named `runtime`, but Go files may use a package name such as `runtimes` or import aliases to avoid confusion with the standard library `runtime` package.

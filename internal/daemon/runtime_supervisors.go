@@ -19,6 +19,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/controlws"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/e2ee"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/pax-beehive/paxkit/reliablemq"
@@ -49,15 +50,17 @@ type runtimeSupervisors struct {
 	transportProducers interface {
 		Close(context.Context) error
 	}
-	transportStats  *runtimes.TransportStatsTracker
-	startedAt       time.Time
-	logFilePath     string
-	store           *daemonstore.Store
-	acpPoolRegistry *runtimes.ACPPoolRegistry
-	lifecycleMu     sync.Mutex
-	lifecycleCancel context.CancelFunc
-	lifecycleDone   chan struct{}
-	lifecycleErr    error
+	transportStats      *runtimes.TransportStatsTracker
+	startedAt           time.Time
+	logFilePath         string
+	store               *daemonstore.Store
+	acpPoolRegistry     *runtimes.ACPPoolRegistry
+	e2eeRootKey         []byte
+	e2eeRootKeyProvider e2ee.RootKeyProvider
+	lifecycleMu         sync.Mutex
+	lifecycleCancel     context.CancelFunc
+	lifecycleDone       chan struct{}
+	lifecycleErr        error
 }
 
 type transportJournalPruner interface {
@@ -168,6 +171,10 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		Dialer:                dialer,
 		ACPPoolRegistry:       acpPoolRegistry,
 		ReliableEngineFactory: engineFactory,
+		E2EERootKey:           append([]byte(nil), s.e2eeRootKey...),
+		E2EERootKeyProvider:   s.e2eeRootKeyProvider,
+		E2EECommandStore:      store,
+		ACPSessionBindings:    acpRouteStoreAdapter{store: store},
 	}}
 	agent := supervisor.NewAgentConnectionSupervisor(supervisor.AgentConnectionSupervisorOptions{
 		Store:      store,
@@ -792,6 +799,29 @@ func (a acpRouteStoreAdapter) CountBoundACPSessionRoutesBySlot(ctx context.Conte
 
 func (a acpRouteStoreAdapter) ClearACPSessionRoutesForProcess(ctx context.Context, connectionID string, slotID string, processEpoch string) (int64, error) {
 	return a.store.ClearACPSessionRoutesForProcess(ctx, connectionID, slotID, processEpoch)
+}
+
+func (a acpRouteStoreAdapter) NativeSessionID(ctx context.Context, connectionID string, managerSessionID string) (string, bool, error) {
+	route, err := a.store.GetACPSessionRouteByManagerID(ctx, connectionID, managerSessionID)
+	if errors.Is(err, daemonstore.ErrNotFound) {
+		return "", false, nil
+	}
+	return route.NativeSessionID, err == nil, err
+}
+
+func (a acpRouteStoreAdapter) ManagerSessionID(ctx context.Context, connectionID string, nativeSessionID string) (string, bool, error) {
+	route, err := a.store.GetACPSessionRoute(ctx, connectionID, nativeSessionID)
+	if errors.Is(err, daemonstore.ErrNotFound) || (err == nil && route.ManagerSessionID == "") {
+		return "", false, nil
+	}
+	return route.ManagerSessionID, err == nil, err
+}
+
+func (a acpRouteStoreAdapter) BindSessionIDs(ctx context.Context, connectionID string, managerSessionID string, nativeSessionID string) error {
+	_, err := a.store.BindACPSessionRouteManagerID(ctx, daemonstore.ACPSessionManagerBinding{
+		ConnectionID: connectionID, ManagerSessionID: managerSessionID, NativeSessionID: nativeSessionID,
+	})
+	return err
 }
 
 func runtimeACPRoute(route daemonstore.ACPSessionRouteView) runtimes.ACPRoute {

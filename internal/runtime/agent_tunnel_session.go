@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/auth"
+	"github.com/pax-beehive/paxd/internal/e2ee"
 	"github.com/pax-beehive/paxkit/reliablemq"
 )
 
@@ -33,6 +34,15 @@ type AgentTunnelSessionDeps struct {
 	ReliableEngineFactory ReliableEngineFactory
 	Heartbeat             HeartbeatConfig
 	SessionEventSink      SessionEventSink
+	E2EERootKey           []byte
+	E2EERootKeyProvider   e2ee.RootKeyProvider
+	E2EECommandStore      E2EECommandStore
+	ACPSessionBindings    ACPSessionBindingStore
+}
+
+type E2EECommandStore interface {
+	BeginE2EECommand(ctx context.Context, agentID string, commandID string, connectionEpoch int64) (bool, error)
+	CompleteE2EECommand(ctx context.Context, agentID string, commandID string) error
 }
 
 type AgentTunnelSession struct {
@@ -188,10 +198,11 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	go newStderrTail(stderrTailLimit).Consume(proc.Stderr(), fmt.Sprintf(
 		"[harness stderr] connection_id=%s", s.spec.ConnectionID))
 
-	engine, producer, err := s.newReliableEngine(ctx, proc.Stdin())
+	engine, producer, bridge, err := s.newReliableEngine(ctx, proc.Stdin())
 	if err != nil {
 		return connectedExit(TransientExit("producer_unavailable", err.Error()))
 	}
+	defer func() { _ = bridge.close(context.Background()) }()
 	binding, err := s.recoverReliableTransport(ctx, hbConn, engine, producer)
 	if err != nil {
 		if errors.Is(err, ErrTransportQueueRotate) {
@@ -220,7 +231,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	defer cancel()
 
 	go func() { errCh <- s.copyWSToStdin(runCtx, hbConn, engine) }()
-	go func() { errCh <- s.copyStdoutToWS(runCtx, proc.Stdout(), engine) }()
+	go func() { errCh <- s.copyStdoutToWS(runCtx, proc.Stdout(), engine, bridge) }()
 	go func() { errCh <- proc.Wait() }()
 
 	var result error
@@ -276,12 +287,13 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 		log.Printf("[paxd] agent tunnel id=%s persistent local ACP acquire failed: %v", s.spec.ConnectionID, err)
 		return connectedExit(classifyProcessStartExit(err))
 	}
-	engine, producer, err := s.newReliableEngineWithInitialize(ctx, proc.Stdin(), proc.InitializeResult())
+	engine, producer, bridge, err := s.newReliableEngineWithInitialize(ctx, proc.Stdin(), proc.InitializeResult())
 	if err != nil {
 		return connectedExit(TransientExit("producer_unavailable", err.Error()))
 	}
+	defer func() { _ = bridge.close(context.Background()) }()
 	proc.AttachOutputSink(func(outputCtx context.Context, payload []byte) error {
-		return s.sendOutbound(outputCtx, payload, engine)
+		return s.sendSessionOutput(outputCtx, "", "", payload, engine, bridge)
 	})
 	binding, err := s.recoverReliableTransport(ctx, conn, engine, producer)
 	if err != nil {
@@ -373,10 +385,38 @@ func (s *AgentTunnelSession) runWithACPPool(
 	if err != nil {
 		return connectedExit(TransientExit("producer_unavailable", err.Error()))
 	}
+	boundary := newACPSessionBoundary(s.spec.ConnectionID, s.deps.ACPSessionBindings)
+	var bridge *e2eeTransportBridge
 	engine := s.deps.ReliableEngineFactory.NewReliableEngine(producer, reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
-		return pool.HandleManagerFrameForSession(ctx, frame.Metadata["native_session_id"], frame.Payload)
+		if handled, err := bridge.handleCommand(ctx, frame, func(ctx context.Context, managerSessionID string, payload []byte) (string, error) {
+			nativeSessionID, rewritten, err := boundary.inbound(ctx, managerSessionID, "", payload)
+			if err != nil {
+				return "", err
+			}
+			return nativeSessionID, pool.HandleManagerFrameForSession(ctx, nativeSessionID, rewritten)
+		}); handled || err != nil {
+			return err
+		}
+		nativeSessionID, rewritten, err := boundary.inbound(
+			ctx,
+			frame.Metadata["manager_session_id"],
+			frame.Metadata["native_session_id"],
+			frame.Payload,
+		)
+		if err != nil {
+			return err
+		}
+		return pool.HandleManagerFrameForSession(ctx, nativeSessionID, rewritten)
 	}))
-	pool.AttachOutputSink(pool.OutputSinkForEngine(s.spec, engine))
+	bridge = s.newE2EEBridge(engine)
+	defer func() { _ = bridge.close(context.Background()) }()
+	pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
+		managerSessionID, rewritten, err := boundary.outbound(ctx, nativeSessionID, payload)
+		if err != nil {
+			return err
+		}
+		return s.sendSessionOutput(ctx, managerSessionID, nativeSessionID, rewritten, engine, bridge)
+	}))
 
 	binding, err := s.recoverReliableTransport(ctx, conn, engine, producer)
 	if err != nil {
@@ -612,7 +652,12 @@ func (s *AgentTunnelSession) copyWSToStdin(ctx context.Context, conn WebSocketCo
 	}
 }
 
-func (s *AgentTunnelSession) copyStdoutToWS(ctx context.Context, stdout io.Reader, engine ReliableEngine) error {
+func (s *AgentTunnelSession) copyStdoutToWS(
+	ctx context.Context,
+	stdout io.Reader,
+	engine ReliableEngine,
+	bridge *e2eeTransportBridge,
+) error {
 	reader := bufio.NewReader(stdout)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -622,7 +667,7 @@ func (s *AgentTunnelSession) copyStdoutToWS(ctx context.Context, stdout io.Reade
 				if !json.Valid(line) {
 					return fmt.Errorf("acp stdout payload must be JSON")
 				}
-				if err := s.sendOutbound(ctx, line, engine); err != nil {
+				if err := s.sendSessionOutput(ctx, "", "", line, engine, bridge); err != nil {
 					return err
 				}
 			}
@@ -650,7 +695,7 @@ func (s *AgentTunnelSession) sendOutbound(ctx context.Context, payload []byte, e
 func (s *AgentTunnelSession) newReliableEngine(
 	ctx context.Context,
 	stdin io.Writer,
-) (ReliableEngine, *reliablemq.Producer, error) {
+) (ReliableEngine, *reliablemq.Producer, *e2eeTransportBridge, error) {
 	return s.newReliableEngineWithInitialize(ctx, stdin, nil)
 }
 
@@ -658,13 +703,28 @@ func (s *AgentTunnelSession) newReliableEngineWithInitialize(
 	ctx context.Context,
 	stdin io.Writer,
 	initializeResult json.RawMessage,
-) (ReliableEngine, *reliablemq.Producer, error) {
+) (ReliableEngine, *reliablemq.Producer, *e2eeTransportBridge, error) {
 	producer, err := s.deps.ReliableEngineFactory.Producer(ctx, s.spec.TransportQueueID, reliablemq.StreamACP)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var engine ReliableEngine
+	var bridge *e2eeTransportBridge
 	engine = s.deps.ReliableEngineFactory.NewReliableEngine(producer, reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
+		if handled, err := bridge.handleCommand(ctx, frame, func(ctx context.Context, _ string, payload []byte) (string, error) {
+			if len(initializeResult) > 0 {
+				response, handled, err := acpInitializeResponsePayload(payload, initializeResult)
+				if err != nil || handled {
+					if err != nil || len(response) == 0 {
+						return "", err
+					}
+					return "", s.sendSessionOutput(ctx, "", "", response, engine, bridge)
+				}
+			}
+			return "", writeACPStdin(stdin, payload)
+		}); handled || err != nil {
+			return err
+		}
 		if len(initializeResult) > 0 {
 			if handled, err := s.handleManagerInitialize(ctx, frame.Payload, initializeResult, engine); handled || err != nil {
 				return err
@@ -672,7 +732,8 @@ func (s *AgentTunnelSession) newReliableEngineWithInitialize(
 		}
 		return writeACPStdin(stdin, frame.Payload)
 	}))
-	return engine, producer, nil
+	bridge = s.newE2EEBridge(engine)
+	return engine, producer, bridge, nil
 }
 
 func (s *AgentTunnelSession) handleManagerInitialize(
