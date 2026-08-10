@@ -19,6 +19,8 @@ Downstream dependencies:
 
 - runtime source for copied observed agent runtime snapshots.
 - scanner for session discovery from ACP and fallback sources.
+- ACP route resolver for translating native session ids to existing Manager
+  session ids.
 - cloud reporter for session-only manager writes.
 
 What to mock in `sessionreporter` tests:
@@ -144,6 +146,29 @@ And sends the later report
 Given a scan returns no sessions
 When a report pass runs
 Then no session-only HTTP write is sent for that agent
+
+### Scenario: only bound ACP sessions are reported
+
+Given a scan returns native sessions with and without Manager route bindings
+When a report pass runs
+Then only sessions with non-empty Manager session ids are reported
+And each report keeps the native id as metadata while using the Manager id as
+the session id
+
+### Scenario: a pending ACP route is deferred
+
+Given a native session route exists before its Manager session id is bound
+When a report pass runs
+Then that session is not reported under its native id
+When a later pass observes the completed binding
+Then the canonical Manager session is reported exactly once
+
+### Scenario: route resolution failure does not fall back to native identity
+
+Given ACP route resolution fails for a scanned session
+When a report pass runs
+Then the affected agent report is skipped
+And the native session id is never used as a Manager session id fallback
 
 ## Non-overlap
 
