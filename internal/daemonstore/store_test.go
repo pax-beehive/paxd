@@ -680,6 +680,28 @@ func TestAgentConnectionDesiredSlotsValidation(t *testing.T) {
 	})
 }
 
+func TestCloudTargetSharedByMultipleRemotes(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	_, err := store.CreateRemote(ctx, createRemoteCommand("remote_prod", "https://api.example.test"))
+	require.NoError(t, err)
+	_, err = store.CreateAgentConnection(ctx, control.CreateAgentConnectionCommand{
+		ID: "conn_codex", RemoteID: "remote_prod", Name: "codex-main",
+		InstanceID: "inst_1", AgentType: "codex", Harness: "codex", Command: []string{"codex", "--acp"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateRemote(ctx, createRemoteCommand("remote_family", "https://API.example.test/"))
+	require.NoError(t, err)
+	_, err = store.CreateAgentConnection(ctx, control.CreateAgentConnectionCommand{
+		ID: "conn_family", RemoteID: "remote_family", Name: "codex-family",
+		InstanceID: "inst_2", AgentType: "codex", Harness: "codex", Command: []string{"codex", "--acp"},
+	})
+	require.NoError(t, err)
+	sharedTarget, err := store.CloudTargetSharedByMultipleRemotes(ctx, "https://api.example.test")
+	require.NoError(t, err)
+	require.True(t, sharedTarget)
+}
+
 func TestACPSlotStatusRepository(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -750,6 +772,12 @@ func TestACPSessionRouteRepository(t *testing.T) {
 	require.Equal(t, int64(1), route.Version)
 	require.Empty(t, route.BoundSlotID)
 	require.Empty(t, route.BoundProcessEpoch)
+	nativeIDs, err := store.ListACPSessionRouteNativeIDs(ctx, "conn_codex")
+	require.NoError(t, err)
+	require.Contains(t, nativeIDs, "native_1")
+	reportLocalSessions, err := store.ReportLocalSessionsEnabled(ctx, "conn_codex")
+	require.NoError(t, err)
+	require.False(t, reportLocalSessions)
 
 	bound, ok, err := store.BindACPSessionRoute(ctx, ACPSessionRouteBindingUpdate{
 		ConnectionID:     "conn_codex",

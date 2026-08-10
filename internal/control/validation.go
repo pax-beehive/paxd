@@ -221,7 +221,7 @@ func (cmd UpdateAgentConnectionCommand) Validate() error {
 	if strings.TrimSpace(cmd.ConnectionID) == "" {
 		return invalid("update_agent_connection.connection_id", "connection id is required")
 	}
-	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil && cmd.DesiredSlots == nil {
+	if cmd.Name == nil && cmd.CloudAgentID == nil && cmd.InstanceID == nil && cmd.AgentType == nil && cmd.Harness == nil && cmd.Command == nil && cmd.WorkingDir == nil && cmd.Env == nil && cmd.Enabled == nil && cmd.DesiredState == nil && cmd.DesiredSlots == nil && cmd.ReportLocalSessions == nil {
 		return invalid("update_agent_connection", "at least one update field is required")
 	}
 	if cmd.Command != nil {

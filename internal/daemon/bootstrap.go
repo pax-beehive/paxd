@@ -183,11 +183,12 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
 		reports = sessionreporter.New(sessionreporter.Options{
-			RuntimeSource: supervisors.agentRuntimeSource,
-			Scanner:       sessionreporter.DefaultScanner{},
-			Reporter:      sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
-			RouteResolver: sessionReportRouteResolver{store: store},
-			BatchSize:     cfg.Daemon.SessionBatchSize,
+			RuntimeSource:   supervisors.agentRuntimeSource,
+			Scanner:         sessionreporter.DefaultScanner{},
+			Reporter:        sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
+			RouteResolver:   sessionReportRouteResolver{store: store},
+			ManagedSessions: store,
+			BatchSize:       cfg.Daemon.SessionBatchSize,
 		})
 	}
 	pairingService := e2eepairing.New(e2eepairing.ServiceOptions{

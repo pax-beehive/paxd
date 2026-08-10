@@ -437,23 +437,24 @@ func (s *Store) CreateAgentConnection(ctx context.Context, cmd control.CreateAge
 		}
 	}
 	conn := AgentConnection{
-		ID:              connectionID,
-		RemoteID:        cmd.RemoteID,
-		Name:            cmd.Name,
-		CloudAgentID:    stringPtrOrNil(cmd.CloudAgentID),
-		InstanceID:      cmd.InstanceID,
-		AgentType:       cmd.AgentType,
-		Harness:         cmd.Harness,
-		CommandJSON:     commandJSON,
-		WorkingDir:      cmd.WorkingDir,
-		EnvJSON:         envJSON,
-		Enabled:         boolDefault(cmd.Enabled, true),
-		DesiredState:    string(desired),
-		DesiredACPSlots: desiredSlots,
-		Generation:      1,
-		RestartNonce:    0,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                  connectionID,
+		RemoteID:            cmd.RemoteID,
+		Name:                cmd.Name,
+		CloudAgentID:        stringPtrOrNil(cmd.CloudAgentID),
+		InstanceID:          cmd.InstanceID,
+		AgentType:           cmd.AgentType,
+		Harness:             cmd.Harness,
+		CommandJSON:         commandJSON,
+		WorkingDir:          cmd.WorkingDir,
+		EnvJSON:             envJSON,
+		Enabled:             boolDefault(cmd.Enabled, true),
+		DesiredState:        string(desired),
+		DesiredACPSlots:     desiredSlots,
+		ReportLocalSessions: boolDefault(cmd.ReportLocalSessions, false),
+		Generation:          1,
+		RestartNonce:        0,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if err := s.db.WithContext(ctx).Select("*").Create(&conn).Error; err != nil {
 		return control.AgentConnectionView{}, mapCreateErr(err)
@@ -514,6 +515,9 @@ func (s *Store) UpdateAgentConnection(ctx context.Context, cmd control.UpdateAge
 	}
 	if cmd.DesiredSlots != nil {
 		conn.DesiredACPSlots = *cmd.DesiredSlots
+	}
+	if cmd.ReportLocalSessions != nil {
+		conn.ReportLocalSessions = *cmd.ReportLocalSessions
 	}
 	if agentConnectionUpdateRotatesRuntime(cmd) {
 		conn.Generation++
@@ -1063,6 +1067,40 @@ func (s *Store) BindACPSessionRouteManagerID(ctx context.Context, binding ACPSes
 	return s.GetACPSessionRoute(ctx, binding.ConnectionID, binding.NativeSessionID)
 }
 
+func (s *Store) ListACPSessionRouteNativeIDs(ctx context.Context, connectionID string) (map[string]struct{}, error) {
+	var nativeIDs []string
+	if err := s.db.WithContext(ctx).Model(&ACPSessionRoute{}).
+		Where("connection_id = ?", connectionID).
+		Pluck("native_session_id", &nativeIDs).Error; err != nil {
+		return nil, mapGormErr(err)
+	}
+	out := make(map[string]struct{}, len(nativeIDs))
+	for _, nativeID := range nativeIDs {
+		out[nativeID] = struct{}{}
+	}
+	return out, nil
+}
+
+func (s *Store) ReportLocalSessionsEnabled(ctx context.Context, connectionID string) (bool, error) {
+	var conn AgentConnection
+	if err := s.db.WithContext(ctx).Select("report_local_sessions").Where("id = ?", connectionID).First(&conn).Error; err != nil {
+		return false, mapGormErr(err)
+	}
+	return conn.ReportLocalSessions, nil
+}
+
+func (s *Store) CloudTargetSharedByMultipleRemotes(ctx context.Context, cloudAPIURL string) (bool, error) {
+	var count int64
+	err := s.db.WithContext(ctx).Table("remote AS r").
+		Joins("JOIN agent_connection AS ac ON ac.remote_id = r.id AND ac.deleted_at IS NULL").
+		Where("LOWER(RTRIM(r.cloud_api_url, '/')) = LOWER(RTRIM(?, '/'))", strings.TrimSpace(cloudAPIURL)).
+		Distinct("r.id").Count(&count).Error
+	if err != nil {
+		return false, mapGormErr(err)
+	}
+	return count > 1, nil
+}
+
 func (s *Store) BindACPSessionRoute(ctx context.Context, update ACPSessionRouteBindingUpdate) (ACPSessionRouteView, bool, error) {
 	now := s.currentTime()
 	values := map[string]any{
@@ -1455,21 +1493,22 @@ func agentConnectionView(conn AgentConnection, _ string) control.AgentConnection
 	command, _ := decodeStringSlice(conn.CommandJSON)
 	env, _ := decodeStringMap(conn.EnvJSON)
 	return control.AgentConnectionView{
-		ID:              conn.ID,
-		RemoteID:        conn.RemoteID,
-		Name:            conn.Name,
-		CloudAgentID:    stringValue(conn.CloudAgentID),
-		InstanceID:      conn.InstanceID,
-		AgentType:       conn.AgentType,
-		Harness:         conn.Harness,
-		Command:         command,
-		WorkingDir:      conn.WorkingDir,
-		Env:             env,
-		Enabled:         conn.Enabled,
-		DesiredState:    control.DesiredState(conn.DesiredState),
-		DesiredACPSlots: conn.DesiredACPSlots,
-		Generation:      conn.Generation,
-		RestartNonce:    conn.RestartNonce,
+		ID:                  conn.ID,
+		RemoteID:            conn.RemoteID,
+		Name:                conn.Name,
+		CloudAgentID:        stringValue(conn.CloudAgentID),
+		InstanceID:          conn.InstanceID,
+		AgentType:           conn.AgentType,
+		Harness:             conn.Harness,
+		Command:             command,
+		WorkingDir:          conn.WorkingDir,
+		Env:                 env,
+		Enabled:             conn.Enabled,
+		DesiredState:        control.DesiredState(conn.DesiredState),
+		DesiredACPSlots:     conn.DesiredACPSlots,
+		ReportLocalSessions: conn.ReportLocalSessions,
+		Generation:          conn.Generation,
+		RestartNonce:        conn.RestartNonce,
 	}
 }
 
