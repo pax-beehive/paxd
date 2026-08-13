@@ -138,6 +138,7 @@ func listCodexLocalSessions() ([]model.SessionInfo, error) {
 func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []model.SessionInfo {
 	lineage := newCodexLineage(metas)
 	byRoot := make(map[string]model.SessionInfo)
+	nameUpdatedAt := make(map[string]string)
 	sessionFor := func(key string) model.SessionInfo {
 		session, ok := byRoot[key]
 		if !ok {
@@ -153,15 +154,18 @@ func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []m
 
 	// Index entries provide display names and activity timestamps. Entries
 	// mapping to the same root (for example a thread forked after compact)
-	// collapse into one session; the root's own entry names it.
+	// collapse into one session. Use the latest real thread name across the
+	// lineage; the root index entry may be absent after a fork or compact.
 	for _, entry := range entries {
 		if entry.ID == "" {
 			continue
 		}
 		key := lineage.rootOf(entry.ID)
 		session := sessionFor(key)
-		if entry.ID == key && session.Name == "" {
-			session.Name = entry.ThreadName
+		threadName := strings.TrimSpace(entry.ThreadName)
+		if threadName != "" && (session.Name == "" || laterTimeString(nameUpdatedAt[key], entry.UpdatedAt) == entry.UpdatedAt) {
+			session.Name = threadName
+			nameUpdatedAt[key] = entry.UpdatedAt
 		}
 		session.UpdatedAt = laterTimeString(session.UpdatedAt, entry.UpdatedAt)
 		session.LastActive = session.UpdatedAt

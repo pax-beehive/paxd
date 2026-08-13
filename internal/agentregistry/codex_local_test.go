@@ -72,8 +72,8 @@ func TestListCodexLocalSessionsCollapsesForkLineage(t *testing.T) {
 	if session.SessionID != "codex:aaa" || session.NativeID != "aaa" || session.AgentType != "codex" {
 		t.Fatalf("session identity = %+v, want codex:aaa", session)
 	}
-	if session.Name != "original thread" {
-		t.Fatalf("session.Name = %q, want root thread title", session.Name)
+	if session.Name != "forked thread" {
+		t.Fatalf("session.Name = %q, want latest lineage thread title", session.Name)
 	}
 	if session.UpdatedAt != "2026-07-19T03:00:00Z" {
 		t.Fatalf("session.UpdatedAt = %q, want latest index activity", session.UpdatedAt)
@@ -83,6 +83,26 @@ func TestListCodexLocalSessionsCollapsesForkLineage(t *testing.T) {
 	}
 	if session.Status != "available" {
 		t.Fatalf("session.Status = %q, want available", session.Status)
+	}
+}
+
+func TestListCodexLocalSessionsUsesChildTitleWhenRootIndexEntryIsMissing(t *testing.T) {
+	home := writeCodexLineageFixture(t)
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(
+		`{"id":"bbb","thread_name":"real session name","updated_at":"2026-07-19T03:00:00Z"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile(index) error = %v", err)
+	}
+
+	sessions, err := listCodexLocalSessions()
+	if err != nil {
+		t.Fatalf("listCodexLocalSessions() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1: %+v", len(sessions), sessions)
+	}
+	if sessions[0].Name != "real session name" {
+		t.Fatalf("session.Name = %q, want child index title instead of path/id fallback", sessions[0].Name)
 	}
 }
 
