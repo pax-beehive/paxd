@@ -884,14 +884,28 @@ func TestBuildRuntimeSnapshotIncludesACPPoolCapabilityReport(t *testing.T) {
 		ACPPoolCapabilities: fakeACPPoolCapabilitySource{
 			reports: map[string]control.ACPPoolCapabilityReport{
 				"conn_codex": {
-					SchemaVersion:      1,
+					SchemaVersion:      2,
 					ConnectionID:       "conn_codex",
 					PaxdVersion:        "dev",
 					CommandFingerprint: "fingerprint_1",
 					ClientProfileHash:  "profile_hash_1",
 					WorkerResultHash:   "worker_hash_1",
 					ProtocolVersion:    1,
-					InitPhase:          "ready",
+					Implementation: &control.ACPImplementationIdentity{
+						ACPAgent: &control.ACPAgentImplementation{
+							Name:    "@agentclientprotocol/codex-acp",
+							Title:   "Codex",
+							Version: "1.1.7",
+						},
+						Runtime: &control.ACPRuntimeImplementation{
+							Name:    "codex",
+							Version: "0.58.0",
+							Channel: "stable",
+						},
+						IdentityFingerprint: "identity_1",
+					},
+					PoolConsistency: "consistent",
+					InitPhase:       "ready",
 				},
 			},
 		},
@@ -907,6 +921,13 @@ func TestBuildRuntimeSnapshotIncludesACPPoolCapabilityReport(t *testing.T) {
 	require.Equal(t, "dev", report.PaxdVersion)
 	require.Equal(t, "worker_hash_1", report.WorkerResultHash)
 	require.Equal(t, "ready", report.InitPhase)
+	require.Equal(t, "consistent", report.PoolConsistency)
+	require.NotNil(t, report.Implementation)
+	require.NotNil(t, report.Implementation.ACPAgent)
+	require.Equal(t, "@agentclientprotocol/codex-acp", report.Implementation.ACPAgent.Name)
+	require.NotNil(t, report.Implementation.Runtime)
+	require.Equal(t, "0.58.0", report.Implementation.Runtime.Version)
+	require.Equal(t, "identity_1", report.Implementation.IdentityFingerprint)
 }
 
 func TestBuildRuntimeSnapshotOmitHostMetricsOnProviderFailure(t *testing.T) {

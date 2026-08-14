@@ -15,7 +15,7 @@ func TestACPCapabilityReportsStoresRuntimeReportForControlSnapshot(t *testing.T)
 	initializedAt := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
 
 	err := reports.ReportACPPoolCapability(ctx, runtimes.ACPPoolCapabilityReport{
-		SchemaVersion:        1,
+		SchemaVersion:        runtimes.ACPPoolCapabilityReportSchemaVersion,
 		ConnectionID:         "conn_codex",
 		ReportGeneration:     7,
 		PaxdVersion:          "dev",
@@ -25,8 +25,12 @@ func TestACPCapabilityReportsStoresRuntimeReportForControlSnapshot(t *testing.T)
 		ProtocolVersion:      1,
 		ClientCapabilityKeys: []string{"fs"},
 		WorkerCapabilityKeys: []string{"prompt"},
-		InitPhase:            "ready",
-		InitializedAt:        initializedAt,
+		Implementation: &runtimes.ACPImplementationIdentity{
+			ACPAgent:            &runtimes.ACPAgentImplementation{Name: "hermes-agent", Version: "0.17.0"},
+			IdentityFingerprint: "identity_1",
+		},
+		InitPhase:     "ready",
+		InitializedAt: initializedAt,
 	})
 
 	require.NoError(t, err)
@@ -36,11 +40,17 @@ func TestACPCapabilityReportsStoresRuntimeReportForControlSnapshot(t *testing.T)
 	require.Equal(t, "worker_hash_1", report.WorkerResultHash)
 	require.Equal(t, []string{"prompt"}, report.WorkerCapabilityKeys)
 	require.Equal(t, initializedAt, report.InitializedAt)
+	require.Equal(t, runtimes.ACPPoolConsistencyConsistent, report.PoolConsistency)
+	require.NotNil(t, report.Implementation)
+	require.NotNil(t, report.Implementation.ACPAgent)
+	require.Equal(t, "hermes-agent", report.Implementation.ACPAgent.Name)
 
 	report.WorkerCapabilityKeys[0] = "mutated"
+	report.Implementation.ACPAgent.Name = "mutated"
 	report, ok = reports.ACPPoolCapabilityReport(ctx, "conn_codex")
 	require.True(t, ok)
 	require.Equal(t, []string{"prompt"}, report.WorkerCapabilityKeys)
+	require.Equal(t, "hermes-agent", report.Implementation.ACPAgent.Name)
 }
 
 func TestACPCapabilityReportsAggregatesReadySlotsAndIgnoresStaleRemoval(t *testing.T) {
@@ -67,6 +77,10 @@ func TestACPCapabilityReportsAggregatesReadySlotsAndIgnoresStaleRemoval(t *testi
 		InitPhase:          runtimes.ACPPoolInitPhaseReady,
 		InitializedAt:      firstInitializedAt,
 		CommandFingerprint: "fingerprint_1",
+		Implementation: &runtimes.ACPImplementationIdentity{
+			ACPAgent:            &runtimes.ACPAgentImplementation{Name: "codex-acp", Version: "1.1.7"},
+			IdentityFingerprint: "identity_1",
+		},
 	}))
 	require.NoError(t, reports.ReportACPSlotCapability(ctx, secondSpec, &runtimes.ACPPoolCapabilityReport{
 		ConnectionID:       "conn_codex",
@@ -74,6 +88,10 @@ func TestACPCapabilityReportsAggregatesReadySlotsAndIgnoresStaleRemoval(t *testi
 		InitPhase:          runtimes.ACPPoolInitPhaseReady,
 		InitializedAt:      secondInitializedAt,
 		CommandFingerprint: "fingerprint_1",
+		Implementation: &runtimes.ACPImplementationIdentity{
+			ACPAgent:            &runtimes.ACPAgentImplementation{Name: "codex-acp", Version: "1.1.8"},
+			IdentityFingerprint: "identity_2",
+		},
 	}))
 
 	report, ok := reports.ACPPoolCapabilityReport(ctx, "conn_codex")
@@ -81,12 +99,16 @@ func TestACPCapabilityReportsAggregatesReadySlotsAndIgnoresStaleRemoval(t *testi
 	require.Equal(t, int64(2), report.ReportGeneration)
 	require.Equal(t, "worker_1", report.WorkerResultHash)
 	require.Equal(t, firstInitializedAt, report.InitializedAt)
+	require.Equal(t, runtimes.ACPPoolConsistencyMixed, report.PoolConsistency)
+	require.NotNil(t, report.Implementation)
+	require.Equal(t, "identity_1", report.Implementation.IdentityFingerprint)
 
 	require.NoError(t, reports.ReportACPSlotCapability(ctx, firstSpec, nil))
 	report, ok = reports.ACPPoolCapabilityReport(ctx, "conn_codex")
 	require.True(t, ok)
 	require.Equal(t, int64(3), report.ReportGeneration)
 	require.Equal(t, "worker_2", report.WorkerResultHash)
+	require.Equal(t, runtimes.ACPPoolConsistencyConsistent, report.PoolConsistency)
 
 	replacementSpec := secondSpec
 	replacementSpec.ProcessEpoch = "epoch_3"
@@ -96,16 +118,49 @@ func TestACPCapabilityReportsAggregatesReadySlotsAndIgnoresStaleRemoval(t *testi
 		InitPhase:          runtimes.ACPPoolInitPhaseReady,
 		InitializedAt:      secondInitializedAt.Add(time.Second),
 		CommandFingerprint: "fingerprint_1",
+		Implementation: &runtimes.ACPImplementationIdentity{
+			ACPAgent:            &runtimes.ACPAgentImplementation{Name: "codex-acp", Version: "1.1.9"},
+			IdentityFingerprint: "identity_3",
+		},
 	}))
 	require.NoError(t, reports.ReportACPSlotCapability(ctx, secondSpec, nil))
 	report, ok = reports.ACPPoolCapabilityReport(ctx, "conn_codex")
 	require.True(t, ok)
 	require.Equal(t, int64(4), report.ReportGeneration)
 	require.Equal(t, "worker_3", report.WorkerResultHash)
+	require.Equal(t, runtimes.ACPPoolConsistencyConsistent, report.PoolConsistency)
 
 	require.NoError(t, reports.ReportACPSlotCapability(ctx, replacementSpec, nil))
 	_, ok = reports.ACPPoolCapabilityReport(ctx, "conn_codex")
 	require.False(t, ok)
+}
+
+func TestACPPoolIdentityConsistency(t *testing.T) {
+	t.Run("Given ready slots with different implementation fingerprints when the pool report is rebuilt then it is marked mixed", func(t *testing.T) {
+		reports := newACPCapabilityReports()
+		ctx := context.Background()
+		first := runtimes.ACPSlotSpec{ConnectionID: "conn_codex", SlotID: "slot_0", Ordinal: 0, ProcessEpoch: "epoch_0"}
+		second := runtimes.ACPSlotSpec{ConnectionID: "conn_codex", SlotID: "slot_1", Ordinal: 1, ProcessEpoch: "epoch_1"}
+
+		require.NoError(t, reports.ReportACPSlotCapability(ctx, first, &runtimes.ACPPoolCapabilityReport{
+			InitPhase: runtimes.ACPPoolInitPhaseReady,
+			Implementation: &runtimes.ACPImplementationIdentity{
+				ACPAgent:            &runtimes.ACPAgentImplementation{Name: "codex-acp", Version: "1.1.7"},
+				IdentityFingerprint: "identity_1",
+			},
+		}))
+		require.NoError(t, reports.ReportACPSlotCapability(ctx, second, &runtimes.ACPPoolCapabilityReport{
+			InitPhase: runtimes.ACPPoolInitPhaseReady,
+			Implementation: &runtimes.ACPImplementationIdentity{
+				ACPAgent:            &runtimes.ACPAgentImplementation{Name: "codex-acp", Version: "1.1.8"},
+				IdentityFingerprint: "identity_2",
+			},
+		}))
+
+		report, ok := reports.ACPPoolCapabilityReport(ctx, "conn_codex")
+		require.True(t, ok)
+		require.Equal(t, runtimes.ACPPoolConsistencyMixed, report.PoolConsistency)
+	})
 }
 
 func TestACPSlotCapabilityWriterPokesOwningRemote(t *testing.T) {

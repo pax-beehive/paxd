@@ -323,11 +323,12 @@ func (p *ACPPool) OutputSinkForEngine(spec AgentConnectionSpec, engine ReliableE
 }
 
 type ACPSlotSessionConfig struct {
-	Spec              ACPSlotSpec
-	Runner            LocalACPProcessRunner
-	Registry          *ACPPoolRegistry
-	ReadyHandler      func(context.Context, ACPSlotSpec)
-	CapabilityHandler func(context.Context, ACPSlotSpec, *ACPPoolCapabilityReport)
+	Spec                 ACPSlotSpec
+	Runner               LocalACPProcessRunner
+	RuntimeVersionProber CodexRuntimeVersionProber
+	Registry             *ACPPoolRegistry
+	ReadyHandler         func(context.Context, ACPSlotSpec)
+	CapabilityHandler    func(context.Context, ACPSlotSpec, *ACPPoolCapabilityReport)
 }
 
 type ACPSlotSession struct {
@@ -364,27 +365,32 @@ func (s *ACPSlotSession) Run(ctx context.Context) Exit {
 		return ConfigExit("acp_pool_unavailable", err.Error())
 	}
 	var slot *ACPSlot
-	slot = NewACPSlot(spec, s.cfg.Runner, WithACPSlotEventSink(ACPSlotEventSinkFunc(func(event ACPSlotEvent) {
-		switch event.Type {
-		case ACPSlotEventReady:
-			pool.UpsertSlot(slot)
-			if s.cfg.CapabilityHandler != nil {
-				s.cfg.CapabilityHandler(context.Background(), spec, event.Capability)
+	slot = NewACPSlot(
+		spec,
+		s.cfg.Runner,
+		WithACPSlotCodexRuntimeVersionProber(s.cfg.RuntimeVersionProber),
+		WithACPSlotEventSink(ACPSlotEventSinkFunc(func(event ACPSlotEvent) {
+			switch event.Type {
+			case ACPSlotEventReady:
+				pool.UpsertSlot(slot)
+				if s.cfg.CapabilityHandler != nil {
+					s.cfg.CapabilityHandler(context.Background(), spec, event.Capability)
+				}
+				if s.cfg.ReadyHandler != nil {
+					s.cfg.ReadyHandler(context.Background(), spec)
+				}
+			case ACPSlotEventFrame:
+				if err := pool.HandleSlotFrame(context.Background(), event.SlotID, event.ProcessEpoch, event.Payload); err != nil {
+					log.Printf("[paxd] acp slot id=%s process_epoch=%s route frame failed: %v", event.SlotID, event.ProcessEpoch, err)
+				}
+			case ACPSlotEventTerminal:
+				pool.RemoveSlot(context.Background(), event.SlotID, event.ProcessEpoch)
+				if s.cfg.CapabilityHandler != nil {
+					s.cfg.CapabilityHandler(context.Background(), spec, nil)
+				}
 			}
-			if s.cfg.ReadyHandler != nil {
-				s.cfg.ReadyHandler(context.Background(), spec)
-			}
-		case ACPSlotEventFrame:
-			if err := pool.HandleSlotFrame(context.Background(), event.SlotID, event.ProcessEpoch, event.Payload); err != nil {
-				log.Printf("[paxd] acp slot id=%s process_epoch=%s route frame failed: %v", event.SlotID, event.ProcessEpoch, err)
-			}
-		case ACPSlotEventTerminal:
-			pool.RemoveSlot(context.Background(), event.SlotID, event.ProcessEpoch)
-			if s.cfg.CapabilityHandler != nil {
-				s.cfg.CapabilityHandler(context.Background(), spec, nil)
-			}
-		}
-	})))
+		})),
+	)
 	if err := slot.Start(ctx); err != nil {
 		pool.RemoveSlot(context.Background(), spec.SlotID, spec.ProcessEpoch)
 		return classifyProcessStartExit(err)

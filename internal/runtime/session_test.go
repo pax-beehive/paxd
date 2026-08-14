@@ -327,7 +327,7 @@ func TestPersistentACPProcessInitializesOnceAndSuppressesInternalResponse(t *tes
 func TestPersistentACPProcessCapabilityReportDefaultsToDevVersion(t *testing.T) {
 	store := newSpyStore()
 	reporter := &recordingCapabilityReporter{}
-	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{"prompt":true,"tools":{}}}}` + "\n")
+	proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentInfo":{"name":"hermes-agent","version":"0.17.0"},"agentCapabilities":{"prompt":true,"tools":{}}}}` + "\n")
 	pool := NewPersistentACPProcessPool(
 		fakeLocalACPProcessRunner{proc: proc},
 		store,
@@ -347,6 +347,49 @@ func TestPersistentACPProcessCapabilityReportDefaultsToDevVersion(t *testing.T) 
 	assert.Equal(t, []string{"prompt", "tools"}, report.WorkerCapabilityKeys)
 	assert.NotEmpty(t, report.ClientProfileHash)
 	assert.NotEmpty(t, report.WorkerResultHash)
+	assert.Equal(t, ACPPoolConsistencyConsistent, report.PoolConsistency)
+	require.NotNil(t, report.Implementation)
+	require.NotNil(t, report.Implementation.ACPAgent)
+	assert.Equal(t, "hermes-agent", report.Implementation.ACPAgent.Name)
+	assert.Equal(t, "0.17.0", report.Implementation.ACPAgent.Version)
+	assert.Nil(t, report.Implementation.Runtime)
+	assert.NotEmpty(t, report.Implementation.IdentityFingerprint)
+}
+
+func TestPersistentACPProcessReportsProbedCodexRuntimeWhenInitializeMetadataIsMissing(t *testing.T) {
+	t.Run("Given a trusted legacy Codex ACP process without runtime metadata when initialized then the probed CLI version is reported", func(t *testing.T) {
+		store := newSpyStore()
+		reporter := &recordingCapabilityReporter{}
+		prober := &recordingCodexRuntimeVersionProber{version: "0.61.2"}
+		proc := newFakeProcess(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentInfo":{"name":"@agentclientprotocol/codex-acp","version":"1.1.7"},"agentCapabilities":{}}}` + "\n")
+		pool := NewPersistentACPProcessPool(
+			fakeLocalACPProcessRunner{proc: proc},
+			store,
+			WithACPPoolCapabilityReporter(reporter),
+			WithPersistentACPCodexRuntimeVersionProber(prober),
+		)
+		spec := validAgentSpec()
+		spec.Command = []string{"npx", "-y", "@agentclientprotocol/codex-acp"}
+		spec.WorkingDir = "/workspace"
+		spec.Env = map[string]string{"CODEX_PROFILE": "test"}
+
+		_, err := pool.Acquire(context.Background(), spec)
+
+		require.NoError(t, err)
+		require.Len(t, reporter.reports, 1)
+		report := reporter.reports[0]
+		require.NotNil(t, report.Implementation)
+		require.NotNil(t, report.Implementation.Runtime)
+		assert.Equal(t, "codex", report.Implementation.Runtime.Name)
+		assert.Equal(t, "0.61.2", report.Implementation.Runtime.Version)
+		assert.NotEmpty(t, report.Implementation.IdentityFingerprint)
+		calls := prober.Calls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, spec.Command, calls[0].Command)
+		assert.Equal(t, spec.WorkingDir, calls[0].WorkingDir)
+		assert.Equal(t, spec.Env, calls[0].Env)
+		pool.Stop(spec)
+	})
 }
 
 func TestPersistentACPProcessCapabilityReportUsesProvidedPaxdVersion(t *testing.T) {

@@ -111,7 +111,7 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return bytes.Contains(proc.stdinBytes(), []byte(`"method":"initialize"`))
 	}, eventuallyWait, eventuallyTick)
-	proc.writeStdout([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentCapabilities":{}}}` + "\n"))
+	proc.writeStdout([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.1.7"},"agentCapabilities":{},"_meta":{"pax":{"runtime":{"name":"codex","version":"0.58.0"}}}}}` + "\n"))
 
 	select {
 	case spec := <-ready:
@@ -130,7 +130,14 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 		assert.NotEmpty(t, report.WorkerResultHash)
 		assert.Equal(t, 1, report.ProtocolVersion)
 		assert.Equal(t, ACPPoolInitPhaseReady, report.InitPhase)
+		assert.Equal(t, ACPPoolConsistencyConsistent, report.PoolConsistency)
 		assert.False(t, report.InitializedAt.IsZero())
+		require.NotNil(t, report.Implementation)
+		require.NotNil(t, report.Implementation.ACPAgent)
+		assert.Equal(t, "@agentclientprotocol/codex-acp", report.Implementation.ACPAgent.Name)
+		require.NotNil(t, report.Implementation.Runtime)
+		assert.Equal(t, "codex", report.Implementation.Runtime.Name)
+		assert.NotEmpty(t, report.Implementation.IdentityFingerprint)
 	case <-time.After(eventuallyWait):
 		t.Fatal("slot session did not report capability")
 	}
@@ -147,6 +154,68 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 	case <-time.After(eventuallyWait):
 		t.Fatal("slot session did not remove capability after stopping")
 	}
+}
+
+func TestACPSlotSessionReportsProbedCodexRuntimeWhenInitializeMetadataIsMissing(t *testing.T) {
+	t.Run("Given a trusted Codex ACP slot without runtime metadata when it becomes ready then the probed CLI version is reported", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		proc := newSlotFakeLocalACPProcess()
+		prober := &recordingCodexRuntimeVersionProber{version: "0.61.2"}
+		capabilities := make(chan ACPPoolCapabilityReport, 1)
+		registry := NewACPPoolRegistry(ACPRouteStoreFactoryFunc(func(connectionID string) ACPRouteStore {
+			return newFakeACPRouteStore(connectionID)
+		}))
+		session := NewACPSlotSession(ACPSlotSessionConfig{
+			Spec: ACPSlotSpec{
+				ConnectionID: "conn_codex",
+				RemoteID:     "local",
+				SlotID:       "slot_codex",
+				ProcessEpoch: "epoch_codex",
+				Command:      []string{"codex-acp"},
+				WorkingDir:   "/workspace",
+				Env:          map[string]string{"CODEX_PROFILE": "test"},
+				PaxdVersion:  "test",
+			},
+			Runner:               slotFakeLocalACPProcessRunner{proc: proc},
+			RuntimeVersionProber: prober,
+			Registry:             registry,
+			CapabilityHandler: func(ctx context.Context, spec ACPSlotSpec, report *ACPPoolCapabilityReport) {
+				if report != nil {
+					capabilities <- *report
+				}
+			},
+		})
+		done := make(chan Exit, 1)
+		go func() { done <- session.Run(ctx) }()
+		require.Eventually(t, func() bool {
+			return bytes.Contains(proc.stdinBytes(), []byte(`"method":"initialize"`))
+		}, eventuallyWait, eventuallyTick)
+		proc.writeStdout([]byte(`{"jsonrpc":"2.0","id":"paxd.initialize","result":{"protocolVersion":1,"agentInfo":{"name":"@agentclientprotocol/codex-acp","version":"1.1.7"},"agentCapabilities":{}}}` + "\n"))
+
+		select {
+		case report := <-capabilities:
+			require.NotNil(t, report.Implementation)
+			require.NotNil(t, report.Implementation.Runtime)
+			assert.Equal(t, "codex", report.Implementation.Runtime.Name)
+			assert.Equal(t, "0.61.2", report.Implementation.Runtime.Version)
+			assert.NotEmpty(t, report.Implementation.IdentityFingerprint)
+		case <-time.After(eventuallyWait):
+			t.Fatal("slot session did not report fallback runtime identity")
+		}
+		calls := prober.Calls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, []string{"codex-acp"}, calls[0].Command)
+		assert.Equal(t, "/workspace", calls[0].WorkingDir)
+		assert.Equal(t, map[string]string{"CODEX_PROFILE": "test"}, calls[0].Env)
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(eventuallyWait):
+			t.Fatal("slot session did not stop after cancellation")
+		}
+	})
 }
 
 func TestACPSlotCapturesStderrTail(t *testing.T) {

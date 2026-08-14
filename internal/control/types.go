@@ -465,20 +465,41 @@ type AgentRuntimeReport struct {
 }
 
 type ACPPoolCapabilityReport struct {
-	SchemaVersion        int       `json:"schema_version"`
-	ConnectionID         string    `json:"connection_id"`
-	ReportGeneration     int64     `json:"report_generation"`
-	PaxdVersion          string    `json:"paxd_version"`
-	CommandFingerprint   string    `json:"command_fingerprint"`
-	ClientProfileHash    string    `json:"client_profile_hash"`
-	WorkerResultHash     string    `json:"worker_result_hash"`
-	ProtocolVersion      int       `json:"protocol_version,omitempty"`
-	ClientCapabilityKeys []string  `json:"client_capability_keys,omitempty"`
-	WorkerCapabilityKeys []string  `json:"worker_capability_keys,omitempty"`
-	InitPhase            string    `json:"init_phase"`
-	InitializedAt        time.Time `json:"initialized_at,omitempty"`
-	LastErrorCode        string    `json:"last_error_code,omitempty"`
-	LastErrorMessage     string    `json:"last_error_message,omitempty"`
+	SchemaVersion        int                        `json:"schema_version"`
+	ConnectionID         string                     `json:"connection_id"`
+	ReportGeneration     int64                      `json:"report_generation"`
+	PaxdVersion          string                     `json:"paxd_version"`
+	CommandFingerprint   string                     `json:"command_fingerprint"`
+	ClientProfileHash    string                     `json:"client_profile_hash"`
+	WorkerResultHash     string                     `json:"worker_result_hash"`
+	ProtocolVersion      int                        `json:"protocol_version,omitempty"`
+	ClientCapabilityKeys []string                   `json:"client_capability_keys,omitempty"`
+	WorkerCapabilityKeys []string                   `json:"worker_capability_keys,omitempty"`
+	Implementation       *ACPImplementationIdentity `json:"implementation,omitempty"`
+	PoolConsistency      string                     `json:"pool_consistency"`
+	InitPhase            string                     `json:"init_phase"`
+	InitializedAt        time.Time                  `json:"initialized_at,omitempty"`
+	LastErrorCode        string                     `json:"last_error_code,omitempty"`
+	LastErrorMessage     string                     `json:"last_error_message,omitempty"`
+}
+
+type ACPImplementationIdentity struct {
+	ACPAgent            *ACPAgentImplementation   `json:"acp_agent,omitempty"`
+	Runtime             *ACPRuntimeImplementation `json:"runtime,omitempty"`
+	IdentityFingerprint string                    `json:"identity_fingerprint"`
+}
+
+type ACPAgentImplementation struct {
+	Name    string `json:"name,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+type ACPRuntimeImplementation struct {
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+	Build   string `json:"build,omitempty"`
+	Channel string `json:"channel,omitempty"`
 }
 
 type QueryType string
