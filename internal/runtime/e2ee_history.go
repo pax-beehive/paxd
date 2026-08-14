@@ -113,16 +113,15 @@ func (p *e2eeHistoryProjector) projectCommand(sessionID string, payload []byte) 
 			text.WriteString(part.Text)
 		}
 	}
-	if text.Len() == 0 {
-		return nil, nil
-	}
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	state := p.session(sessionID)
 	turnID := e2eeStableID("turn", p.agentID, sessionID, requestKey)
 	state.turnByRequest[requestKey] = turnID
 	state.activeTurnID = turnID
+	if text.Len() == 0 {
+		return nil, nil
+	}
 	messageID := e2eeStableID("msg", p.agentID, sessionID, "user", requestKey)
 	if _, exists := state.text["user:"+requestKey]; exists {
 		return nil, nil
@@ -205,6 +204,12 @@ func (p *e2eeHistoryProjector) projectFrames(
 		}
 	}
 	return records, nil
+}
+
+func (p *e2eeHistoryProjector) activeTurnID(sessionID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.session(sessionID).activeTurnID
 }
 
 func (p *e2eeHistoryProjector) flushAll() (map[string][]e2eeCanonicalRecord, error) {

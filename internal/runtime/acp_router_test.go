@@ -386,6 +386,28 @@ func TestACPRouterProjectsCanonicalRuntimeFromPromptLifecycle(t *testing.T) {
 	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
 }
 
+func TestACPRouterCompletesProjectedTurnAfterTerminalOutputIsHandedOff(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	store.seedRoute(ACPRoute{
+		ConnectionID: "conn_1", NativeSessionID: "session_1",
+		BoundSlotID: "slot_a", BoundProcessEpoch: "epoch_a",
+		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
+	})
+	var router *ACPRouter
+	router = newTestACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(context.Context, string, []byte) error {
+		assert.Len(t, router.RuntimeSnapshot().ActiveTurns, 1, "turn must remain active while terminal output is handed off")
+		return errors.New("output unavailable")
+	})))
+	router.UpsertSlot(slot)
+
+	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+	terminal := []byte(`{"jsonrpc":"2.0","id":10,"result":{"stopReason":"end_turn"}}`)
+	require.Error(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", terminal))
+	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
+}
+
 func TestACPRouterSlotExitTerminatesProjectedTurn(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")

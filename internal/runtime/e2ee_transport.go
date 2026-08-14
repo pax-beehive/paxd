@@ -279,9 +279,14 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 		b.restoreBatch(sessionID, batch)
 		return errors.New("missing E2EE session key epoch")
 	}
+	turnID := ""
+	if b.history != nil {
+		turnID = b.history.activeTurnID(sessionID)
+	}
 	plaintext, err := json.Marshal(struct {
+		TurnID string            `json:"turn_id,omitempty"`
 		Frames []json.RawMessage `json:"frames"`
-	}{Frames: batch.frames})
+	}{TurnID: turnID, Frames: batch.frames})
 	if err != nil {
 		b.restoreBatch(sessionID, batch)
 		return err
