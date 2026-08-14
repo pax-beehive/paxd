@@ -376,10 +376,15 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		if err != nil {
 			return err
 		}
-		if promptSessionID := r.releasePromptForResponse(msg.ID, slotID, processEpoch); nativeSessionID == "" {
+		promptSessionID := r.promptSessionForResponse(msg.ID, slotID, processEpoch)
+		if nativeSessionID == "" {
 			nativeSessionID = promptSessionID
 		}
-		return r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
+		emitErr := r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
+		if promptSessionID != "" {
+			r.releasePromptForResponse(msg.ID, slotID, processEpoch)
+		}
+		return emitErr
 	}
 	nativeSessionID := firstSessionID("", msg.Params)
 	if len(bytes.TrimSpace(msg.ID)) > 0 {
@@ -841,6 +846,17 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 		processEpoch:    slot.ProcessEpoch(),
 	}
 	return nil
+}
+
+func (r *ACPRouter) promptSessionForResponse(requestID json.RawMessage, slotID string, processEpoch string) string {
+	key := rpcIDKey(requestID)
+	r.mu.Lock()
+	pending, ok := r.pendingPrompts[key]
+	r.mu.Unlock()
+	if !ok || pending.slotID != slotID || pending.processEpoch != processEpoch {
+		return ""
+	}
+	return pending.nativeSessionID
 }
 
 func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID string, processEpoch string) string {

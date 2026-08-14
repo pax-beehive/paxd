@@ -105,6 +105,13 @@ uses bounded in-memory plaintext batching; a process crash can therefore lose
 at most the current batching window. A future SQLite plaintext-frame to
 encrypted-outbox transaction can remove that bounded gap.
 
+The runtime projector completes a prompt only after handing its terminal ACP
+response to the attached output sink. This keeps the active-turn snapshot
+running while preceding streaming frames are flushed. A failed handoff is still
+returned to the caller, while the reliable output layer retains its own retry
+responsibility. A matching slot process exit remains an authoritative terminal
+condition.
+
 Outputs that cannot be attributed to an E2EE session retain the legacy raw ACP
 path so staged and legacy sessions can coexist during migration.
 

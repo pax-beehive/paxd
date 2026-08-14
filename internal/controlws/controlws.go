@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -338,6 +339,7 @@ func startSessionRuntimeReportPump(
 		send := func() bool {
 			snapshots, err := reporter.BuildSessionRuntimeSnapshots(ctx, remoteID, nodeID)
 			if err != nil {
+				log.Printf("[paxd] session runtime snapshot build failed remote_id=%s node_id=%s: %v", remoteID, nodeID, err)
 				return true
 			}
 			for i := range snapshots {
