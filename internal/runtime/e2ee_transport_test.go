@@ -162,9 +162,11 @@ func TestE2EEBridgeBatchesStreamingFramesAndFlushesBoundary(t *testing.T) {
 	plaintext, err := e2ee.Decrypt(rootKey, e2ee.DirectionEvent, event)
 	require.NoError(t, err)
 	var batch struct {
+		TurnID string            `json:"turn_id"`
 		Frames []json.RawMessage `json:"frames"`
 	}
 	require.NoError(t, json.Unmarshal(plaintext, &batch))
+	assert.Equal(t, e2eeStableID("turn", "agent_1", "session_1", `"prompt_1"`), batch.TurnID)
 	require.Len(t, batch.Frames, 3)
 	assert.Contains(t, string(batch.Frames[0]), `"text":"a"`)
 	assert.Contains(t, string(batch.Frames[1]), `"text":"b"`)

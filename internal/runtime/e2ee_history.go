@@ -207,6 +207,12 @@ func (p *e2eeHistoryProjector) projectFrames(
 	return records, nil
 }
 
+func (p *e2eeHistoryProjector) activeTurnID(sessionID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.session(sessionID).activeTurnID
+}
+
 func (p *e2eeHistoryProjector) flushAll() (map[string][]e2eeCanonicalRecord, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
