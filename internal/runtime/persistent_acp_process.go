@@ -23,10 +23,11 @@ import (
 // canceled supervisor contexts, config changes, and explicit restarts stop the
 // cached process.
 type PersistentACPProcessPool struct {
-	runner          LocalACPProcessRunner
-	store           reliablemq.DurableStore
-	versionProvider PaxdVersionProvider
-	reporter        ACPPoolCapabilityReporter
+	runner               LocalACPProcessRunner
+	store                reliablemq.DurableStore
+	versionProvider      PaxdVersionProvider
+	reporter             ACPPoolCapabilityReporter
+	runtimeVersionProber CodexRuntimeVersionProber
 
 	mu               sync.Mutex
 	processes        map[string]*persistentACPProcess
@@ -42,11 +43,12 @@ func NewPersistentACPProcessPool(
 		runner = ExecLocalACPProcessRunner{}
 	}
 	pool := &PersistentACPProcessPool{
-		runner:          runner,
-		store:           store,
-		versionProvider: NoopPaxdVersionProvider{},
-		reporter:        NoopACPPoolCapabilityReporter{},
-		processes:       make(map[string]*persistentACPProcess),
+		runner:               runner,
+		store:                store,
+		versionProvider:      NoopPaxdVersionProvider{},
+		reporter:             NoopACPPoolCapabilityReporter{},
+		runtimeVersionProber: ExecCodexRuntimeVersionProber{},
+		processes:            make(map[string]*persistentACPProcess),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -58,6 +60,9 @@ func NewPersistentACPProcessPool(
 	}
 	if pool.reporter == nil {
 		pool.reporter = NoopACPPoolCapabilityReporter{}
+	}
+	if pool.runtimeVersionProber == nil {
+		pool.runtimeVersionProber = ExecCodexRuntimeVersionProber{}
 	}
 	return pool
 }
@@ -76,6 +81,14 @@ func WithACPPoolCapabilityReporter(reporter ACPPoolCapabilityReporter) Persisten
 	return func(pool *PersistentACPProcessPool) {
 		if reporter != nil {
 			pool.reporter = reporter
+		}
+	}
+}
+
+func WithPersistentACPCodexRuntimeVersionProber(prober CodexRuntimeVersionProber) PersistentACPProcessPoolOption {
+	return func(pool *PersistentACPProcessPool) {
+		if prober != nil {
+			pool.runtimeVersionProber = prober
 		}
 	}
 }
@@ -118,6 +131,7 @@ func (p *PersistentACPProcessPool) Acquire(
 		p.versionProvider.PaxdVersion(),
 		p.nextReportGeneration(),
 		p.reporter,
+		p.runtimeVersionProber,
 	)
 	if err != nil {
 		return nil, err
@@ -180,13 +194,14 @@ func (p *PersistentACPProcessPool) Forget(
 }
 
 type persistentACPProcess struct {
-	spec        AgentConnectionSpec
-	fingerprint string
-	paxdVersion string
-	reportGen   int64
-	proc        LocalACPProcess
-	store       reliablemq.DurableStore
-	reporter    ACPPoolCapabilityReporter
+	spec                 AgentConnectionSpec
+	fingerprint          string
+	paxdVersion          string
+	reportGen            int64
+	proc                 LocalACPProcess
+	store                reliablemq.DurableStore
+	reporter             ACPPoolCapabilityReporter
+	runtimeVersionProber CodexRuntimeVersionProber
 
 	mu              sync.Mutex
 	outputSink      func(context.Context, []byte) error
@@ -194,6 +209,7 @@ type persistentACPProcess struct {
 	err             error
 	initProfile     acpClientInitProfile
 	initResult      acpWorkerInitResult
+	runtimeFallback *ACPRuntimeImplementation
 
 	initCh   chan acpInitCapture
 	done     chan struct{}
@@ -209,6 +225,7 @@ func newPersistentACPProcess(
 	paxdVersion string,
 	reportGeneration int64,
 	reporter ACPPoolCapabilityReporter,
+	runtimeVersionProber CodexRuntimeVersionProber,
 ) (*persistentACPProcess, error) {
 	proc, err := runner.Start(ctx, LocalACPProcessSpec{
 		Command:    spec.Command,
@@ -219,18 +236,22 @@ func newPersistentACPProcess(
 		return nil, err
 	}
 	p := &persistentACPProcess{
-		spec:        spec,
-		fingerprint: fingerprint,
-		paxdVersion: StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
-		reportGen:   reportGeneration,
-		proc:        proc,
-		store:       store,
-		reporter:    reporter,
-		initCh:      make(chan acpInitCapture, 1),
-		done:        make(chan struct{}),
+		spec:                 spec,
+		fingerprint:          fingerprint,
+		paxdVersion:          StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
+		reportGen:            reportGeneration,
+		proc:                 proc,
+		store:                store,
+		reporter:             reporter,
+		runtimeVersionProber: runtimeVersionProber,
+		initCh:               make(chan acpInitCapture, 1),
+		done:                 make(chan struct{}),
 	}
 	if p.reporter == nil {
 		p.reporter = NoopACPPoolCapabilityReporter{}
+	}
+	if p.runtimeVersionProber == nil {
+		p.runtimeVersionProber = ExecCodexRuntimeVersionProber{}
 	}
 	go newStderrTail(stderrTailLimit).Consume(proc.Stderr(), fmt.Sprintf(
 		"[harness stderr] connection_id=%s", spec.ConnectionID))
@@ -334,6 +355,7 @@ func (p *persistentACPProcess) initialize(ctx context.Context) error {
 			_ = p.reportCapability(ctx, ACPPoolInitPhaseFailed, "initialized_notification_failed", err.Error())
 			return fmt.Errorf("send acp initialized notification: %w", err)
 		}
+		p.captureRuntimeFallback(ctx)
 		_ = p.reportCapability(ctx, ACPPoolInitPhaseReady, "", "")
 		return nil
 	case <-p.done:
@@ -353,6 +375,7 @@ func (p *persistentACPProcess) reportCapability(ctx context.Context, phase strin
 	p.mu.Lock()
 	profile := p.initProfile
 	result := p.initResult
+	runtimeFallback := p.runtimeFallback
 	p.mu.Unlock()
 	report := ACPPoolCapabilityReport{
 		ConnectionID:         p.spec.ConnectionID,
@@ -364,12 +387,27 @@ func (p *persistentACPProcess) reportCapability(ctx context.Context, phase strin
 		ProtocolVersion:      protocolVersionFromResult(result.Result),
 		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
 		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		Implementation:       implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
 		InitPhase:            phase,
 		InitializedAt:        result.InitializedAt,
 		LastErrorCode:        errCode,
 		LastErrorMessage:     errMessage,
 	}.WithDefaults()
 	return p.reporter.ReportACPPoolCapability(ctx, report)
+}
+
+func (p *persistentACPProcess) captureRuntimeFallback(ctx context.Context) {
+	p.mu.Lock()
+	result := append(json.RawMessage(nil), p.initResult.Result...)
+	p.mu.Unlock()
+	fallback := fallbackCodexRuntimeIdentity(ctx, result, LocalACPProcessSpec{
+		Command:    p.spec.Command,
+		WorkingDir: p.spec.WorkingDir,
+		Env:        p.spec.Env,
+	}, p.runtimeVersionProber)
+	p.mu.Lock()
+	p.runtimeFallback = fallback
+	p.mu.Unlock()
 }
 
 func (p *persistentACPProcess) wait() {

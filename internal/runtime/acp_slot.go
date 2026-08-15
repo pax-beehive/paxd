@@ -86,25 +86,35 @@ func WithACPSlotEventSink(sink ACPSlotEventSink) ACPSlotOption {
 	}
 }
 
+func WithACPSlotCodexRuntimeVersionProber(prober CodexRuntimeVersionProber) ACPSlotOption {
+	return func(slot *ACPSlot) {
+		if prober != nil {
+			slot.runtimeVersionProber = prober
+		}
+	}
+}
+
 // ACPSlot owns one ACP stdio process epoch. It is intentionally independent of
 // the tunnel/reliable transport path; callers decide how emitted ACP frames are
 // routed.
 type ACPSlot struct {
-	spec   ACPSlotSpec
-	runner LocalACPProcessRunner
-	sink   ACPSlotEventSink
-	stderr *stderrTail
+	spec                 ACPSlotSpec
+	runner               LocalACPProcessRunner
+	sink                 ACPSlotEventSink
+	stderr               *stderrTail
+	runtimeVersionProber CodexRuntimeVersionProber
 
-	mu          sync.Mutex
-	proc        LocalACPProcess
-	phase       ACPSlotPhase
-	initProfile acpClientInitProfile
-	initResult  acpWorkerInitResult
-	initWaiter  *acpRPCWaiter
-	err         error
-	done        chan struct{}
-	stopOnce    sync.Once
-	terminal    sync.Once
+	mu              sync.Mutex
+	proc            LocalACPProcess
+	phase           ACPSlotPhase
+	initProfile     acpClientInitProfile
+	initResult      acpWorkerInitResult
+	runtimeFallback *ACPRuntimeImplementation
+	initWaiter      *acpRPCWaiter
+	err             error
+	done            chan struct{}
+	stopOnce        sync.Once
+	terminal        sync.Once
 }
 
 func NewACPSlot(spec ACPSlotSpec, runner LocalACPProcessRunner, opts ...ACPSlotOption) *ACPSlot {
@@ -112,13 +122,14 @@ func NewACPSlot(spec ACPSlotSpec, runner LocalACPProcessRunner, opts ...ACPSlotO
 		runner = ExecLocalACPProcessRunner{}
 	}
 	slot := &ACPSlot{
-		spec:       spec,
-		runner:     runner,
-		sink:       NoopACPSlotEventSink{},
-		stderr:     newStderrTail(stderrTailLimit),
-		phase:      ACPSlotPhaseStarting,
-		initWaiter: newACPRPCWaiter(),
-		done:       make(chan struct{}),
+		spec:                 spec,
+		runner:               runner,
+		sink:                 NoopACPSlotEventSink{},
+		stderr:               newStderrTail(stderrTailLimit),
+		runtimeVersionProber: ExecCodexRuntimeVersionProber{},
+		phase:                ACPSlotPhaseStarting,
+		initWaiter:           newACPRPCWaiter(),
+		done:                 make(chan struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -175,6 +186,7 @@ func (s *ACPSlot) capabilityReport() ACPPoolCapabilityReport {
 	s.mu.Lock()
 	profile := s.initProfile
 	result := s.initResult
+	runtimeFallback := s.runtimeFallback
 	s.mu.Unlock()
 	return ACPPoolCapabilityReport{
 		ConnectionID:         s.spec.ConnectionID,
@@ -186,6 +198,7 @@ func (s *ACPSlot) capabilityReport() ACPPoolCapabilityReport {
 		ProtocolVersion:      protocolVersionFromResult(result.Result),
 		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
 		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		Implementation:       implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
 		InitPhase:            ACPPoolInitPhaseReady,
 		InitializedAt:        result.InitializedAt,
 	}.WithDefaults()
@@ -298,6 +311,14 @@ func (s *ACPSlot) initialize(ctx context.Context) error {
 	if err := s.Send(ctx, initializedNotification); err != nil {
 		return fmt.Errorf("send acp initialized notification: %w", err)
 	}
+	runtimeFallback := fallbackCodexRuntimeIdentity(ctx, canonicalResult, LocalACPProcessSpec{
+		Command:    s.spec.Command,
+		WorkingDir: s.spec.WorkingDir,
+		Env:        s.spec.Env,
+	}, s.runtimeVersionProber)
+	s.mu.Lock()
+	s.runtimeFallback = runtimeFallback
+	s.mu.Unlock()
 	return nil
 }
 

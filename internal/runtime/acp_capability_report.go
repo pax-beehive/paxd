@@ -9,11 +9,17 @@ import (
 )
 
 const (
-	ACPPoolCapabilityReportSchemaVersion = 1
+	ACPPoolCapabilityReportSchemaVersion = 2
 
 	ACPPoolInitPhaseInitializing = "initializing"
 	ACPPoolInitPhaseReady        = "ready"
 	ACPPoolInitPhaseFailed       = "failed"
+
+	ACPPoolConsistencyUnknown    = "unknown"
+	ACPPoolConsistencyConsistent = "consistent"
+	ACPPoolConsistencyMixed      = "mixed"
+
+	maxACPIdentityFieldRunes = 256
 )
 
 // PaxdVersionProvider supplies the daemon binary version used in sanitized ACP
@@ -52,20 +58,44 @@ func (NoopACPPoolCapabilityReporter) ReportACPPoolCapability(context.Context, AC
 }
 
 type ACPPoolCapabilityReport struct {
-	SchemaVersion        int       `json:"schema_version"`
-	ConnectionID         string    `json:"connection_id"`
-	ReportGeneration     int64     `json:"report_generation"`
-	PaxdVersion          string    `json:"paxd_version"`
-	CommandFingerprint   string    `json:"command_fingerprint"`
-	ClientProfileHash    string    `json:"client_profile_hash"`
-	WorkerResultHash     string    `json:"worker_result_hash"`
-	ProtocolVersion      int       `json:"protocol_version,omitempty"`
-	ClientCapabilityKeys []string  `json:"client_capability_keys,omitempty"`
-	WorkerCapabilityKeys []string  `json:"worker_capability_keys,omitempty"`
-	InitPhase            string    `json:"init_phase"`
-	InitializedAt        time.Time `json:"initialized_at,omitempty"`
-	LastErrorCode        string    `json:"last_error_code,omitempty"`
-	LastErrorMessage     string    `json:"last_error_message,omitempty"`
+	SchemaVersion        int                        `json:"schema_version"`
+	ConnectionID         string                     `json:"connection_id"`
+	ReportGeneration     int64                      `json:"report_generation"`
+	PaxdVersion          string                     `json:"paxd_version"`
+	CommandFingerprint   string                     `json:"command_fingerprint"`
+	ClientProfileHash    string                     `json:"client_profile_hash"`
+	WorkerResultHash     string                     `json:"worker_result_hash"`
+	ProtocolVersion      int                        `json:"protocol_version,omitempty"`
+	ClientCapabilityKeys []string                   `json:"client_capability_keys,omitempty"`
+	WorkerCapabilityKeys []string                   `json:"worker_capability_keys,omitempty"`
+	Implementation       *ACPImplementationIdentity `json:"implementation,omitempty"`
+	PoolConsistency      string                     `json:"pool_consistency"`
+	InitPhase            string                     `json:"init_phase"`
+	InitializedAt        time.Time                  `json:"initialized_at,omitempty"`
+	LastErrorCode        string                     `json:"last_error_code,omitempty"`
+	LastErrorMessage     string                     `json:"last_error_message,omitempty"`
+}
+
+// ACPImplementationIdentity is the deliberately narrow, public projection of
+// an ACP worker's initialize result. Arbitrary initialize fields and metadata
+// must never be added to this type or carried by ACPPoolCapabilityReport.
+type ACPImplementationIdentity struct {
+	ACPAgent            *ACPAgentImplementation   `json:"acp_agent,omitempty"`
+	Runtime             *ACPRuntimeImplementation `json:"runtime,omitempty"`
+	IdentityFingerprint string                    `json:"identity_fingerprint"`
+}
+
+type ACPAgentImplementation struct {
+	Name    string `json:"name,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+type ACPRuntimeImplementation struct {
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+	Build   string `json:"build,omitempty"`
+	Channel string `json:"channel,omitempty"`
 }
 
 func (r ACPPoolCapabilityReport) WithDefaults() ACPPoolCapabilityReport {
@@ -78,9 +108,123 @@ func (r ACPPoolCapabilityReport) WithDefaults() ACPPoolCapabilityReport {
 	if strings.TrimSpace(r.InitPhase) == "" {
 		r.InitPhase = ACPPoolInitPhaseInitializing
 	}
+	if strings.TrimSpace(r.PoolConsistency) == "" {
+		if r.InitPhase == ACPPoolInitPhaseReady && r.Implementation != nil &&
+			strings.TrimSpace(r.Implementation.IdentityFingerprint) != "" {
+			r.PoolConsistency = ACPPoolConsistencyConsistent
+		} else {
+			r.PoolConsistency = ACPPoolConsistencyUnknown
+		}
+	}
 	r.ClientCapabilityKeys = sortedStrings(r.ClientCapabilityKeys)
 	r.WorkerCapabilityKeys = sortedStrings(r.WorkerCapabilityKeys)
 	return r
+}
+
+func implementationIdentityFromResult(raw json.RawMessage) *ACPImplementationIdentity {
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil
+	}
+
+	agent := agentImplementationFromRaw(result["agentInfo"])
+	runtime := runtimeImplementationFromMeta(result["_meta"])
+	if agent == nil && runtime == nil {
+		return nil
+	}
+	return &ACPImplementationIdentity{
+		ACPAgent:            agent,
+		Runtime:             runtime,
+		IdentityFingerprint: implementationIdentityFingerprint(agent, runtime),
+	}
+}
+
+func agentImplementationFromRaw(raw json.RawMessage) *ACPAgentImplementation {
+	fields := rawJSONObject(raw)
+	if fields == nil {
+		return nil
+	}
+	agent := &ACPAgentImplementation{
+		Name:    allowlistedIdentityString(fields["name"]),
+		Title:   allowlistedIdentityString(fields["title"]),
+		Version: allowlistedIdentityString(fields["version"]),
+	}
+	if agent.Name == "" && agent.Title == "" && agent.Version == "" {
+		return nil
+	}
+	return agent
+}
+
+func runtimeImplementationFromMeta(raw json.RawMessage) *ACPRuntimeImplementation {
+	meta := rawJSONObject(raw)
+	if meta == nil {
+		return nil
+	}
+
+	var candidates []json.RawMessage
+	if pax := rawJSONObject(meta["pax"]); pax != nil {
+		candidates = append(candidates, pax["runtime"])
+	}
+	// Some ACP implementations cannot conveniently produce nested extension
+	// metadata and use the namespaced flat key instead.
+	candidates = append(candidates, meta["pax.runtime"])
+	for _, candidate := range candidates {
+		fields := rawJSONObject(candidate)
+		if fields == nil {
+			continue
+		}
+		runtime := &ACPRuntimeImplementation{
+			Name:    allowlistedIdentityString(fields["name"]),
+			Version: allowlistedIdentityString(fields["version"]),
+			Build:   allowlistedIdentityString(fields["build"]),
+			Channel: allowlistedIdentityString(fields["channel"]),
+		}
+		if runtime.Name != "" || runtime.Version != "" || runtime.Build != "" || runtime.Channel != "" {
+			return runtime
+		}
+	}
+	return nil
+}
+
+func implementationIdentityFingerprint(agent *ACPAgentImplementation, runtime *ACPRuntimeImplementation) string {
+	// The schema discriminator makes future fingerprint inputs explicit while
+	// canonical struct JSON keeps the value stable across source JSON ordering.
+	payload, err := json.Marshal(struct {
+		SchemaVersion int                       `json:"schema_version"`
+		ACPAgent      *ACPAgentImplementation   `json:"acp_agent,omitempty"`
+		Runtime       *ACPRuntimeImplementation `json:"runtime,omitempty"`
+	}{
+		SchemaVersion: 1,
+		ACPAgent:      agent,
+		Runtime:       runtime,
+	})
+	if err != nil {
+		return ""
+	}
+	return hashBytes(payload)
+}
+
+func rawJSONObject(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil
+	}
+	return object
+}
+
+func allowlistedIdentityString(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) > maxACPIdentityFieldRunes {
+		return ""
+	}
+	return value
 }
 
 func capabilityKeys(raw json.RawMessage, fieldNames ...string) []string {
