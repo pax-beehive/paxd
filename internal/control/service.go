@@ -189,6 +189,13 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 				Target:  "command_id",
 			}), nil
 		}
+		if isSourceBoundCommand(cmd.Type) && !sameCommandSource(existing.Source, src) {
+			return rejectedAck(cmd.CommandID, existing.TargetType, existing.TargetID, ControlError{
+				Code:    ErrCodeConflict,
+				Message: "command id belongs to a different remote source",
+				Target:  "command_id",
+			}), nil
+		}
 		ack := ackFromRecord(*existing)
 		if isDeferredPaxdMaintenance(cmd.Type) {
 			return s.prepareMaintenanceAck(ctx, cmd, *existing, ack), nil
@@ -214,7 +221,7 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 			return err
 		}
 		var mutationErr error
-		ack, wakeRemotes, wakeAgents, mutationErr = s.applyCommand(ctx, tx, cmd)
+		ack, wakeRemotes, wakeAgents, mutationErr = s.applyCommand(ctx, tx, src, cmd)
 		return mutationErr
 	})
 	if err != nil {
@@ -271,6 +278,15 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	return ack, nil
 }
 
+func sameCommandSource(left Source, right Source) bool {
+	return left.Kind == right.Kind &&
+		strings.TrimSpace(left.RemoteID) == strings.TrimSpace(right.RemoteID)
+}
+
+func isSourceBoundCommand(commandType CommandType) bool {
+	return isDeferredPaxdMaintenance(commandType) || commandType == CommandAttachmentEnsureLocal
+}
+
 func (s *ControlService) handleSessionRuntimeReset(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
 	if s.sessionRuntimeReset == nil {
 		return failedAck(cmd.CommandID, "session", cmd.ResetSessionRuntime.NativeSessionID, ControlError{
@@ -297,7 +313,6 @@ func isDesiredSlotsOnlyUpdate(cmd Command) bool {
 }
 
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {
-	_ = src
 	if err := query.Validate(); err != nil {
 		return QueryResult{Type: query.Type, Error: ptr(controlErr(err))}, nil
 	}
@@ -339,14 +354,14 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 		if s.attachments == nil {
 			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "attachment localizer is not configured"})}, nil
 		}
-		items, err := s.attachments.Status(ctx, query.GetAttachmentLocalStatus.AttachmentIDs)
+		items, err := s.attachments.Status(ctx, src, query.GetAttachmentLocalStatus.AttachmentIDs)
 		return QueryResult{Type: query.Type, AttachmentLocalStatus: &AttachmentLocalStatusResult{Items: items}, Error: errorPtr(err)}, nil
 	default:
 		return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "unsupported query type"})}, nil
 	}
 }
 
-func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Command) (CommandAck, bool, bool, error) {
+func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, src Source, cmd Command) (CommandAck, bool, bool, error) {
 	switch cmd.Type {
 	case CommandRemoteCreate:
 		view, err := tx.CreateRemote(ctx, *cmd.CreateRemote)
@@ -388,7 +403,7 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, cmd Comma
 		if s.attachments == nil {
 			return CommandAck{}, false, false, errors.New("attachment localizer is not configured")
 		}
-		if err := s.attachments.Ensure(ctx, *cmd.EnsureAttachmentLocal); err != nil {
+		if err := s.attachments.Ensure(ctx, src, *cmd.EnsureAttachmentLocal); err != nil {
 			return CommandAck{}, false, false, err
 		}
 		return receivedAck(cmd.CommandID, "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID), false, false, nil

@@ -5,8 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +145,58 @@ func TestResumableUploaderGivenExpiredSessionWhenResumingThenRequestsFreshTicket
 	)
 
 	require.ErrorIs(t, err, artifactpublisher.ErrResumableSessionExpired)
+}
+
+func TestResumableUploaderGivenTicketRedirectThenDoesNotFollowBearerURL(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+	secret := "legacy-session-secret"
+	uploader := artifactpublisher.NewResumableUploader(redirect.Client())
+
+	err := uploader.Upload(
+		context.Background(),
+		resumableUploadJob(t, []byte("bytes")),
+		artifactpublisher.UploadTicket{URL: redirect.URL + "/start?upload_id=" + secret},
+		func(string, int64) error { return nil },
+	)
+
+	require.ErrorContains(t, err, "HTTP 302")
+	assert.Zero(t, targetCalls.Load(), "a resumable bearer URL redirect must never be contacted")
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestResumableUploaderRedactsBearerURLFromTransportErrors(t *testing.T) {
+	secretURL := "https://upload.example.test/start?upload_id=top-secret"
+	uploader := artifactpublisher.NewResumableUploader(artifactHTTPDoerFunc(
+		func(*http.Request) (*http.Response, error) {
+			return nil, &url.Error{
+				Op:  http.MethodPost,
+				URL: secretURL,
+				Err: context.DeadlineExceeded,
+			}
+		},
+	))
+
+	err := uploader.Upload(
+		context.Background(),
+		resumableUploadJob(t, []byte("bytes")),
+		artifactpublisher.UploadTicket{URL: secretURL},
+		func(string, int64) error { return nil },
+	)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotContains(t, err.Error(), secretURL)
+	assert.NotContains(t, strings.ToLower(err.Error()), "upload_id")
+	assert.NotContains(t, err.Error(), "top-secret")
 }
 
 func resumableUploadJob(

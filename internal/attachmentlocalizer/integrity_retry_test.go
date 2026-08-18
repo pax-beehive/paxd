@@ -38,7 +38,7 @@ func TestLocalizerGivenFirstDownloadHashMismatchWhenRetriedThenSecondDownloadBec
 		RootDir: t.TempDir(),
 		OnState: func(state control.AttachmentLocalState) { states <- state },
 	})
-	require.NoError(t, localizer.Ensure(context.Background(), integrityCommand(
+	require.NoError(t, localizer.Ensure(context.Background(), control.Source{Kind: control.SourceLocal}, integrityCommand(
 		"att_retry",
 		server.URL,
 		int64(len(content)),
@@ -68,7 +68,7 @@ func TestLocalizerGivenRepeatedHashMismatchWhenRetriesExhaustedThenBadPartialIsR
 		RootDir: root,
 		OnState: func(state control.AttachmentLocalState) { states <- state },
 	})
-	require.NoError(t, localizer.Ensure(context.Background(), integrityCommand(
+	require.NoError(t, localizer.Ensure(context.Background(), control.Source{Kind: control.SourceLocal}, integrityCommand(
 		"att_failed",
 		server.URL,
 		int64(len(content)),
@@ -78,7 +78,7 @@ func TestLocalizerGivenRepeatedHashMismatchWhenRetriesExhaustedThenBadPartialIsR
 	state := waitForAttachmentState(t, states, control.AttachmentLocalFailed)
 	require.Equal(t, "hash_mismatch", state.ErrorCode)
 	require.Equal(t, int32(2), requests.Load())
-	_, err := os.Stat(filepath.Join(root, "att_failed", "content.part"))
+	_, err := os.Stat(filepath.Join(root, "local", "att_failed", "content.part"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 

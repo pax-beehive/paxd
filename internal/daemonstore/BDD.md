@@ -42,7 +42,14 @@ Boundary rule:
 
 Given an empty SQLite database  
 When daemonstore migrations run  
-Then the database contains `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, `messages`, `message_parts`, and `setting`
+Then the database contains `remote`, `remote_auth`, `remote_status`, `agent_connection`, `agent_connection_status`, `control_command`, `harness_inventory`, `local_session`, `local_session_element`, `messages`, `message_parts`, `setting`, and `artifact_publish_jobs`
+
+### Scenario: upgrades legacy artifact publication jobs without guessing ownership
+
+Given an existing `artifact_publish_jobs` table predates persisted remote IDs
+When daemonstore migrations run
+Then a non-null `remote_id` column is added with an empty compatibility default
+And existing jobs retain an empty remote ID until the worker can resolve exactly one matching remote
 
 ### Scenario: migrations are idempotent
 

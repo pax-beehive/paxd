@@ -59,6 +59,17 @@ func OpenSQLite(path string, opts ...Option) (*Store, error) {
 	return New(db, opts...), nil
 }
 
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	db, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return db.Close()
+}
+
 func sqliteDSN(path string) string {
 	if path == "" || path == ":memory:" {
 		return path

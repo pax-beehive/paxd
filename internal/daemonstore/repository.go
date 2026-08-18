@@ -612,6 +612,7 @@ func (s *Store) InsertCommand(ctx context.Context, rec CommandRecord) error {
 	model := ControlCommand{
 		CommandID:         rec.CommandID,
 		Source:            string(rec.Source.Kind),
+		SourceRemoteID:    rec.Source.RemoteID,
 		Type:              string(rec.Type),
 		TargetType:        rec.TargetType,
 		TargetID:          rec.TargetID,
@@ -645,8 +646,10 @@ func (s *Store) GetCommandRecord(ctx context.Context, commandID string) (*contro
 		return nil, mapGormErr(err)
 	}
 	return &control.CommandRecord{
-		CommandID:         cmd.CommandID,
-		Source:            control.Source{Kind: control.SourceKind(cmd.Source)},
+		CommandID: cmd.CommandID,
+		Source: control.Source{
+			Kind: control.SourceKind(cmd.Source), RemoteID: cmd.SourceRemoteID,
+		},
 		Type:              control.CommandType(cmd.Type),
 		TargetType:        cmd.TargetType,
 		TargetID:          cmd.TargetID,
@@ -1563,8 +1566,10 @@ func commandView(cmd ControlCommand) control.CommandView {
 		desired = *cmd.DesiredGeneration
 	}
 	view := control.CommandView{
-		CommandID:         cmd.CommandID,
-		Source:            control.Source{Kind: control.SourceKind(cmd.Source)},
+		CommandID: cmd.CommandID,
+		Source: control.Source{
+			Kind: control.SourceKind(cmd.Source), RemoteID: cmd.SourceRemoteID,
+		},
 		Type:              control.CommandType(cmd.Type),
 		TargetType:        cmd.TargetType,
 		TargetID:          cmd.TargetID,

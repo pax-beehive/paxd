@@ -171,6 +171,57 @@ func TestBootstrapWiresRemotePaxdRestartLifecycle(t *testing.T) {
 	}
 }
 
+func TestPaxdUpdaterOptionsDeriveResolverFromAuthenticatedRemote(t *testing.T) {
+	t.Setenv("PAXD_UPDATE_RESOLVER_URL", "")
+	ctx := context.Background()
+	store := openTestStore(t)
+	_, err := store.CreateRemote(ctx, control.CreateRemoteCommand{Remote: control.Remote{
+		ID: "remote_home", Name: "Home", CloudAPIURL: "https://pax.home.example/base/",
+	}})
+	require.NoError(t, err)
+	opts := paxdUpdaterOptions(store, "1.2.2", t.TempDir())
+
+	resolverURL, err := opts.ResolverURLForRemote(ctx, "remote_home")
+
+	require.NoError(t, err)
+	assert.Empty(t, opts.ResolverURL)
+	assert.Equal(t, "https://pax.home.example/base/api/v1/public/paxd/download", resolverURL)
+}
+
+func TestPaxdUpdaterOptionsHonorExplicitResolverOverride(t *testing.T) {
+	t.Setenv("PAXD_UPDATE_RESOLVER_URL", "https://updates.home.example/paxd")
+	opts := paxdUpdaterOptions(openTestStore(t), "1.2.2", t.TempDir())
+
+	assert.Equal(t, "https://updates.home.example/paxd", opts.ResolverURL)
+}
+
+func TestPaxdUpdaterOptionsReportRemoteResolutionErrors(t *testing.T) {
+	t.Setenv("PAXD_UPDATE_RESOLVER_URL", "")
+
+	opts := paxdUpdaterOptions(openTestStore(t), "1.2.2", t.TempDir())
+	_, err := opts.ResolverURLForRemote(context.Background(), "")
+	require.ErrorContains(t, err, "remote id is required")
+	_, err = opts.ResolverURLForRemote(context.Background(), "remote_missing")
+	require.ErrorContains(t, err, "does not exist")
+
+	opts = paxdUpdaterOptions(fakeUpdateRemoteSource{
+		err: errors.New("list remotes failed"),
+	}, "1.2.2", t.TempDir())
+	_, err = opts.ResolverURLForRemote(context.Background(), "remote_home")
+	require.ErrorContains(t, err, "list remotes failed")
+}
+
+type fakeUpdateRemoteSource struct {
+	err error
+}
+
+func (s fakeUpdateRemoteSource) ListRemotes(
+	context.Context,
+	control.ListRemotesQuery,
+) ([]control.RemoteView, error) {
+	return nil, s.err
+}
+
 func TestBootstrapRequiresConfig(t *testing.T) {
 	rt, err := Bootstrap(context.Background(), Options{})
 

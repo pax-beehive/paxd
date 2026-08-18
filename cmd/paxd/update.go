@@ -16,6 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/safehttp"
+	"github.com/pax-beehive/paxd/internal/updater"
 	"github.com/urfave/cli/v3"
 )
 
@@ -32,6 +36,7 @@ const (
 
 var paxdUpdateHTTPClient paxdUpdateHTTPDoer = http.DefaultClient
 var paxdExecutablePath = os.Executable
+var paxdUpdateResolverForRemote = defaultPaxdUpdateResolverForRemote
 
 type paxdUpdateHTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -43,7 +48,7 @@ type paxdUpdateCheckResponse struct {
 	Status          string    `json:"status"`
 	UpdateAvailable bool      `json:"update_available"`
 	Platform        string    `json:"platform"`
-	DownloadURL     string    `json:"download_url"`
+	DownloadURL     string    `json:"-"`
 	SHA256          string    `json:"sha256"`
 	SizeBytes       int64     `json:"size_bytes"`
 	CheckedAt       time.Time `json:"checked_at"`
@@ -82,7 +87,8 @@ func cmdUpdateCommand() *cli.Command {
 	updateFlags := func(timeout string) []cli.Flag {
 		return []cli.Flag{
 			&cli.StringFlag{Name: "format", Value: "text", Usage: "Output format: text or json"},
-			&cli.StringFlag{Name: "resolver-url", Value: defaultPaxdUpdateResolverURL, Usage: "paxd artifact resolver URL"},
+			&cli.StringFlag{Name: "remote", Value: "default", Usage: "local remote used to resolve paxd releases"},
+			&cli.StringFlag{Name: "resolver-url", Usage: "explicit paxd artifact resolver URL override"},
 			&cli.StringFlag{Name: "tag", Value: defaultPaxdUpdateTag, Usage: "Release tag to check"},
 			&cli.StringFlag{Name: "platform", Usage: "Release platform override like darwin/arm64"},
 			&cli.StringFlag{Name: "timeout", Value: timeout, Usage: "Update timeout"},
@@ -162,7 +168,11 @@ func paxdUpdateCommand(ctx context.Context, cmd *cli.Command) error {
 
 func paxdCheckUpdate(ctx context.Context, cmd *cli.Command) (*paxdUpdateCheckResponse, error) {
 	platform := firstNonEmpty(cmd.String("platform"), runtime.GOOS+"/"+runtime.GOARCH)
-	artifact, err := resolvePaxdUpdateArtifact(ctx, cmd.String("resolver-url"), platform, cmd.String("tag"))
+	resolverURL, err := paxdUpdateResolverURL(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := resolvePaxdUpdateArtifact(ctx, resolverURL, platform, cmd.String("tag"))
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +193,59 @@ func paxdCheckUpdate(ctx context.Context, cmd *cli.Command) (*paxdUpdateCheckRes
 	}, nil
 }
 
+func paxdUpdateResolverURL(ctx context.Context, cmd *cli.Command) (string, error) {
+	if explicitURL := strings.TrimSpace(cmd.String("resolver-url")); explicitURL != "" {
+		return explicitURL, nil
+	}
+	remoteID := firstNonEmpty(cmd.String("remote"), "default")
+	return paxdUpdateResolverForRemote(ctx, strings.TrimSpace(remoteID))
+}
+
+func defaultPaxdUpdateResolverForRemote(ctx context.Context, remoteID string) (string, error) {
+	remoteID = firstNonEmpty(strings.TrimSpace(remoteID), "default")
+	cfg, err := loadRuntimeConfig()
+	if err != nil {
+		return "", fmt.Errorf("load paxd config for update resolver: %w", err)
+	}
+	databasePath := strings.TrimSpace(cfg.Daemon.DBPath)
+	if databasePath == "" {
+		return fallbackPaxdUpdateResolver(remoteID)
+	}
+	if _, err := os.Stat(databasePath); err != nil {
+		if os.IsNotExist(err) {
+			return fallbackPaxdUpdateResolver(remoteID)
+		}
+		return "", fmt.Errorf("stat paxd database for update resolver: %w", err)
+	}
+	store, err := daemonstore.OpenSQLite(databasePath)
+	if err != nil {
+		return "", fmt.Errorf("open paxd database for update resolver: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+	remotes, err := store.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+	if err != nil {
+		return "", fmt.Errorf("list local remotes for update resolver: %w", err)
+	}
+	for _, remote := range remotes {
+		if strings.TrimSpace(remote.Remote.ID) != remoteID {
+			continue
+		}
+		resolverURL, err := updater.ResolverURLFromCloudAPIURL(remote.Remote.CloudAPIURL)
+		if err != nil {
+			return "", fmt.Errorf("derive update resolver for remote %q: %w", remoteID, err)
+		}
+		return resolverURL, nil
+	}
+	return fallbackPaxdUpdateResolver(remoteID)
+}
+
+func fallbackPaxdUpdateResolver(remoteID string) (string, error) {
+	if remoteID == "default" {
+		return defaultPaxdUpdateResolverURL, nil
+	}
+	return "", fmt.Errorf("local remote %q does not exist", remoteID)
+}
+
 func resolvePaxdUpdateArtifact(
 	ctx context.Context,
 	resolverURL string,
@@ -191,7 +254,7 @@ func resolvePaxdUpdateArtifact(
 ) (*paxdUpdateArtifact, error) {
 	endpoint, err := url.Parse(resolverURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse resolver URL: %w", err)
+		return nil, safehttp.RedactError("parse paxd update resolver URL", err)
 	}
 	query := endpoint.Query()
 	query.Set("platform", platform)
@@ -199,13 +262,13 @@ func resolvePaxdUpdateArtifact(
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil) // #nosec G107
 	if err != nil {
-		return nil, fmt.Errorf("create resolver request: %w", err)
+		return nil, safehttp.RedactError("create paxd update resolver request", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "paxd-update")
-	resp, err := paxdUpdateHTTPClient.Do(req)
+	resp, err := safehttp.DoNoRedirect(paxdUpdateHTTPClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("request resolver: %w", err)
+		return nil, safehttp.RedactError("request paxd update resolver", err)
 	}
 	defer closePaxdUpdateBody(resp.Body)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
@@ -240,12 +303,12 @@ func resolvePaxdUpdateArtifact(
 func downloadPaxdUpdate(ctx context.Context, rawURL string, expectedSize int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) // #nosec G107
 	if err != nil {
-		return nil, fmt.Errorf("create download request: %w", err)
+		return nil, safehttp.RedactError("create paxd update download request", err)
 	}
 	req.Header.Set("User-Agent", "paxd-update")
-	resp, err := paxdUpdateHTTPClient.Do(req)
+	resp, err := safehttp.DoNoRedirect(paxdUpdateHTTPClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("request download: %w", err)
+		return nil, safehttp.RedactError("request download", err)
 	}
 	defer closePaxdUpdateBody(resp.Body)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {

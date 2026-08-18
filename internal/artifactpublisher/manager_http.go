@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/safehttp"
 )
 
 type HTTPDoer interface {
@@ -129,7 +130,7 @@ func (m *HTTPManager) do(
 		bytes.NewReader(data),
 	)
 	if err != nil {
-		return fmt.Errorf("create artifact manager request: %w", err)
+		return safehttp.RedactError("create artifact manager request", err)
 	}
 	for key, values := range target.Headers {
 		for _, value := range values {
@@ -138,12 +139,16 @@ func (m *HTTPManager) do(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "paxd/0.1.0")
-	resp, err := m.client.Do(req)
+	resp, err := safehttp.DoNoRedirect(m.client, req)
 	if err != nil {
-		return err
+		return safehttp.RedactError("request artifact manager", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return fmt.Errorf("artifact manager returned HTTP %d", resp.StatusCode)
+		}
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		return fmt.Errorf(
 			"artifact manager returned HTTP %d: %s",

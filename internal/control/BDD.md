@@ -106,6 +106,14 @@ When `HandleCommand` receives command id `cmd_1` for `agent_connection.delete`
 Then it returns a rejected command ack  
 And it does not apply the new mutation
 
+### Scenario: rejects a durable paxd upgrade replay from another remote
+
+Given `control_command` contains a received `paxd.upgrade` from `remote_home`
+When the same command id and payload are replayed by `remote_other`
+Then `HandleCommand` returns a conflict rejection
+And it does not schedule an upgrade against `remote_other`
+And the persisted command source remains `remote_home`
+
 ## Remote commands
 
 ### Scenario: session runtime reset compares the active turn

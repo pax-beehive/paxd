@@ -30,7 +30,7 @@ func TestLocalizerGivenCompleteCorruptPartialWhenEnsuredThenItRedownloadsFromZer
 	defer server.Close()
 
 	root := t.TempDir()
-	dir := filepath.Join(root, "att_corrupt")
+	dir := filepath.Join(root, "local", "att_corrupt")
 	require.NoError(t, os.MkdirAll(dir, 0o700))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "content.part"),
@@ -44,7 +44,7 @@ func TestLocalizerGivenCompleteCorruptPartialWhenEnsuredThenItRedownloadsFromZer
 		RootDir: root,
 		OnState: func(state control.AttachmentLocalState) { states <- state },
 	})
-	require.NoError(t, localizer.Ensure(context.Background(), control.EnsureAttachmentLocalCommand{
+	require.NoError(t, localizer.Ensure(context.Background(), control.Source{Kind: control.SourceLocal}, control.EnsureAttachmentLocalCommand{
 		Attachment: control.AttachmentDescriptor{
 			AttachmentID: "att_corrupt",
 			Filename:     "notes.txt",

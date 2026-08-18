@@ -60,7 +60,11 @@ func (s *ControlService) prepareMaintenanceAck(
 	}
 	var scheduleErr error
 	if cmd.Type == CommandUpgradePaxd {
-		scheduleErr = s.paxdLifecycle.ScheduleUpgrade(cmd.CommandID, *cmd.UpgradePaxd)
+		scheduleErr = s.paxdLifecycle.ScheduleUpgrade(
+			cmd.CommandID,
+			rec.Source.RemoteID,
+			*cmd.UpgradePaxd,
+		)
 	} else {
 		scheduleErr = s.paxdLifecycle.ScheduleRestart(cmd.CommandID, *cmd.RestartPaxd)
 	}

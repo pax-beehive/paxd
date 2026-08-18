@@ -27,6 +27,7 @@ type Store interface {
 
 type Options struct {
 	Store      Store
+	Targets    TargetResolver
 	RootDir    string
 	NewID      func() (string, error)
 	Now        func() time.Time
@@ -35,6 +36,7 @@ type Options struct {
 
 type Service struct {
 	store      Store
+	targets    TargetResolver
 	rootDir    string
 	newID      func() (string, error)
 	now        func() time.Time
@@ -52,6 +54,7 @@ func New(opts Options) *Service {
 	}
 	return &Service{
 		store:      opts.Store,
+		targets:    opts.Targets,
 		rootDir:    opts.RootDir,
 		newID:      newID,
 		now:        now,
@@ -76,8 +79,19 @@ func (s *Service) Accept(ctx context.Context, req Request) (Publication, error) 
 	if s.store == nil {
 		return Publication{}, errors.New("artifact publish store is not configured")
 	}
+	if s.targets == nil {
+		return Publication{}, errors.New("artifact manager target resolver is not configured")
+	}
 	if strings.TrimSpace(s.rootDir) == "" {
 		return Publication{}, errors.New("artifact spool directory is not configured")
+	}
+	target, err := s.targets.Resolve(ctx, "", req.AgentID)
+	if err != nil {
+		return Publication{}, fmt.Errorf("bind artifact source remote: %w", err)
+	}
+	remoteID := strings.TrimSpace(target.RemoteID)
+	if remoteID == "" {
+		return Publication{}, errors.New("bind artifact source remote: resolved remote id is empty")
 	}
 
 	source, err := os.Open(req.SourcePath) // #nosec G304 -- the agent explicitly selects the local artifact.
@@ -126,6 +140,7 @@ func (s *Service) Accept(ctx context.Context, req Request) (Publication, error) 
 	now := s.now().UTC()
 	job := daemonstore.ArtifactPublishJob{
 		PublicationID:  publicationID,
+		RemoteID:       remoteID,
 		AgentID:        req.AgentID,
 		SessionID:      req.SessionID,
 		SourceFilename: filename,

@@ -148,6 +148,67 @@ func TestServiceRemotePaxdRestartCommitsOnlyAfterAckDelivery(t *testing.T) {
 	assert.Equal(t, 1, lifecycle.scheduledCount(), "applied command must not schedule another restart")
 }
 
+func TestServiceRemotePaxdUpgradeSchedulesAgainstAuthenticatedSourceRemote(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	lifecycle := &fakePaxdLifecycle{bootID: "boot_a"}
+	service := control.NewService(control.ServiceOptions{Store: store, PaxdLifecycle: lifecycle})
+	cmd := control.Command{
+		CommandID: "cmd_upgrade_paxd_home",
+		Type:      control.CommandUpgradePaxd,
+		UpgradePaxd: &control.UpgradePaxdCommand{
+			Version: "1.2.3", Mode: control.PaxdUpgradeWhenIdle,
+		},
+	}
+
+	ack, err := service.HandleCommand(ctx, control.Source{
+		Kind: control.SourceRemote, RemoteID: "remote_home",
+	}, cmd)
+
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusReceived, ack.Status)
+	assert.Equal(t, "remote_home", lifecycle.scheduledUpgradeRemoteID())
+}
+
+func TestServiceRemotePaxdUpgradeRejectsDurableReplayFromDifferentRemote(t *testing.T) {
+	ctx := context.Background()
+	store := openControlTestStore(t)
+	cmd := control.Command{
+		CommandID: "cmd_upgrade_paxd_durable_source",
+		Type:      control.CommandUpgradePaxd,
+		UpgradePaxd: &control.UpgradePaxdCommand{
+			Version: "1.2.3", Mode: control.PaxdUpgradeWhenIdle,
+		},
+	}
+	firstLifecycle := &fakePaxdLifecycle{bootID: "boot_a"}
+	firstService := control.NewService(control.ServiceOptions{
+		Store: store, PaxdLifecycle: firstLifecycle,
+	})
+	_, err := firstService.HandleCommand(ctx, control.Source{
+		Kind: control.SourceRemote, RemoteID: "remote_home",
+	}, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, "remote_home", firstLifecycle.scheduledUpgradeRemoteID())
+
+	replayedLifecycle := &fakePaxdLifecycle{bootID: "boot_a"}
+	replayedService := control.NewService(control.ServiceOptions{
+		Store: store, PaxdLifecycle: replayedLifecycle,
+	})
+	ack, err := replayedService.HandleCommand(ctx, control.Source{
+		Kind: control.SourceRemote, RemoteID: "remote_other",
+	}, cmd)
+
+	require.NoError(t, err)
+	assert.Equal(t, control.CommandStatusRejected, ack.Status)
+	require.NotNil(t, ack.Error)
+	assert.Equal(t, control.ErrCodeConflict, ack.Error.Code)
+	assert.Zero(t, replayedLifecycle.scheduledCount())
+	assert.Empty(t, replayedLifecycle.scheduledUpgradeRemoteID())
+	record, err := store.GetCommandRecord(ctx, cmd.CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, "remote_home", record.Source.RemoteID)
+}
+
 func TestServicePaxdRestartTreatsOldBootIntentAsApplied(t *testing.T) {
 	ctx := context.Background()
 	store := openControlTestStore(t)
@@ -1159,10 +1220,11 @@ func TestHandleDiagnosticsQuery(t *testing.T) {
 }
 
 type fakePaxdLifecycle struct {
-	mu        sync.Mutex
-	bootID    string
-	scheduled []string
-	confirmed []string
+	mu              sync.Mutex
+	bootID          string
+	scheduled       []string
+	confirmed       []string
+	upgradeRemoteID string
 }
 
 func (f *fakePaxdLifecycle) BootID() string { return f.bootID }
@@ -1171,7 +1233,10 @@ func (f *fakePaxdLifecycle) ScheduleRestart(commandID string, _ control.RestartP
 	return f.schedule(commandID)
 }
 
-func (f *fakePaxdLifecycle) ScheduleUpgrade(commandID string, _ control.UpgradePaxdCommand) error {
+func (f *fakePaxdLifecycle) ScheduleUpgrade(commandID string, remoteID string, _ control.UpgradePaxdCommand) error {
+	f.mu.Lock()
+	f.upgradeRemoteID = remoteID
+	f.mu.Unlock()
 	return f.schedule(commandID)
 }
 
@@ -1207,4 +1272,10 @@ func (f *fakePaxdLifecycle) confirmedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.confirmed)
+}
+
+func (f *fakePaxdLifecycle) scheduledUpgradeRemoteID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.upgradeRemoteID
 }

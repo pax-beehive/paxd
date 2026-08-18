@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/safehttp"
 )
 
 const defaultArtifactChunkSize int64 = 8 * 1024 * 1024
@@ -118,15 +119,15 @@ func (u *ResumableUploader) initiate(
 	}
 	req, err := http.NewRequestWithContext(ctx, method, ticket.URL, nil)
 	if err != nil {
-		return "", err
+		return "", safehttp.RedactError("create artifact resumable initiation request", err)
 	}
 	for key, value := range ticket.Headers {
 		req.Header.Set(key, value)
 	}
 	req.ContentLength = 0
-	resp, err := u.Client.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.Client, req)
 	if err != nil {
-		return "", err
+		return "", safehttp.RedactError("initiate artifact resumable upload", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -139,11 +140,11 @@ func (u *ResumableUploader) initiate(
 	}
 	base, err := url.Parse(ticket.URL)
 	if err != nil {
-		return "", err
+		return "", safehttp.RedactError("parse artifact resumable ticket URL", err)
 	}
 	resolved, err := base.Parse(location)
 	if err != nil {
-		return "", err
+		return "", safehttp.RedactError("resolve artifact resumable session URL", err)
 	}
 	return resolved.String(), nil
 }
@@ -155,13 +156,13 @@ func (u *ResumableUploader) queryOffset(
 ) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, sessionURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, safehttp.RedactError("create artifact resumable status request", err)
 	}
 	req.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", total))
 	req.ContentLength = 0
-	resp, err := u.Client.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.Client, req)
 	if err != nil {
-		return 0, err
+		return 0, safehttp.RedactError("query artifact resumable upload", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -187,7 +188,7 @@ func (u *ResumableUploader) uploadChunk(
 	body := io.NewSectionReader(file, offset, length)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, sessionURL, body)
 	if err != nil {
-		return 0, false, err
+		return 0, false, safehttp.RedactError("create artifact resumable chunk request", err)
 	}
 	req.ContentLength = length
 	req.Header.Set(
@@ -197,9 +198,9 @@ func (u *ResumableUploader) uploadChunk(
 	if strings.TrimSpace(contentType) != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := u.Client.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.Client, req)
 	if err != nil {
-		return 0, false, err
+		return 0, false, safehttp.RedactError("upload artifact resumable chunk", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -221,13 +222,13 @@ func (u *ResumableUploader) uploadZeroByteObject(
 ) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, sessionURL, nil)
 	if err != nil {
-		return err
+		return safehttp.RedactError("create empty artifact resumable request", err)
 	}
 	req.Header.Set("Content-Range", "bytes */0")
 	req.ContentLength = 0
-	resp, err := u.Client.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.Client, req)
 	if err != nil {
-		return err
+		return safehttp.RedactError("upload empty artifact resumable object", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)

@@ -18,8 +18,18 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 推荐先安装 `paxl`，再通过 `paxl setup --with-daemon` 安装和配置 `paxd`。`paxctl` 已退役，不再作为独立 binary 发布：
 
 ```bash
-curl -fsSL https://api.paxtech.net/api/v1/public/paxl/install.sh | bash
+curl -fsSL --max-redirs 1 https://api.paxtech.net/api/v1/public/paxl/install.sh | bash
 paxl setup --with-daemon
+```
+
+自托管 manager 使用自己的入口。release 生成的 installer 已默认指向发布它的
+manager；显式传下载入口也兼容旧 installer，并能避免误回 hosted Pax：
+
+```bash
+export PAX_MANAGER_URL='https://pax.home.example'
+curl -fsSL --max-redirs 1 "$PAX_MANAGER_URL/api/v1/public/paxl/install.sh" |
+  PAXL_DOWNLOAD_URL="$PAX_MANAGER_URL" bash
+paxl setup --with-daemon --cloud-url "$PAX_MANAGER_URL"
 ```
 
 如果只需要直接安装 daemon runtime，`paxd` installer 仍然可用，但它只安装 `paxd` binary：
@@ -28,11 +38,22 @@ paxl setup --with-daemon
 https://api.paxtech.net/api/v1/public/paxd/install.sh
 ```
 
-脚本实际存放在 GCS：
+自托管环境直接安装 daemon 时，对应命令是：
+
+```bash
+curl -fsSL --max-redirs 1 "$PAX_MANAGER_URL/api/v1/public/paxd/install.sh" |
+  PAX_DOWNLOAD_URL="$PAX_MANAGER_URL" bash
+```
+
+脚本实际存放在 pax-manager 配置的 S3-compatible object storage：
 
 ```text
-gs://pax-tech-bucket/script/installer.sh
+s3://<bucket>/paxd/releases/<version>/install.sh
 ```
+
+installer 入口允许且最多跟随 manager 返回的第一次 302；拿到脚本以后，resolver
+请求和 resolver 返回的 signed object URL 都拒绝重定向。这样 Cloudflare 登录页或
+对象存储的意外跳转不会被最终的 HTTP 200 掩盖，也不会把 bearer URL 带到下一跳。
 
 支持的 stable `paxd` binary 平台链接：
 
@@ -47,6 +68,65 @@ https://api.paxtech.net/api/v1/public/paxd/download?platform=windows/amd64&tags=
 安装器和 binary 下载接口走 `https://api.paxtech.net`。paxd 默认也使用 `https://api.paxtech.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://ws.paxtech.net`。
 
 如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行 `paxl setup --with-daemon`。setup 会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
+
+## Release artifacts
+
+`scripts/release_paxd.sh` 使用 AWS CLI 把 binary 和 installer 上传到 AWS
+S3 或 S3-compatible storage。每个 object 都设置 content type 与 `sha256`
+metadata，并把同一 digest 的 base64 形式作为原生 S3 SHA-256 checksum；所有上传
+都使用 `If-None-Match: *`，不会覆盖已有 object。PUT 失败时（包括上传已经落盘但
+客户端丢失响应），脚本会通过 `aws s3api head-object` 严格比较 size、content type、
+`sha256` metadata，以及服务返回时的原生 checksum；完全一致按幂等成功继续，任何
+不一致都会终止 release。随后脚本以
+`generation=0` 向 pax-manager 发布 bucket/object/sha/size/content-type；安装器
+与 updater 只下载 manager resolver 返回的 HTTPS signed URL，因此 bucket
+不需要公开。上传、发布或验证时必须显式设置 `PAX_RELEASE_BUCKET`，脚本不提供
+默认 bucket；纯 build 可以不设置。
+
+release 不会原样上传仓库中的通用 installer；它会在 `dist` 生成副本，把
+`PAX_RELEASE_MANAGER_URL` 安全地写成 binary resolver 的默认 base URL，再对这个
+副本计算 hash、上传和发布 metadata。运行 installer 时显式设置
+`PAX_DOWNLOAD_URL` 仍然优先。带 credentials、query 或 fragment 的 manager URL
+会在生成 installer 前被拒绝。
+
+AWS S3 示例：
+
+```bash
+export AWS_REGION='us-west-2'
+export AWS_ACCESS_KEY_ID='<access-key-id>'
+export AWS_SECRET_ACCESS_KEY='<secret-access-key>'
+export PAX_RELEASE_BUCKET='my-pax-releases'
+export PAX_RELEASE_MANAGER_URL='https://api.example.com'
+export PAX_RELEASE_TOKEN='<manager-admin-bearer-token>'
+scripts/release_paxd.sh 0.2.0 stable
+```
+
+MinIO 示例：
+
+```bash
+export AWS_REGION='us-east-1'
+export AWS_ACCESS_KEY_ID='<minio-access-key>'
+export AWS_SECRET_ACCESS_KEY='<minio-secret-key>'
+export PAX_RELEASE_S3_ENDPOINT='http://127.0.0.1:9000'
+export PAX_RELEASE_BUCKET='pax-releases'
+export PAX_RELEASE_MANAGER_URL='https://api.example.com'
+export PAX_RELEASE_TOKEN='<manager-admin-bearer-token>'
+scripts/release_paxd.sh 0.2.0 stable
+```
+
+pax-manager 必须配置同一个 bucket、endpoint、region 和 credentials。
+`PAX_MANAGER_URL` 仍是 manager URL 的兼容别名，`PAX_RELEASE_ID_TOKEN` 仍是
+`PAX_RELEASE_TOKEN` 的 deprecated alias；release script 不再调用 `gcloud`。
+
+如果 manager 受 Cloudflare Access 保护，需要同时设置 service token 的两个值：
+
+```bash
+export PAX_CLOUD_CF_CLIENT_ID='<cloudflare-access-client-id>'
+export PAX_CLOUD_CF_CLIENT_SECRET='<cloudflare-access-client-secret>'
+```
+
+release script 只会在 manager HTTP 请求中加入 `CF-Access-Client-Id` 和
+`CF-Access-Client-Secret`；两者必须成对设置，不会加入 AWS/S3 请求，也不会写入日志。
 
 ## How to start
 
@@ -99,6 +179,10 @@ paxl daemon update
 paxd update check
 paxd update
 ```
+
+`paxd update` 默认从本机 `default` remote 的 `cloud_api_url` 解析 release；多
+remote 环境可用 `paxd update --remote home`。只有需要绕过 remote 配置时才传
+`--resolver-url https://manager.example/api/v1/public/paxd/download`。
 
 本机 daemon 的数据在：
 

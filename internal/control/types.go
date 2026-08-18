@@ -35,7 +35,7 @@ type DeferredCommandAction interface {
 type PaxdLifecycle interface {
 	BootID() string
 	ScheduleRestart(commandID string, command RestartPaxdCommand) error
-	ScheduleUpgrade(commandID string, command UpgradePaxdCommand) error
+	ScheduleUpgrade(commandID string, remoteID string, command UpgradePaxdCommand) error
 	Cancel(commandID string) error
 	ConfirmAckDelivered(commandID string)
 }
@@ -188,8 +188,8 @@ type AttachmentLocalState struct {
 }
 
 type AttachmentLocalizer interface {
-	Ensure(ctx context.Context, command EnsureAttachmentLocalCommand) error
-	Status(ctx context.Context, attachmentIDs []string) ([]AttachmentLocalState, error)
+	Ensure(ctx context.Context, source Source, command EnsureAttachmentLocalCommand) error
+	Status(ctx context.Context, source Source, attachmentIDs []string) ([]AttachmentLocalState, error)
 }
 
 type Remote struct {

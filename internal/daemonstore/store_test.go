@@ -200,6 +200,32 @@ func TestMigrateDropsRetiredRemoteSchema(t *testing.T) {
 	}
 }
 
+func TestMigrateAddsArtifactPublicationRemoteWithoutGuessingLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "legacy-artifacts.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&ArtifactPublishJob{}))
+	require.NoError(t, db.Migrator().DropColumn(&ArtifactPublishJob{}, "RemoteID"))
+	require.False(t, db.Migrator().HasColumn(&ArtifactPublishJob{}, "remote_id"))
+	require.NoError(t, db.Exec(`
+		INSERT INTO artifact_publish_jobs (
+			publication_id, agent_id, session_id, source_filename, spool_path, status,
+			created_at, updated_at
+		) VALUES (
+			'apub_legacy', 'agent_1', 'session_1', 'report.txt', '/tmp/report.txt',
+			'accepted', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'
+		);
+	`).Error)
+	store := New(db)
+
+	require.NoError(t, store.Migrate(ctx))
+
+	require.True(t, store.DB().Migrator().HasColumn(&ArtifactPublishJob{}, "remote_id"))
+	job, err := store.GetArtifactPublishJob(ctx, "apub_legacy")
+	require.NoError(t, err)
+	assert.Empty(t, job.RemoteID, "legacy rows must be resolved uniquely by the worker")
+}
+
 func TestOpenSQLiteCreatesMissingParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "nested", "daemonstore.db")
 
@@ -1038,7 +1064,7 @@ func TestCommandRecordsAndCompletion(t *testing.T) {
 
 	err := store.InsertCommand(ctx, CommandRecord{
 		CommandID:   "cmd_1",
-		Source:      control.Source{Kind: control.SourceLocal},
+		Source:      control.Source{Kind: control.SourceRemote, RemoteID: "remote_home"},
 		Type:        control.CommandRemoteCreate,
 		TargetType:  "remote",
 		TargetID:    "remote_prod",
@@ -1048,7 +1074,7 @@ func TestCommandRecordsAndCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertCommand() error = %v", err)
 	}
-	if err := store.InsertCommand(ctx, CommandRecord{CommandID: "cmd_1", Source: control.Source{Kind: control.SourceLocal}, Type: control.CommandRemoteCreate}); !errors.Is(err, ErrDuplicate) {
+	if err := store.InsertCommand(ctx, CommandRecord{CommandID: "cmd_1", Source: control.Source{Kind: control.SourceRemote, RemoteID: "remote_home"}, Type: control.CommandRemoteCreate}); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate InsertCommand() error = %v, want ErrDuplicate", err)
 	}
 
@@ -1067,12 +1093,18 @@ func TestCommandRecordsAndCompletion(t *testing.T) {
 	if view.Status != control.CommandStatusApplied || view.DesiredGeneration != 2 || view.AppliedAt == "" {
 		t.Fatalf("command view = %+v", view)
 	}
+	if view.Source.Kind != control.SourceRemote || view.Source.RemoteID != "remote_home" {
+		t.Fatalf("command view source = %+v", view.Source)
+	}
 	record, err := store.GetCommandRecord(ctx, "cmd_1")
 	if err != nil {
 		t.Fatalf("GetCommandRecord() error = %v", err)
 	}
 	if record.PayloadJSON != `{"remote":{"id":"remote_prod"}}` || record.DesiredGeneration == nil || *record.DesiredGeneration != 2 {
 		t.Fatalf("command record = %+v", record)
+	}
+	if record.Source.Kind != control.SourceRemote || record.Source.RemoteID != "remote_home" {
+		t.Fatalf("command record source = %+v", record.Source)
 	}
 	if err := store.CompleteCommand(ctx, "cmd_missing", CommandCompletion{Status: control.CommandStatusFailed}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing CompleteCommand() error = %v, want ErrNotFound", err)

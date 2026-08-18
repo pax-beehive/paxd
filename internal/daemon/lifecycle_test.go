@@ -62,7 +62,7 @@ func TestLifecycleCoordinatorStagesAndActivatesUpgradeOnlyAfterAck(t *testing.T)
 	}
 	coordinator := newLifecycleCoordinator("boot_test")
 	coordinator.Configure(nil, update, nil)
-	require.NoError(t, coordinator.ScheduleUpgrade("cmd_upgrade_1", control.UpgradePaxdCommand{
+	require.NoError(t, coordinator.ScheduleUpgrade("cmd_upgrade_1", "remote_home", control.UpgradePaxdCommand{
 		Version: "1.2.3", Mode: control.PaxdUpgradeImmediate,
 	}))
 
@@ -76,6 +76,7 @@ func TestLifecycleCoordinatorStagesAndActivatesUpgradeOnlyAfterAck(t *testing.T)
 	select {
 	case request := <-update.staged:
 		assert.Equal(t, "cmd_upgrade_1", request.CommandID)
+		assert.Equal(t, "remote_home", request.RemoteID)
 		assert.Equal(t, "1.2.3", request.Version)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for upgrade staging")
