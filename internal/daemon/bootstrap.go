@@ -31,6 +31,8 @@ import (
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
 
+const envPaxdUpdateResolverURL = "PAXD_UPDATE_RESOLVER_URL"
+
 func DefaultControlSocketPath() string {
 	return expandHome(DefaultControlSocket)
 }
@@ -99,18 +101,22 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	attachmentStates := newAttachmentStateHub()
 	attachments := attachmentlocalizer.New(attachmentlocalizer.Options{
-		Context: ctx,
-		RootDir: cfg.Daemon.AttachmentDir,
-		OnState: attachmentStates.Publish,
+		Context:       ctx,
+		RootDir:       cfg.Daemon.AttachmentDir,
+		OnScopedState: attachmentStates.Publish,
 	})
+	artifactTargets := artifactpublisher.NewRemoteTargetResolver(
+		store,
+		auth.NewProvider(store, nil),
+	)
 	artifactJobs := artifactpublisher.NewWorker(artifactpublisher.WorkerOptions{
-		Store: store,
-		Targets: artifactpublisher.NewRemoteTargetResolver(
-			store,
-			auth.NewProvider(store, nil),
-		),
-		Manager:  artifactpublisher.NewHTTPManager(nil),
-		Uploader: artifactpublisher.NewResumableUploader(nil),
+		Store:   store,
+		Targets: artifactTargets,
+		Manager: artifactpublisher.NewHTTPManager(nil),
+		Uploaders: map[string]artifactpublisher.Uploader{
+			artifactpublisher.UploadProtocolGCSResumable:   artifactpublisher.NewResumableUploader(nil),
+			artifactpublisher.UploadProtocolS3PresignedPut: artifactpublisher.NewPresignedPutUploader(nil),
+		},
 	})
 	bootID, err := newBootID()
 	if err != nil {
@@ -135,12 +141,14 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		e2eeDistributionKeys = e2ee.StaticRootKeyProvider{Key: e2eeRootKey}
 	}
 	maintenance := newLifecycleCoordinator(bootID)
-	paxdUpdater := updater.New(updater.Options{
-		CurrentVersion: opts.PaxdVersion,
-		StateDir:       filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "updates"),
-	})
+	paxdUpdater := updater.New(paxdUpdaterOptions(
+		store,
+		opts.PaxdVersion,
+		filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "updates"),
+	))
 	artifactPublications := artifactpublisher.New(artifactpublisher.Options{
 		Store:      store,
+		Targets:    artifactTargets,
 		RootDir:    cfg.Daemon.ArtifactSpoolDir,
 		OnAccepted: artifactJobs.Wake,
 	})
@@ -208,6 +216,38 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		artifactJobs:   artifactJobs,
 		maintenance:    maintenance,
 	}, nil
+}
+
+type updateRemoteSource interface {
+	ListRemotes(context.Context, control.ListRemotesQuery) ([]control.RemoteView, error)
+}
+
+func paxdUpdaterOptions(
+	remotes updateRemoteSource,
+	currentVersion string,
+	stateDir string,
+) updater.Options {
+	return updater.Options{
+		ResolverURL:    strings.TrimSpace(os.Getenv(envPaxdUpdateResolverURL)),
+		CurrentVersion: currentVersion,
+		StateDir:       stateDir,
+		ResolverURLForRemote: func(ctx context.Context, remoteID string) (string, error) {
+			remoteID = strings.TrimSpace(remoteID)
+			if remoteID == "" {
+				return "", errors.New("update source remote id is required")
+			}
+			specs, err := remotes.ListRemotes(ctx, control.ListRemotesQuery{IncludeDisabled: true})
+			if err != nil {
+				return "", err
+			}
+			for _, spec := range specs {
+				if spec.Remote.ID == remoteID {
+					return updater.ResolverURLFromCloudAPIURL(spec.Remote.CloudAPIURL)
+				}
+			}
+			return "", fmt.Errorf("remote %q does not exist", remoteID)
+		},
+	}
 }
 
 type sessionReportRouteResolver struct {

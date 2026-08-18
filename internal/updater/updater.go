@@ -17,40 +17,47 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pax-beehive/paxd/internal/safehttp"
 )
 
 const (
-	DefaultResolverURL = "https://api.paxtech.net/api/v1/public/paxd/download"
-	DefaultTag         = "stable"
-	maxBinarySize      = int64(256 << 20)
+	DefaultTag    = "stable"
+	maxBinarySize = int64(256 << 20)
+	resolverPath  = "/api/v1/public/paxd/download"
 )
+
+type ResolverURLForRemoteFunc func(context.Context, string) (string, error)
 
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
 type Options struct {
-	ResolverURL    string
-	CurrentVersion string
-	StateDir       string
-	HTTPClient     HTTPDoer
-	ExecutablePath func() (string, error)
-	SmokeTimeout   time.Duration
-	Now            func() time.Time
+	ResolverURL          string
+	ResolverURLForRemote ResolverURLForRemoteFunc
+	CurrentVersion       string
+	StateDir             string
+	HTTPClient           HTTPDoer
+	ExecutablePath       func() (string, error)
+	SmokeTimeout         time.Duration
+	Now                  func() time.Time
 }
 
 type Updater struct {
-	resolverURL    string
-	currentVersion string
-	stateDir       string
-	httpClient     HTTPDoer
-	executablePath func() (string, error)
-	smokeTimeout   time.Duration
-	now            func() time.Time
+	resolverURL          string
+	resolverURLForRemote ResolverURLForRemoteFunc
+	currentVersion       string
+	stateDir             string
+	httpClient           HTTPDoer
+	executablePath       func() (string, error)
+	smokeTimeout         time.Duration
+	now                  func() time.Time
 }
 
 type Request struct {
 	CommandID string
+	RemoteID  string
 	Version   string
 	Tag       string
 }
@@ -106,9 +113,6 @@ type artifact struct {
 }
 
 func New(opts Options) *Updater {
-	if strings.TrimSpace(opts.ResolverURL) == "" {
-		opts.ResolverURL = DefaultResolverURL
-	}
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = http.DefaultClient
 	}
@@ -122,8 +126,10 @@ func New(opts Options) *Updater {
 		opts.Now = time.Now
 	}
 	return &Updater{
-		resolverURL: opts.ResolverURL, currentVersion: strings.TrimSpace(opts.CurrentVersion),
-		stateDir: opts.StateDir, httpClient: opts.HTTPClient,
+		resolverURL:          strings.TrimSpace(opts.ResolverURL),
+		resolverURLForRemote: opts.ResolverURLForRemote,
+		currentVersion:       strings.TrimSpace(opts.CurrentVersion),
+		stateDir:             opts.StateDir, httpClient: opts.HTTPClient,
 		executablePath: opts.ExecutablePath, smokeTimeout: opts.SmokeTimeout, now: opts.Now,
 	}
 }
@@ -136,7 +142,11 @@ func (u *Updater) Stage(ctx context.Context, req Request) (Candidate, error) {
 	if req.Version == "" {
 		return Candidate{}, errors.New("explicit target version is required")
 	}
-	resolved, err := u.resolve(ctx, firstNonEmpty(req.Tag, DefaultTag))
+	resolverURL, err := u.resolveResolverURL(ctx, req.RemoteID)
+	if err != nil {
+		return Candidate{}, err
+	}
+	resolved, err := u.resolve(ctx, resolverURL, firstNonEmpty(req.Tag, DefaultTag))
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -245,10 +255,28 @@ func (u *Updater) Cleanup(candidate Candidate) {
 	}
 }
 
-func (u *Updater) resolve(ctx context.Context, tag string) (artifact, error) {
-	endpoint, err := url.Parse(u.resolverURL)
+func (u *Updater) resolveResolverURL(ctx context.Context, remoteID string) (string, error) {
+	if u.resolverURL != "" {
+		return u.resolverURL, nil
+	}
+	if u.resolverURLForRemote == nil {
+		return "", errors.New("update resolver is not configured")
+	}
+	resolverURL, err := u.resolverURLForRemote(ctx, strings.TrimSpace(remoteID))
 	if err != nil {
-		return artifact{}, fmt.Errorf("parse resolver URL: %w", err)
+		return "", fmt.Errorf("resolve update URL for remote %q: %w", remoteID, err)
+	}
+	resolverURL = strings.TrimSpace(resolverURL)
+	if resolverURL == "" {
+		return "", fmt.Errorf("update resolver for remote %q is empty", remoteID)
+	}
+	return resolverURL, nil
+}
+
+func (u *Updater) resolve(ctx context.Context, resolverURL string, tag string) (artifact, error) {
+	endpoint, err := url.Parse(resolverURL)
+	if err != nil {
+		return artifact{}, safehttp.RedactError("parse paxd update resolver URL", err)
 	}
 	query := endpoint.Query()
 	query.Set("platform", runtime.GOOS+"/"+runtime.GOARCH)
@@ -256,13 +284,13 @@ func (u *Updater) resolve(ctx context.Context, tag string) (artifact, error) {
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil) // #nosec G107 -- resolver URL is local configuration, never command input.
 	if err != nil {
-		return artifact{}, fmt.Errorf("create resolver request: %w", err)
+		return artifact{}, safehttp.RedactError("create paxd update resolver request", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "paxd-updater")
-	resp, err := u.httpClient.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.httpClient, req)
 	if err != nil {
-		return artifact{}, fmt.Errorf("request resolver: %w", err)
+		return artifact{}, safehttp.RedactError("request paxd update resolver", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -286,15 +314,30 @@ func (u *Updater) resolve(ctx context.Context, tag string) (artifact, error) {
 	return result, nil
 }
 
+func ResolverURLFromCloudAPIURL(rawURL string) (string, error) {
+	base, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", fmt.Errorf("parse cloud API URL: %w", err)
+	}
+	if (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+		return "", fmt.Errorf("cloud API URL must be an absolute HTTP(S) URL")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + resolverPath
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.Fragment = ""
+	return base.String(), nil
+}
+
 func (u *Updater) download(ctx context.Context, item artifact, target *os.File) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.URL, nil) // #nosec G107 -- URL is supplied by the configured trusted resolver.
 	if err != nil {
-		return "", 0, fmt.Errorf("create download request: %w", err)
+		return "", 0, safehttp.RedactError("create paxd update download request", err)
 	}
 	req.Header.Set("User-Agent", "paxd-updater")
-	resp, err := u.httpClient.Do(req)
+	resp, err := safehttp.DoNoRedirect(u.httpClient, req)
 	if err != nil {
-		return "", 0, fmt.Errorf("download update: %w", err)
+		return "", 0, safehttp.RedactError("download paxd update", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

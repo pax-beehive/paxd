@@ -22,6 +22,7 @@ type ArtifactPublishJob struct {
 	ErrorMessage    string    `gorm:"type:text;not null;default:''"`
 	CreatedAt       time.Time `gorm:"column:created_at;not null;index:idx_artifact_publish_jobs_status_created,priority:2"`
 	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
+	RemoteID        string    `gorm:"type:text;not null;default:''"`
 }
 
 func (ArtifactPublishJob) TableName() string { return "artifact_publish_jobs" }

@@ -21,10 +21,10 @@ func (e *integrityError) Error() string {
 	return e.message
 }
 
-func (l *Localizer) downloadFile(command control.EnsureAttachmentLocalCommand) error {
+func (l *Localizer) downloadFile(source control.Source, command control.EnsureAttachmentLocalCommand) error {
 	var lastIntegrity *integrityError
 	for attempt := 0; attempt < 2; attempt++ {
-		err := l.downloadFileAttempt(command)
+		err := l.downloadFileAttempt(source, command)
 		if err == nil {
 			return nil
 		}
@@ -32,8 +32,7 @@ func (l *Localizer) downloadFile(command control.EnsureAttachmentLocalCommand) e
 			return err
 		}
 		partPath := filepath.Join(
-			l.rootDir,
-			command.Attachment.AttachmentID,
+			l.attachmentDir(source, command.Attachment.AttachmentID),
 			partialFilename,
 		)
 		if removeErr := os.Remove(partPath); removeErr != nil &&
@@ -41,7 +40,7 @@ func (l *Localizer) downloadFile(command control.EnsureAttachmentLocalCommand) e
 			return fmt.Errorf("discard corrupt partial attachment: %w", removeErr)
 		}
 		if attempt == 0 {
-			l.publish(control.AttachmentLocalState{
+			l.publish(source, control.AttachmentLocalState{
 				AttachmentID: command.Attachment.AttachmentID,
 				State:        control.AttachmentLocalQueued,
 				TotalBytes:   command.Attachment.SizeBytes,

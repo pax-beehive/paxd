@@ -146,6 +146,7 @@ func (ACPSessionRoute) TableName() string { return "acp_session_route" }
 type ControlCommand struct {
 	CommandID         string     `gorm:"primaryKey;type:text"`
 	Source            string     `gorm:"type:text;not null"`
+	SourceRemoteID    string     `gorm:"column:source_remote_id;type:text;not null;default:''"`
 	Type              string     `gorm:"type:text;not null"`
 	TargetType        string     `gorm:"type:text;not null;default:''"`
 	TargetID          string     `gorm:"type:text;not null;default:''"`

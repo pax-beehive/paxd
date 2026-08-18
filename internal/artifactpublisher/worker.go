@@ -28,13 +28,18 @@ const (
 	StatusRetryWait   = "retry_wait"
 	StatusFailed      = "failed"
 
-	PrepareStatusUploadRequired = "upload_required"
-	PrepareStatusAvailable      = "available"
+	PrepareStatusUploadRequired  = "upload_required"
+	PrepareStatusAvailable       = "available"
+	UploadProtocolGCSResumable   = "gcs_resumable"
+	UploadProtocolS3PresignedPut = "s3_presigned_put"
 
-	defaultWorkerInterval = 5 * time.Second
+	defaultWorkerInterval               = 5 * time.Second
+	maxSinglePutArtifactSizeBytes int64 = 5 * 1024 * 1024 * 1024
 )
 
 var ErrResumableSessionExpired = errors.New("artifact resumable upload session expired")
+
+var errArtifactExceedsSinglePutLimit = errors.New("artifact exceeds single PUT limit")
 
 type WorkerStore interface {
 	ListUnfinishedArtifactPublishJobs(context.Context) ([]daemonstore.ArtifactPublishJob, error)
@@ -48,7 +53,7 @@ type ManagerTarget struct {
 }
 
 type TargetResolver interface {
-	Resolve(context.Context, string) (ManagerTarget, error)
+	Resolve(context.Context, string, string) (ManagerTarget, error)
 }
 
 type UploadTicket struct {
@@ -94,23 +99,26 @@ type Uploader interface {
 }
 
 type WorkerOptions struct {
-	Store    WorkerStore
-	Targets  TargetResolver
-	Manager  ManagerClient
-	Uploader Uploader
-	Interval time.Duration
-	Now      func() time.Time
+	Store   WorkerStore
+	Targets TargetResolver
+	Manager ManagerClient
+	// Uploader is the legacy GCS resumable uploader. New integrations should
+	// register protocol-specific implementations through Uploaders.
+	Uploader  Uploader
+	Uploaders map[string]Uploader
+	Interval  time.Duration
+	Now       func() time.Time
 }
 
 type Worker struct {
-	store    WorkerStore
-	targets  TargetResolver
-	manager  ManagerClient
-	uploader Uploader
-	interval time.Duration
-	now      func() time.Time
-	wake     chan struct{}
-	runMu    sync.Mutex
+	store     WorkerStore
+	targets   TargetResolver
+	manager   ManagerClient
+	uploaders map[string]Uploader
+	interval  time.Duration
+	now       func() time.Time
+	wake      chan struct{}
+	runMu     sync.Mutex
 }
 
 func NewWorker(opts WorkerOptions) *Worker {
@@ -122,14 +130,26 @@ func NewWorker(opts WorkerOptions) *Worker {
 	if now == nil {
 		now = time.Now
 	}
+	uploaders := make(map[string]Uploader, len(opts.Uploaders)+1)
+	for protocol, implementation := range opts.Uploaders {
+		protocol = strings.TrimSpace(protocol)
+		if protocol != "" && implementation != nil {
+			uploaders[protocol] = implementation
+		}
+	}
+	if opts.Uploader != nil {
+		if _, exists := uploaders[UploadProtocolGCSResumable]; !exists {
+			uploaders[UploadProtocolGCSResumable] = opts.Uploader
+		}
+	}
 	return &Worker{
-		store:    opts.Store,
-		targets:  opts.Targets,
-		manager:  opts.Manager,
-		uploader: opts.Uploader,
-		interval: interval,
-		now:      now,
-		wake:     make(chan struct{}, 1),
+		store:     opts.Store,
+		targets:   opts.Targets,
+		manager:   opts.Manager,
+		uploaders: uploaders,
+		interval:  interval,
+		now:       now,
+		wake:      make(chan struct{}, 1),
 	}
 }
 
@@ -165,7 +185,7 @@ func (w *Worker) Wake() {
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
-	if w == nil || w.store == nil || w.targets == nil || w.manager == nil || w.uploader == nil {
+	if w == nil || w.store == nil || w.targets == nil || w.manager == nil || len(w.uploaders) == 0 {
 		return nil
 	}
 	w.runMu.Lock()
@@ -190,10 +210,23 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 }
 
 func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJob) error {
-	target, err := w.targets.Resolve(ctx, job.AgentID)
+	boundRemoteID := strings.TrimSpace(job.RemoteID)
+	target, err := w.targets.Resolve(ctx, boundRemoteID, job.AgentID)
 	if err != nil {
 		return fmt.Errorf("resolve artifact manager target: %w", err)
 	}
+	target.RemoteID = strings.TrimSpace(target.RemoteID)
+	if target.RemoteID == "" {
+		return errors.New("resolve artifact manager target: resolved remote id is empty")
+	}
+	if boundRemoteID != "" && target.RemoteID != boundRemoteID {
+		return fmt.Errorf(
+			"resolve artifact manager target: resolved remote %q does not match persisted remote %q",
+			target.RemoteID,
+			boundRemoteID,
+		)
+	}
+	job.RemoteID = target.RemoteID
 	job.Status = StatusRegistering
 	if err := w.save(ctx, job); err != nil {
 		return err
@@ -207,8 +240,12 @@ func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJo
 		return err
 	}
 	if err := hashArtifactSnapshot(job); err != nil {
+		code := "local_snapshot_unavailable"
+		if errors.Is(err, errArtifactExceedsSinglePutLimit) {
+			code = "artifact_too_large"
+		}
 		return permanentArtifactError{
-			code: "local_snapshot_unavailable",
+			code: code,
 			err:  err,
 		}
 	}
@@ -254,7 +291,11 @@ func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJo
 	if err := w.save(ctx, job); err != nil {
 		return err
 	}
-	err = w.uploader.Upload(ctx, *job, *prepared.Upload, func(sessionURL string, uploaded int64) error {
+	uploader, err := w.uploaderFor(prepared.Upload.Protocol)
+	if err != nil {
+		return err
+	}
+	err = uploader.Upload(ctx, *job, *prepared.Upload, func(sessionURL string, uploaded int64) error {
 		job.ResumableURL = sessionURL
 		job.UploadedBytes = uploaded
 		job.Status = StatusUploading
@@ -282,6 +323,18 @@ func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJo
 	return w.save(ctx, job)
 }
 
+func (w *Worker) uploaderFor(protocol string) (Uploader, error) {
+	protocol = strings.TrimSpace(protocol)
+	if protocol == "" {
+		protocol = UploadProtocolGCSResumable
+	}
+	uploader := w.uploaders[protocol]
+	if uploader == nil {
+		return nil, fmt.Errorf("unsupported artifact upload protocol %q", protocol)
+	}
+	return uploader, nil
+}
+
 func (w *Worker) save(ctx context.Context, job *daemonstore.ArtifactPublishJob) error {
 	job.UpdatedAt = w.now().UTC()
 	return w.store.SaveArtifactPublishJob(ctx, *job)
@@ -294,27 +347,24 @@ func (w *Worker) recordFailure(
 ) {
 	var permanent permanentArtifactError
 	if errors.As(err, &permanent) {
-		target, targetErr := w.targets.Resolve(ctx, job.AgentID)
+		job.Status = StatusFailed
+		job.ErrorCode = permanent.code
+		job.ErrorMessage = err.Error()
+		target, targetErr := w.targets.Resolve(ctx, job.RemoteID, job.AgentID)
 		if targetErr != nil {
-			job.Status = StatusRetryWait
-			job.ErrorCode = "failure_report_retry"
 			job.ErrorMessage = errors.Join(err, targetErr).Error()
 			return
 		}
 		if reportErr := w.manager.Fail(
 			ctx, target, *job, permanent.code, err.Error(),
 		); reportErr != nil {
-			job.Status = StatusRetryWait
-			job.ErrorCode = "failure_report_retry"
 			job.ErrorMessage = errors.Join(err, reportErr).Error()
 			return
 		}
-		job.Status = StatusFailed
-		job.ErrorCode = permanent.code
-	} else {
-		job.Status = StatusRetryWait
-		job.ErrorCode = "background_retry"
+		return
 	}
+	job.Status = StatusRetryWait
+	job.ErrorCode = "background_retry"
 	job.ErrorMessage = err.Error()
 }
 
@@ -339,6 +389,14 @@ func hashArtifactSnapshot(job *daemonstore.ArtifactPublishJob) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("artifact snapshot is not a regular file")
 	}
+	job.SizeBytes = info.Size()
+	if job.SizeBytes > maxSinglePutArtifactSizeBytes {
+		return fmt.Errorf(
+			"%w: snapshot size %d exceeds the 5 GiB single PUT limit",
+			errArtifactExceedsSinglePutLimit,
+			job.SizeBytes,
+		)
+	}
 	hash := sha256.New()
 	head := make([]byte, 512)
 	n, readErr := io.ReadFull(file, head)
@@ -351,7 +409,6 @@ func hashArtifactSnapshot(job *daemonstore.ArtifactPublishJob) error {
 	if _, err := io.Copy(hash, file); err != nil {
 		return err
 	}
-	job.SizeBytes = info.Size()
 	job.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	job.ContentType = firstNonEmpty(
 		mime.TypeByExtension(filepath.Ext(job.SourceFilename)),

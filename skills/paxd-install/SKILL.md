@@ -12,20 +12,42 @@ Use this skill when a user asks an agent to install Pax/paxd on the current mach
 Run the hosted installer:
 
 ```bash
-curl -fsSL https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
+curl -fsSL --max-redirs 1 https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
 ```
 
-The installer detects the local platform, downloads the newest `stable` paxd binary, verifies sha256, installs it into PATH, then runs:
+For a self-hosted manager, keep installer and binary resolution on the same
+manager. Current release artifacts have this base URL baked in, while the
+explicit environment override also works with older installers:
 
 ```bash
-paxd connect --cloud-url https://api.paxtech.net
+export PAX_MANAGER_URL='https://pax.home.example'
+curl -fsSL --max-redirs 1 "$PAX_MANAGER_URL/api/v1/public/paxd/install.sh" |
+  PAX_DOWNLOAD_URL="$PAX_MANAGER_URL" bash
+paxd login --remote default --cloud-url "$PAX_MANAGER_URL"
 ```
 
-Use `api.paxtech.net` for installer, binary download, and paxd API calls. The verification URL printed by paxd is returned by pax-manager and should use `ws.paxtech.net` as the human-facing Pax entry for login and pairing.
+The installer detects the local platform, downloads the newest `stable` paxd
+binary through pax-manager's resolver, verifies sha256, and installs it into
+PATH.
+
+The entry curl follows at most the manager's single installer redirect. Inside
+the downloaded installer, both the manager resolver request and the returned
+signed object URL reject every redirect.
+
+Pair the daemon with:
+
+```bash
+paxd login --remote default --cloud-url https://api.paxtech.net
+```
+
+Use one manager base URL consistently for installer, binary download, and paxd
+API calls. For hosted Pax that URL is `api.paxtech.net`. The verification URL
+printed by paxd is returned by pax-manager and may use a separate human-facing
+login host.
 
 ## Pairing
 
-When `paxd connect` prints a verification URL and 6-character code:
+When `paxd login` prints a verification URL and 6-character code:
 
 1. Show the URL and code clearly to the user.
 2. Ask the user to open the URL, log in, and approve pairing.
@@ -52,5 +74,6 @@ paxd run
 
 - If `curl` or `python3` is missing, install it with the system package manager and rerun the installer.
 - If the installer cannot write to the selected PATH directory, rerun with `PAX_INSTALL_DIR=$HOME/.local/bin` and ensure that directory is on PATH.
-- If pairing expires, rerun `paxd connect --cloud-url https://api.paxtech.net`.
-- If the machine is behind a restricted network, verify it can reach `https://api.paxtech.net`, `https://ws.paxtech.net`, and Google Cloud Storage.
+- If pairing expires, rerun `paxd login --remote default --cloud-url https://api.paxtech.net`.
+- If the machine is behind a restricted network, verify it can reach the manager API, the browser pairing host, and the object-storage host returned by the download resolver.
+- The public installer and resolver routes must not redirect unattended clients to an interactive Cloudflare Access login. Use an Access bypass/service-auth policy for `/api/v1/public/*` or provide an equivalent machine-readable edge configuration.

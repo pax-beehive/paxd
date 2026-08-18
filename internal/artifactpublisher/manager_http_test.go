@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,6 +85,53 @@ func TestHTTPManagerGivenArtifactJobWhenPublishingThenUsesNodeScopedContracts(
 		"POST /api/v1/node/artifact-uploads/artup_http/complete",
 		"POST /api/v1/node/artifact-publications/apub_http/failed",
 	}, paths)
+}
+
+func TestHTTPManagerGivenRedirectThenDoesNotForwardNodeCredentials(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+	manager := artifactpublisher.NewHTTPManager(redirect.Client())
+	secret := "cf-access-top-secret"
+
+	err := manager.Register(context.Background(), artifactpublisher.ManagerTarget{
+		BaseURL: redirect.URL,
+		Headers: http.Header{"CF-Access-Client-Secret": []string{secret}},
+	}, daemonstore.ArtifactPublishJob{PublicationID: "apub_redirect"})
+
+	require.ErrorContains(t, err, "HTTP 302")
+	assert.Zero(t, targetCalls.Load(), "manager credentials must not cross a redirect boundary")
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestHTTPManagerRedactsTransportURL(t *testing.T) {
+	secretURL := "https://manager.example.test/api?token=top-secret"
+	manager := artifactpublisher.NewHTTPManager(artifactHTTPDoerFunc(
+		func(*http.Request) (*http.Response, error) {
+			return nil, &url.Error{
+				Op:  http.MethodPut,
+				URL: secretURL,
+				Err: context.DeadlineExceeded,
+			}
+		},
+	))
+
+	err := manager.Register(context.Background(), artifactpublisher.ManagerTarget{
+		BaseURL: "https://manager.example.test",
+	}, daemonstore.ArtifactPublishJob{PublicationID: "apub_transport"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotContains(t, err.Error(), secretURL)
+	assert.NotContains(t, strings.ToLower(err.Error()), "token")
+	assert.NotContains(t, err.Error(), "top-secret")
 }
 
 func writeArtifactManagerData(t *testing.T, w http.ResponseWriter, data any) {

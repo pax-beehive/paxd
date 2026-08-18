@@ -42,6 +42,7 @@ type commandCompleter interface {
 
 type maintenanceIntent struct {
 	commandID string
+	remoteID  string
 	kind      string
 	phase     string
 	restart   control.RestartPaxdCommand
@@ -127,6 +128,7 @@ func (c *lifecycleCoordinator) ScheduleRestart(
 
 func (c *lifecycleCoordinator) ScheduleUpgrade(
 	commandID string,
+	remoteID string,
 	command control.UpgradePaxdCommand,
 ) error {
 	if strings.TrimSpace(commandID) == "" {
@@ -136,7 +138,8 @@ func (c *lifecycleCoordinator) ScheduleUpgrade(
 		command.Mode = control.PaxdUpgradeWhenIdle
 	}
 	return c.schedule(&maintenanceIntent{
-		commandID: commandID, kind: "upgrade", phase: "awaiting_ack", upgrade: command,
+		commandID: commandID, remoteID: strings.TrimSpace(remoteID),
+		kind: "upgrade", phase: "awaiting_ack", upgrade: command,
 	})
 }
 
@@ -242,7 +245,8 @@ func (c *lifecycleCoordinator) stageUpgrade(intent *maintenanceIntent) {
 		return
 	}
 	candidate, err := update.Stage(ctx, updater.Request{
-		CommandID: intent.commandID, Version: intent.upgrade.Version, Tag: intent.upgrade.Tag,
+		CommandID: intent.commandID, RemoteID: intent.remoteID,
+		Version: intent.upgrade.Version, Tag: intent.upgrade.Tag,
 	})
 	cancel()
 	if err != nil {

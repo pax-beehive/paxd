@@ -24,6 +24,7 @@ func TestPublisherGivenRegularFileWhenAcceptedThenSnapshotAndJobAreDurable(t *te
 		Store:   store,
 		RootDir: root,
 		NewID:   func() (string, error) { return "apub_test_1", nil },
+		Targets: staticAcceptTarget{remoteID: "remote_home"},
 	})
 
 	publication, err := publisher.Accept(ctx, artifactpublisher.Request{
@@ -39,6 +40,7 @@ func TestPublisherGivenRegularFileWhenAcceptedThenSnapshotAndJobAreDurable(t *te
 	job, err := store.GetArtifactPublishJob(ctx, publication.PublicationID)
 	require.NoError(t, err)
 	assert.Equal(t, "agent_1", job.AgentID)
+	assert.Equal(t, "remote_home", job.RemoteID)
 	assert.Equal(t, "session_1", job.SessionID)
 	assert.Equal(t, "report.txt", job.SourceFilename)
 	assert.Equal(t, "Report", job.DisplayTitle)
@@ -59,6 +61,7 @@ func TestPublisherGivenPersistenceFailureWhenAcceptedThenItReturnsError(t *testi
 		Store:   failingArtifactStore{err: errors.New("database unavailable")},
 		RootDir: t.TempDir(),
 		NewID:   func() (string, error) { return "apub_failed", nil },
+		Targets: staticAcceptTarget{remoteID: "remote_home"},
 	})
 
 	publication, err := publisher.Accept(context.Background(), artifactpublisher.Request{
@@ -69,6 +72,63 @@ func TestPublisherGivenPersistenceFailureWhenAcceptedThenItReturnsError(t *testi
 
 	require.Error(t, err)
 	assert.Empty(t, publication.PublicationID)
+}
+
+func TestPublisherGivenAgentWhenAcceptedThenBindsRemoteBeforeCreatingSnapshot(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "report.txt")
+	require.NoError(t, os.WriteFile(source, []byte("content"), 0o600))
+	root := t.TempDir()
+	publisher := artifactpublisher.New(artifactpublisher.Options{
+		Store:   failingArtifactStore{err: errors.New("store must not be called")},
+		RootDir: root,
+		Targets: staticAcceptTarget{err: errors.New("agent is ambiguous across remotes")},
+	})
+
+	publication, err := publisher.Accept(context.Background(), artifactpublisher.Request{
+		AgentID:    "agent_1",
+		SessionID:  "session_1",
+		SourcePath: source,
+	})
+
+	require.ErrorContains(t, err, "bind artifact source remote")
+	assert.ErrorContains(t, err, "agent is ambiguous across remotes")
+	assert.Empty(t, publication.PublicationID)
+	entries, readErr := os.ReadDir(root)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "an unbound artifact must not create a durable snapshot")
+}
+
+func TestPublisherGivenResolverWithoutRemoteWhenAcceptedThenRejectsUnboundJob(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "report.txt")
+	require.NoError(t, os.WriteFile(source, []byte("content"), 0o600))
+	publisher := artifactpublisher.New(artifactpublisher.Options{
+		Store:   failingArtifactStore{err: errors.New("store must not be called")},
+		RootDir: t.TempDir(),
+		Targets: staticAcceptTarget{},
+	})
+
+	_, err := publisher.Accept(context.Background(), artifactpublisher.Request{
+		AgentID:    "agent_1",
+		SessionID:  "session_1",
+		SourcePath: source,
+	})
+
+	require.ErrorContains(t, err, "resolved remote id is empty")
+}
+
+func TestPublisherGivenNoTargetResolverWhenAcceptedThenRejectsConfiguration(t *testing.T) {
+	publisher := artifactpublisher.New(artifactpublisher.Options{
+		Store:   failingArtifactStore{err: errors.New("store must not be called")},
+		RootDir: t.TempDir(),
+	})
+
+	_, err := publisher.Accept(context.Background(), artifactpublisher.Request{
+		AgentID:    "agent_1",
+		SessionID:  "session_1",
+		SourcePath: filepath.Join(t.TempDir(), "missing.txt"),
+	})
+
+	require.ErrorContains(t, err, "target resolver is not configured")
 }
 
 func TestArtifactPublishJobGivenDaemonRestartWhenLoadedThenAcceptedJobRemains(t *testing.T) {
@@ -127,4 +187,17 @@ func (s failingArtifactStore) CreateArtifactPublishJob(
 	daemonstore.ArtifactPublishJob,
 ) error {
 	return s.err
+}
+
+type staticAcceptTarget struct {
+	remoteID string
+	err      error
+}
+
+func (s staticAcceptTarget) Resolve(
+	context.Context,
+	string,
+	string,
+) (artifactpublisher.ManagerTarget, error) {
+	return artifactpublisher.ManagerTarget{RemoteID: s.remoteID}, s.err
 }

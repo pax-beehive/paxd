@@ -137,9 +137,13 @@ download_with_progress() {
   local output="$2"
 
   if curl --help all 2>/dev/null | grep -q -- '--progress-bar'; then
-    curl -fL --progress-bar -o "$output" "$url"
+    if ! curl -fL --max-redirs 0 --progress-bar -o "$output" "$url" 2>/dev/null; then
+      fail "failed to download artifact"
+    fi
   else
-    curl -fL -o "$output" "$url"
+    if ! curl -fL --max-redirs 0 -o "$output" "$url" 2>/dev/null; then
+      fail "failed to download artifact"
+    fi
   fi
 }
 
@@ -175,7 +179,8 @@ download_and_install_product() {
 
   api="$(artifact_api_for "$product" "$encoded_platform")"
   log "Resolving latest ${bold}${PAX_TAG}${reset} ${product} artifact"
-  response="$(curl -fsSL "$api")" || fail "failed to resolve ${product} artifact from $api"
+  response="$(curl -fsSL --max-redirs 0 "$api" 2>/dev/null)" ||
+    fail "failed to resolve ${product} artifact"
   if [[ "$response" != \{* ]]; then
     fail "expected JSON from $api; got a non-JSON response. Check whether the public artifact download endpoint is behind an auth/login redirect."
   fi
@@ -259,4 +264,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

@@ -9,10 +9,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +46,7 @@ func TestPaxdUpdateCheckReportsAvailableVersion(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update", "check",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "darwin/arm64",
 		"--format", "json",
 	})
@@ -48,6 +55,118 @@ func TestPaxdUpdateCheckReportsAvailableVersion(t *testing.T) {
 	assert.Contains(t, stdout.String(), `"current_version":"0.1.0"`)
 	assert.Contains(t, stdout.String(), `"latest_version":"0.2.0"`)
 	assert.Contains(t, stdout.String(), `"update_available":true`)
+	assert.NotContains(t, stdout.String(), "download_url")
+	assert.NotContains(t, stdout.String(), "https://download.test/paxd")
+}
+
+func TestPaxdUpdateCheckUsesSelectedLocalRemoteWhenResolverIsNotOverridden(t *testing.T) {
+	restoreResolver := stubPaxdUpdateRemoteResolver(
+		func(_ context.Context, remoteID string) (string, error) {
+			assert.Equal(t, "home", remoteID)
+			return "https://home.example/base/api/v1/public/paxd/download", nil
+		},
+	)
+	defer restoreResolver()
+	restoreClient := stubPaxdUpdateHTTPClient(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "home.example", req.URL.Host)
+		assert.Equal(t, "/base/api/v1/public/paxd/download", req.URL.Path)
+		return paxdUpdateJSONResponse(`{
+			"data": {
+				"url": "https://objects.home.example/paxd",
+				"sha256": "abc123",
+				"size_bytes": 42,
+				"version": "0.2.0"
+			}
+		}`), nil
+	})
+	defer restoreClient()
+	oldVersion := version
+	version = "0.1.0"
+	defer func() { version = oldVersion }()
+
+	err := newApp().Run(context.Background(), []string{
+		"paxd", "update", "check",
+		"--remote", "home",
+		"--platform", "linux/amd64",
+	})
+
+	require.NoError(t, err)
+}
+
+func TestPaxdUpdateCheckExplicitResolverOverridesSelectedLocalRemote(t *testing.T) {
+	remoteResolverCalled := false
+	restoreResolver := stubPaxdUpdateRemoteResolver(
+		func(context.Context, string) (string, error) {
+			remoteResolverCalled = true
+			return "", errors.New("must not resolve local remote")
+		},
+	)
+	defer restoreResolver()
+	restoreClient := stubPaxdUpdateHTTPClient(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "override.example", req.URL.Host)
+		return paxdUpdateJSONResponse(`{
+			"data": {
+				"url": "https://objects.example/paxd",
+				"sha256": "abc123",
+				"size_bytes": 42,
+				"version": "0.2.0"
+			}
+		}`), nil
+	})
+	defer restoreClient()
+	oldVersion := version
+	version = "0.1.0"
+	defer func() { version = oldVersion }()
+
+	err := newApp().Run(context.Background(), []string{
+		"paxd", "update", "check",
+		"--remote", "home",
+		"--resolver-url", "https://override.example/resolve",
+		"--platform", "linux/amd64",
+	})
+
+	require.NoError(t, err)
+	assert.False(t, remoteResolverCalled)
+}
+
+func TestDefaultPaxdUpdateRemoteResolverUsesPersistedDefaultRemote(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "paxd.db")
+	t.Setenv("PAXD_DB_PATH", databasePath)
+	store, err := daemonstore.OpenSQLite(databasePath)
+	require.NoError(t, err)
+	require.NoError(t, store.Migrate(context.Background()))
+	_, err = store.CreateRemote(context.Background(), control.CreateRemoteCommand{
+		Remote: control.Remote{
+			ID: "default", Name: "Home", CloudAPIURL: "https://home.example/base/",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	resolverURL, err := defaultPaxdUpdateResolverForRemote(
+		context.Background(), "default",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"https://home.example/base/api/v1/public/paxd/download",
+		resolverURL,
+	)
+}
+
+func TestDefaultPaxdUpdateRemoteResolverFallsBackOnlyForUnconfiguredDefault(t *testing.T) {
+	t.Setenv("PAXD_DB_PATH", filepath.Join(t.TempDir(), "missing.db"))
+
+	resolverURL, err := defaultPaxdUpdateResolverForRemote(
+		context.Background(), "default",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, defaultPaxdUpdateResolverURL, resolverURL)
+
+	_, err = defaultPaxdUpdateResolverForRemote(context.Background(), "home")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `local remote "home" does not exist`)
 }
 
 func TestPaxdUpdateDownloadsVerifiesAndReplacesExecutable(t *testing.T) {
@@ -85,6 +204,7 @@ func TestPaxdUpdateDownloadsVerifiesAndReplacesExecutable(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 		"--format", "json",
 	})
@@ -120,6 +240,7 @@ func TestPaxdUpdateSkipsReplacementWhenAlreadyCurrent(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -148,6 +269,7 @@ func TestPaxdUpdateSkipsReplacementWithJSONOutput(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 		"--format", "json",
 	})
@@ -180,6 +302,7 @@ func TestPaxdUpdateDoesNotDowngradeAheadVersion(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -212,6 +335,7 @@ func TestPaxdUpdateSkipsDevelopmentVersion(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -245,6 +369,7 @@ func TestPaxdUpdateRejectsChecksumMismatch(t *testing.T) {
 
 	err := newApp().Run(context.Background(), []string{
 		"paxd", "update",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -274,6 +399,7 @@ func TestPaxdUpdateRendersTextCheck(t *testing.T) {
 
 	err := app.Run(context.Background(), []string{
 		"paxd", "update", "check",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -351,6 +477,7 @@ func TestPaxdUpdateRejectsInvalidLatestVersion(t *testing.T) {
 
 	err := newApp().Run(context.Background(), []string{
 		"paxd", "update", "check",
+		"--resolver-url", defaultPaxdUpdateResolverURL,
 		"--platform", "linux/amd64",
 	})
 
@@ -402,7 +529,81 @@ func TestDownloadPaxdUpdateReturnsRequestError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "request download")
-	assert.Contains(t, err.Error(), "network unavailable")
+	assert.NotContains(t, err.Error(), "network unavailable")
+}
+
+func TestResolvePaxdUpdateArtifactGivenManagerRedirectThenDoesNotFollowIt(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		_, _ = io.WriteString(w, `{"data":{"url":"https://objects.example.test/paxd","sha256":"abc123","size_bytes":5,"version":"1.2.3"}}`)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+	restore := stubPaxdUpdateHTTPDoer(redirect.Client())
+	defer restore()
+	secret := "resolver-query-secret"
+
+	_, err := resolvePaxdUpdateArtifact(
+		context.Background(),
+		redirect.URL+"/resolve?access_token="+secret,
+		"linux/amd64",
+		"stable",
+	)
+
+	require.ErrorContains(t, err, "HTTP 302")
+	assert.Zero(t, targetCalls.Load(), "a manager resolver redirect must never be contacted")
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestDownloadPaxdUpdateGivenSignedURLRedirectThenDoesNotFollowIt(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		_, _ = io.WriteString(w, "paxd")
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+	restore := stubPaxdUpdateHTTPDoer(redirect.Client())
+	defer restore()
+	secret := "signed-download-secret"
+
+	_, err := downloadPaxdUpdate(
+		context.Background(),
+		redirect.URL+"/paxd?X-Amz-Signature="+secret,
+		4,
+	)
+
+	require.ErrorContains(t, err, "HTTP 302")
+	assert.Zero(t, targetCalls.Load(), "a signed binary redirect must never be contacted")
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestDownloadPaxdUpdateRedactsSignedURLFromTransportErrors(t *testing.T) {
+	secretURL := "https://objects.example.test/paxd?X-Amz-Signature=top-secret"
+	restore := stubPaxdUpdateHTTPClient(func(*http.Request) (*http.Response, error) {
+		return nil, &url.Error{
+			Op:  http.MethodGet,
+			URL: secretURL,
+			Err: context.DeadlineExceeded,
+		}
+	})
+	defer restore()
+
+	_, err := downloadPaxdUpdate(context.Background(), secretURL, 4)
+
+	require.Error(t, err)
+	assert.Equal(t, "request download failed", err.Error())
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotContains(t, err.Error(), secretURL)
+	assert.NotContains(t, strings.ToLower(err.Error()), "x-amz-signature")
+	assert.NotContains(t, err.Error(), "top-secret")
 }
 
 func TestReplacePaxdExecutableRejectsInvalidPath(t *testing.T) {
@@ -476,6 +677,24 @@ func stubPaxdUpdateHTTPClient(fn func(*http.Request) (*http.Response, error)) fu
 	paxdUpdateHTTPClient = roundTripFunc(fn)
 	return func() {
 		paxdUpdateHTTPClient = previous
+	}
+}
+
+func stubPaxdUpdateHTTPDoer(client paxdUpdateHTTPDoer) func() {
+	previous := paxdUpdateHTTPClient
+	paxdUpdateHTTPClient = client
+	return func() {
+		paxdUpdateHTTPClient = previous
+	}
+}
+
+func stubPaxdUpdateRemoteResolver(
+	fn func(context.Context, string) (string, error),
+) func() {
+	previous := paxdUpdateResolverForRemote
+	paxdUpdateResolverForRemote = fn
+	return func() {
+		paxdUpdateResolverForRemote = previous
 	}
 }
 

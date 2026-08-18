@@ -10,6 +10,7 @@ func (s *Store) SaveArtifactPublishJob(
 		Model(&ArtifactPublishJob{}).
 		Where("publication_id = ?", job.PublicationID).
 		Updates(map[string]any{
+			"remote_id":         job.RemoteID,
 			"content_type":      job.ContentType,
 			"size_bytes":        job.SizeBytes,
 			"sha256":            job.SHA256,
