@@ -53,7 +53,7 @@ func TestPaxctlStatusPrintsDaemonStatus(t *testing.T) {
 func TestPaxctlRemotesListRestartAndDisconnectUseLocalAPI(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
-			Remote: control.Remote{ID: "default", Name: "Default", CloudAPIURL: "https://app.paxtech.net"},
+			Remote: control.Remote{ID: "default", Name: "Default", CloudAPIURL: "https://manager.example.test"},
 		}}}},
 		ack: control.CommandAck{OK: true, Status: control.CommandStatusReceived},
 	}
@@ -63,7 +63,7 @@ func TestPaxctlRemotesListRestartAndDisconnectUseLocalAPI(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	require.NoError(t, run(context.Background(), []string{"remotes", "list"}, &stdout, &stderr))
 	assert.Contains(t, stdout.String(), "default")
-	assert.Contains(t, stdout.String(), "https://app.paxtech.net")
+	assert.Contains(t, stdout.String(), "https://manager.example.test")
 
 	stdout.Reset()
 	require.NoError(t, run(context.Background(), []string{"remotes", "restart", "default"}, &stdout, &stderr))
@@ -124,7 +124,7 @@ func TestSelectRemoteDefaultsOnlyWhenExactlyOneRemote(t *testing.T) {
 func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
-			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://app.paxtech.net"},
+			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://manager.example.test"},
 			Auth: &control.RemoteAuthView{
 				Kind:            control.RemoteAuthCloudflareAccess,
 				ClientID:        "cf-client",
@@ -146,7 +146,7 @@ func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 	defer restoreNodeKey()
 	restoreRegister := stubPaxctlAgentRegistration(t, func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
 		assert.Equal(t, "prod", remote.Remote.ID)
-		assert.Equal(t, "https://app.paxtech.net", remote.Remote.CloudAPIURL)
+		assert.Equal(t, "https://manager.example.test", remote.Remote.CloudAPIURL)
 		require.NotNil(t, remote.Auth)
 		assert.Equal(t, control.RemoteAuthCloudflareAccess, remote.Auth.Kind)
 		assert.Equal(t, "cf-client", remote.Auth.ClientID)
@@ -204,7 +204,7 @@ func TestRegisterCloudAgentUsesRemoteCloudflareAccessAuth(t *testing.T) {
 func TestPaxctlAgentsCreateDiscoversHarnessCommandWhenCacheMissing(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
-			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://app.paxtech.net"},
+			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://manager.example.test"},
 		}}}},
 		harnesses: control.QueryResult{Harnesses: &control.ListHarnessesResult{}},
 		discovered: control.QueryResult{Harnesses: &control.ListHarnessesResult{Items: []control.HarnessView{{
@@ -238,7 +238,7 @@ func TestPaxctlAgentsCreateDiscoversHarnessCommandWhenCacheMissing(t *testing.T)
 func TestPaxctlAgentsCreateRejectsUnknownHarnessBeforeRegistering(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
-			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://app.paxtech.net"},
+			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://manager.example.test"},
 		}}}},
 		harnesses:  control.QueryResult{Harnesses: &control.ListHarnessesResult{}},
 		discovered: control.QueryResult{Harnesses: &control.ListHarnessesResult{}},
@@ -262,7 +262,7 @@ func TestPaxctlAgentsCreateRejectsUnknownHarnessBeforeRegistering(t *testing.T) 
 func TestPaxctlAgentsCreateDoesNotCreateLocalConnectionWhenCloudRegistrationFails(t *testing.T) {
 	client := &fakeControlClient{
 		remotes: control.QueryResult{Remotes: &control.ListRemotesResult{Items: []control.RemoteView{{
-			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://app.paxtech.net"},
+			Remote: control.Remote{ID: "prod", CloudAPIURL: "https://manager.example.test"},
 		}}}},
 		harnesses: control.QueryResult{Harnesses: &control.ListHarnessesResult{Items: []control.HarnessView{{
 			Harness: "codex",
@@ -395,7 +395,7 @@ func TestPaxctlRemotesLoginCommitsThroughLocalAPI(t *testing.T) {
 	defer restoreClient()
 	restoreLogin := stubPaxctlRemoteLogin(t, func(ctx context.Context, spec remotelogin.LoginSpec, opts remotelogin.Options) (remotelogin.LoginResult, error) {
 		assert.Equal(t, "staging", spec.RemoteID)
-		assert.Equal(t, "https://app.paxtech.net", spec.CloudAPIURL)
+		assert.Equal(t, "https://api.lakeward.net", spec.CloudAPIURL)
 		return remotelogin.LoginResult{
 			RemoteID:    spec.RemoteID,
 			CloudAPIURL: spec.CloudAPIURL,
@@ -453,7 +453,7 @@ func TestPaxctlRemotesLoginDoesNotCommitWhenLoginFails(t *testing.T) {
 	defer restoreLogin()
 
 	var stdout bytes.Buffer
-	err := remotesLogin(context.Background(), client, &stdout, "staging", "https://app.paxtech.net")
+	err := remotesLogin(context.Background(), client, &stdout, "staging", "https://manager.example.test")
 
 	require.Error(t, err)
 	assert.Empty(t, client.createdRemotes)
@@ -476,7 +476,7 @@ func TestPaxctlRemotesLoginSurfacesLocalAPICommitError(t *testing.T) {
 	defer restoreLogin()
 
 	var stdout bytes.Buffer
-	err := remotesLogin(context.Background(), client, &stdout, "staging", "https://app.paxtech.net")
+	err := remotesLogin(context.Background(), client, &stdout, "staging", "https://manager.example.test")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "paxd setup")

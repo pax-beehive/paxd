@@ -5,19 +5,18 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadDefaultsCloudAPIURL(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Cloud.APIURL != DefaultCloudAPIURL {
-		t.Fatalf("Cloud.APIURL = %q, want %q", cfg.Cloud.APIURL, DefaultCloudAPIURL)
-	}
-	if cfg.Cloud.URL != DefaultCloudAPIURL {
-		t.Fatalf("Cloud.URL = %q, want %q", cfg.Cloud.URL, DefaultCloudAPIURL)
-	}
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.lakeward.net", DefaultCloudAPIURL)
+	assert.Equal(t, DefaultCloudAPIURL, cfg.Cloud.APIURL)
+	assert.Equal(t, DefaultCloudAPIURL, cfg.Cloud.URL)
 }
 
 func TestLoadDetectsMachineNameAndPreservesOverride(t *testing.T) {

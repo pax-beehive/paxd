@@ -12,7 +12,7 @@ Use this skill when a user asks an agent to install Pax/paxd on the current mach
 Run the hosted installer:
 
 ```bash
-curl -fsSL --max-redirs 1 https://api.paxtech.net/api/v1/public/paxd/install.sh | bash
+curl -fsSL --max-redirs 1 https://api.lakeward.net/api/v1/public/paxd/install.sh | bash
 ```
 
 For a self-hosted manager, keep installer and binary resolution on the same
@@ -37,13 +37,13 @@ signed object URL reject every redirect.
 Pair the daemon with:
 
 ```bash
-paxd login --remote default --cloud-url https://api.paxtech.net
+paxd login --remote default --cloud-url https://api.lakeward.net
 ```
 
 Use one manager base URL consistently for installer, binary download, and paxd
-API calls. For hosted Pax that URL is `api.paxtech.net`. The verification URL
-printed by paxd is returned by pax-manager and may use a separate human-facing
-login host.
+API calls. For hosted Pax that URL is `api.lakeward.net`. The verification URL
+printed by paxd is returned by pax-manager and uses the human-facing
+`https://ws.lakeward.net` host for hosted Pax.
 
 ## Pairing
 
@@ -74,6 +74,6 @@ paxd run
 
 - If `curl` or `python3` is missing, install it with the system package manager and rerun the installer.
 - If the installer cannot write to the selected PATH directory, rerun with `PAX_INSTALL_DIR=$HOME/.local/bin` and ensure that directory is on PATH.
-- If pairing expires, rerun `paxd login --remote default --cloud-url https://api.paxtech.net`.
+- If pairing expires, rerun `paxd login --remote default --cloud-url https://api.lakeward.net`.
 - If the machine is behind a restricted network, verify it can reach the manager API, the browser pairing host, and the object-storage host returned by the download resolver.
 - The public installer and resolver routes must not redirect unattended clients to an interactive Cloudflare Access login. Use an Access bypass/service-auth policy for `/api/v1/public/*` or provide an equivalent machine-readable edge configuration.
