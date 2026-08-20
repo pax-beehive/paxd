@@ -13,7 +13,7 @@ object only after its size, content type, and checksums match.
 
 Defaults:
   tags: stable
-  manager URL: https://api.paxtech.net
+  manager URL: https://api.lakeward.net
   object prefix: paxd/releases/<version>/
   platforms: darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64
 
@@ -377,7 +377,7 @@ source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 manager_url = sys.argv[3]
 
-marker = 'PAX_DOWNLOAD_URL="${PAX_DOWNLOAD_URL:-https://api.paxtech.net}"'
+marker = 'PAX_DOWNLOAD_URL="${PAX_DOWNLOAD_URL:-https://api.lakeward.net}"'
 text = source.read_text(encoding="utf-8")
 if text.count(marker) != 1:
     raise SystemExit("paxd installer download URL marker is missing or ambiguous")
@@ -653,7 +653,7 @@ main() {
   }
 
   local tags="${PAX_RELEASE_TAGS:-${2:-stable}}"
-  local manager_url="${PAX_RELEASE_MANAGER_URL:-${PAX_MANAGER_URL:-https://api.paxtech.net}}"
+  local manager_url="${PAX_RELEASE_MANAGER_URL:-${PAX_MANAGER_URL:-https://api.lakeward.net}}"
   local bucket="${PAX_RELEASE_BUCKET:-}"
   local prefix_parent="${PAX_RELEASE_PREFIX:-paxd/releases}"
   local platforms="${PAX_RELEASE_PLATFORMS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64}"

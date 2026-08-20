@@ -59,6 +59,14 @@ func TestPaxdUpdateCheckReportsAvailableVersion(t *testing.T) {
 	assert.NotContains(t, stdout.String(), "https://download.test/paxd")
 }
 
+func TestDefaultPaxdUpdateResolverUsesLakewardHostedManager(t *testing.T) {
+	assert.Equal(
+		t,
+		"https://api.lakeward.net/api/v1/public/paxd/download",
+		defaultPaxdUpdateResolverURL,
+	)
+}
+
 func TestPaxdUpdateCheckUsesSelectedLocalRemoteWhenResolverIsNotOverridden(t *testing.T) {
 	restoreResolver := stubPaxdUpdateRemoteResolver(
 		func(_ context.Context, remoteID string) (string, error) {

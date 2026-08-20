@@ -29,7 +29,7 @@ func TestBootstrapDoesNotWriteBusinessRowsFromConfig(t *testing.T) {
 	store := openTestStore(t)
 	transportDBPath := filepath.Join(home, ".paxd", "transport.db")
 	cfg := config.DefaultConfig()
-	cfg.Cloud.APIURL = "https://app.paxtech.net"
+	cfg.Cloud.APIURL = "https://manager.example.test"
 	cfg.Cloud.APIKey = "pax_key"
 	cfg.Agents = []config.RuntimeAgentConfig{{
 		AgentID:    "agent_codex",

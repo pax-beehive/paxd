@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PAX_DOWNLOAD_URL="${PAX_DOWNLOAD_URL:-https://api.paxtech.net}"
+PAX_DOWNLOAD_URL="${PAX_DOWNLOAD_URL:-https://api.lakeward.net}"
 PAX_CLOUD_URL="${PAX_CLOUD_URL:-}"
 PAX_TAG="${PAX_TAG:-stable}"
 PAX_BINARY_NAME="${PAX_BINARY_NAME:-}"

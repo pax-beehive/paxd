@@ -23,7 +23,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-const defaultPaxdUpdateResolverURL = "https://api.paxtech.net/api/v1/public/paxd/download"
+const defaultPaxdUpdateResolverURL = "https://api.lakeward.net/api/v1/public/paxd/download"
 const defaultPaxdUpdateTag = "stable"
 
 const (
