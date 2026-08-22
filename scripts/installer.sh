@@ -115,21 +115,62 @@ choose_install_dir() {
     return
   fi
 
-  if path_has_dir /usr/local/bin; then
-    printf '%s' /usr/local/bin
+  printf '%s' "$HOME/.local/bin"
+}
+
+print_path_hint() {
+  local install_dir="$1"
+  local target="$2"
+  local shell_name="${SHELL##*/}"
+  local path_command quoted_dir profile
+
+  if path_has_dir "$install_dir"; then
     return
   fi
 
-  local dir
-  IFS=':' read -r -a path_dirs <<< "${PATH:-}"
-  for dir in "${path_dirs[@]}"; do
-    if [[ -n "$dir" && -d "$dir" && -w "$dir" ]]; then
-      printf '%s' "$dir"
-      return
-    fi
-  done
+  warn "installation succeeded, but $install_dir is not currently in PATH"
 
-  printf '%s' "$HOME/.local/bin"
+  if [[ "$install_dir" == "$HOME/.local/bin" ]]; then
+    case "$shell_name" in
+      fish)
+        printf '%s\n' \
+          'Copy and run this command in fish:' \
+          '  fish_add_path "$HOME/.local/bin"' >&2
+        ;;
+      zsh)
+        path_command='export PATH="$HOME/.local/bin:$PATH"'
+        profile='$HOME/.zshrc'
+        ;;
+      bash)
+        path_command='export PATH="$HOME/.local/bin:$PATH"'
+        profile='$HOME/.bashrc'
+        ;;
+      *)
+        path_command='export PATH="$HOME/.local/bin:$PATH"'
+        profile='$HOME/.profile'
+        ;;
+    esac
+  elif [[ "$shell_name" == "fish" ]]; then
+    printf -v quoted_dir '%q' "$install_dir"
+    printf 'Copy and run this command in fish:\n  fish_add_path -- %s\n' \
+      "$quoted_dir" >&2
+  else
+    printf -v quoted_dir '%q' "$install_dir"
+    path_command="export PATH=${quoted_dir}:\$PATH"
+    case "$shell_name" in
+      zsh) profile='$HOME/.zshrc' ;;
+      bash) profile='$HOME/.bashrc' ;;
+      *) profile='$HOME/.profile' ;;
+    esac
+  fi
+
+  if [[ -n "${path_command:-}" ]]; then
+    printf 'Copy and run these commands in %s:\n' "${shell_name:-your shell}" >&2
+    printf '  %s\n' "$path_command" >&2
+    printf '  printf '\''%%s\\n'\'' %q >> "%s"\n' "$path_command" "$profile" >&2
+  fi
+
+  printf 'Until then, run paxd directly:\n  %q\n' "$target" >&2
 }
 
 download_with_progress() {
@@ -241,10 +282,7 @@ main() {
   download_and_install_product "paxd" "$binary_name" "$encoded_platform" "$install_dir"
   target="$installed_target"
 
-  if ! path_has_dir "$install_dir"; then
-    warn "$install_dir is not currently in PATH"
-    warn "add it to your shell profile, or run paxd via: $target"
-  fi
+  print_path_hint "$install_dir" "$target"
 
   log "Installed: $("${target}" --version)"
 

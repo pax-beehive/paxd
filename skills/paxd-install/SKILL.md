@@ -28,7 +28,8 @@ paxd login --remote default --cloud-url "$PAX_MANAGER_URL"
 
 The installer detects the local platform, downloads the newest `stable` paxd
 binary through pax-manager's resolver, verifies sha256, and installs it into
-PATH.
+`~/.local/bin` by default. If that directory is not on `PATH`, installation
+still succeeds and the installer prints a command for the current shell.
 
 The entry curl follows at most the manager's single installer redirect. Inside
 the downloaded installer, both the manager resolver request and the returned
@@ -73,7 +74,7 @@ paxd run
 ## Troubleshooting
 
 - If `curl` or `python3` is missing, install it with the system package manager and rerun the installer.
-- If the installer cannot write to the selected PATH directory, rerun with `PAX_INSTALL_DIR=$HOME/.local/bin` and ensure that directory is on PATH.
+- If `~/.local/bin` is not on `PATH`, run the shell-specific command printed by the installer before invoking `paxd` by name.
 - If pairing expires, rerun `paxd login --remote default --cloud-url https://api.lakeward.net`.
 - If the machine is behind a restricted network, verify it can reach the manager API, the browser pairing host, and the object-storage host returned by the download resolver.
 - The public installer and resolver routes must not redirect unattended clients to an interactive Cloudflare Access login. Use an Access bypass/service-auth policy for `/api/v1/public/*` or provide an equivalent machine-readable edge configuration.

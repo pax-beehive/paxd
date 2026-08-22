@@ -69,3 +69,113 @@ if grep -q "$signed_secret" "$download_error"; then
   fail_test "binary transport error leaked a signed URL"
 fi
 printf 'ok - binary transport errors redact signed URLs\n'
+
+default_home="${test_dir}/home"
+default_install_dir="${default_home}/.local/bin"
+actual_install_dir="$(
+  HOME="$default_home" \
+    PAX_INSTALL_DIR="" \
+    PATH="/usr/local/bin:/usr/bin" \
+    choose_install_dir
+)"
+[[ "$actual_install_dir" == "$default_install_dir" ]] ||
+  fail_test "default install directory was not HOME/.local/bin"
+printf 'ok - default install directory is HOME/.local/bin\n'
+
+custom_install_dir="${test_dir}/custom bin"
+actual_install_dir="$(
+  HOME="$default_home" \
+    PAX_INSTALL_DIR="$custom_install_dir" \
+    PATH="/usr/local/bin:/usr/bin" \
+    choose_install_dir
+)"
+[[ "$actual_install_dir" == "$custom_install_dir" ]] ||
+  fail_test "PAX_INSTALL_DIR did not override the default"
+printf 'ok - explicit install directory overrides the default\n'
+
+zsh_hint=""
+if ! zsh_hint="$(
+  HOME="$default_home" \
+    SHELL="/bin/zsh" \
+    PATH="/usr/bin" \
+    print_path_hint "$default_install_dir" "$default_install_dir/paxd" 2>&1
+)"; then
+  fail_test "missing PATH guidance caused installer failure"
+fi
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' <<<"$zsh_hint" ||
+  fail_test "zsh PATH guidance was not copyable"
+grep -Fq '"$HOME/.zshrc"' <<<"$zsh_hint" ||
+  fail_test "zsh PATH guidance did not name .zshrc"
+printf 'ok - zsh receives copyable PATH guidance\n'
+
+bash_hint="$(
+  HOME="$default_home" \
+    SHELL="/bin/bash" \
+    PATH="/usr/bin" \
+    print_path_hint "$default_install_dir" "$default_install_dir/paxd" 2>&1
+)" || fail_test "bash PATH guidance caused installer failure"
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' <<<"$bash_hint" ||
+  fail_test "bash PATH guidance was not copyable"
+grep -Fq '"$HOME/.bashrc"' <<<"$bash_hint" ||
+  fail_test "bash PATH guidance did not name .bashrc"
+printf 'ok - bash receives copyable PATH guidance\n'
+
+fish_hint="$(
+  HOME="$default_home" \
+    SHELL="/usr/bin/fish" \
+    PATH="/usr/bin" \
+    print_path_hint "$default_install_dir" "$default_install_dir/paxd" 2>&1
+)" || fail_test "fish PATH guidance caused installer failure"
+grep -Fq 'fish_add_path "$HOME/.local/bin"' <<<"$fish_hint" ||
+  fail_test "fish PATH guidance was not shell-appropriate"
+printf 'ok - fish receives copyable PATH guidance\n'
+
+generic_hint="$(
+  unset SHELL
+  HOME="$default_home" \
+    PATH="/usr/bin" \
+    print_path_hint "$default_install_dir" "$default_install_dir/paxd" 2>&1
+)" || fail_test "PATH guidance required SHELL to be set"
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' <<<"$generic_hint" ||
+  fail_test "generic PATH guidance was not copyable"
+grep -Fq '"$HOME/.profile"' <<<"$generic_hint" ||
+  fail_test "generic PATH guidance did not name .profile"
+printf 'ok - unset SHELL receives portable PATH guidance\n'
+
+path_hint="$(
+  HOME="$default_home" \
+    SHELL="/bin/zsh" \
+    PATH="${default_install_dir}:/usr/bin" \
+    print_path_hint "$default_install_dir" "$default_install_dir/paxd" 2>&1
+)" || fail_test "PATH check failed when install directory was present"
+[[ -z "$path_hint" ]] || fail_test "PATH guidance was printed for a directory already in PATH"
+printf 'ok - no PATH guidance is printed when install directory is already present\n'
+
+print_banner() { :; }
+require_cmd() { :; }
+detect_platform() { printf 'linux/amd64'; }
+urlencode() { printf 'linux%%2Famd64'; }
+download_and_install_product() {
+  local binary_name="$2"
+  local install_dir="$4"
+
+  installed_target="${install_dir}/${binary_name}"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'paxd test'" >"$installed_target"
+  chmod 0755 "$installed_target"
+}
+
+main_output="$(
+  HOME="$default_home" \
+    SHELL="/bin/zsh" \
+    PATH="/usr/bin:/bin" \
+    PAX_INSTALL_DIR="" \
+    PAX_SETUP_AFTER_INSTALL="0" \
+    main 2>&1
+)" || fail_test "installer failed when HOME/.local/bin was absent from PATH"
+[[ -x "$default_install_dir/paxd" ]] ||
+  fail_test "installer did not write paxd to HOME/.local/bin"
+grep -Fq 'installation succeeded' <<<"$main_output" ||
+  fail_test "successful install without PATH did not explain its status"
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' <<<"$main_output" ||
+  fail_test "successful install without PATH did not print guidance"
+printf 'ok - installation succeeds outside PATH and prints guidance\n'

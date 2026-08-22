@@ -38,6 +38,10 @@ paxl setup --with-daemon --cloud-url "$PAX_MANAGER_URL"
 https://api.lakeward.net/api/v1/public/paxd/install.sh
 ```
 
+installer 默认把 `paxd` 安装到 `~/.local/bin`。如果该目录不在 `PATH` 中，安装仍会
+成功，并按当前 shell 打印可直接复制执行的配置命令。可通过 `PAX_INSTALL_DIR`
+覆盖安装目录。
+
 自托管环境直接安装 daemon 时，对应命令是：
 
 ```bash
