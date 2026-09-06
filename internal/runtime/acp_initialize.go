@@ -43,8 +43,14 @@ type acpInitCapture struct {
 
 func buildACPClientInitProfile(paxdVersion string) (acpClientInitProfile, error) {
 	params, err := canonicalJSON(map[string]any{
-		"protocolVersion":    1,
-		"clientCapabilities": map[string]any{},
+		"protocolVersion": 1,
+		"clientCapabilities": map[string]any{
+			"session": map[string]any{
+				"configOptions": map[string]any{
+					"boolean": map[string]any{},
+				},
+			},
+		},
 		"clientInfo": map[string]any{
 			"name":    "paxd",
 			"version": StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),
