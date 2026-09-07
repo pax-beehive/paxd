@@ -389,6 +389,10 @@ func (s *AgentTunnelSession) runWithACPPool(
 	var bridge *e2eeTransportBridge
 	engine := s.deps.ReliableEngineFactory.NewReliableEngine(producer, reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
 		if handled, err := bridge.handleCommand(ctx, frame, func(ctx context.Context, managerSessionID string, payload []byte) (string, error) {
+			payload, err := injectLocalMCP(payload, s.spec.CloudAgentID, managerSessionID)
+			if err != nil {
+				return "", err
+			}
 			nativeSessionID, rewritten, err := boundary.inbound(ctx, managerSessionID, "", payload)
 			if err != nil {
 				return "", err
@@ -397,11 +401,15 @@ func (s *AgentTunnelSession) runWithACPPool(
 		}); handled || err != nil {
 			return err
 		}
+		payload, err := injectLocalMCP(frame.Payload, s.spec.CloudAgentID, frame.Metadata["manager_session_id"])
+		if err != nil {
+			return err
+		}
 		nativeSessionID, rewritten, err := boundary.inbound(
 			ctx,
 			frame.Metadata["manager_session_id"],
 			frame.Metadata["native_session_id"],
-			frame.Payload,
+			payload,
 		)
 		if err != nil {
 			return err

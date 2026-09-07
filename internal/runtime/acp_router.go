@@ -349,13 +349,14 @@ func (r *ACPRouter) handleExplicitSessionResume(
 		return err
 	}
 	defer r.releaseSlotReservation(slot.SlotID())
-	if err := r.resumeColdRoute(ctx, slot, route); err != nil {
+	resumeResult, err := r.resumeColdRoute(ctx, slot, route)
+	if err != nil {
 		return err
 	}
 	response, err := json.Marshal(acpRPCMessage{
 		JSONRPC: "2.0",
 		ID:      append(json.RawMessage(nil), msg.ID...),
-		Result:  json.RawMessage(`{}`),
+		Result:  resumeResult,
 	})
 	if err != nil {
 		return err
@@ -461,7 +462,11 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 			return err
 		}
 		reserved = true
-		if err := r.resumeColdRoute(ctx, slot, route); err != nil {
+		resumeResult, err := r.resumeColdRoute(ctx, slot, route)
+		if err == nil {
+			err = r.emitResumedSessionConfig(ctx, nativeSessionID, resumeResult)
+		}
+		if err != nil {
 			r.releaseSlotReservation(slot.SlotID())
 			return err
 		}
@@ -572,14 +577,14 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 	return sessionID, nil
 }
 
-func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, route ACPRoute) error {
+func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, route ACPRoute) (json.RawMessage, error) {
 	resumeDescriptor, err := r.localizeSessionLifecycleParams(route.ResumeParams)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resumeParams, err := resumeParamsForSession(route.NativeSessionID, resumeDescriptor)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	log.Printf(
 		"[paxd] acp route resume starting connection_id=%s native_session_id=%s last_slot_id=%s target_slot_id=%s target_process_epoch=%s",
@@ -597,24 +602,28 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		Params:  resumeParams,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	waiter := r.registerInternalWaiter(slot.SlotID(), slot.ProcessEpoch(), json.RawMessage(fmt.Sprintf("%q", id)))
 	if err := slot.Send(ctx, request); err != nil {
 		r.dropInternalWaiter(slot.SlotID(), slot.ProcessEpoch(), json.RawMessage(fmt.Sprintf("%q", id)))
-		return err
+		return nil, err
 	}
+	resumeResult := json.RawMessage(`{}`)
 	select {
 	case result := <-waiter:
 		if result.err != nil {
-			return result.err
+			return nil, result.err
 		}
 		if result.msg.Error != nil {
-			return ACPRouterError{Code: "session_resume_failed", Message: result.msg.Error.Message}
+			return nil, ACPRouterError{Code: "session_resume_failed", Message: result.msg.Error.Message}
+		}
+		if len(result.msg.Result) > 0 {
+			resumeResult = append(json.RawMessage(nil), result.msg.Result...)
 		}
 	case <-ctx.Done():
 		r.dropInternalWaiter(slot.SlotID(), slot.ProcessEpoch(), json.RawMessage(fmt.Sprintf("%q", id)))
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 	_, bound, err := r.store.BindACPSessionRoute(ctx, ACPRouteBindingUpdate{
 		ConnectionID:    route.ConnectionID,
@@ -625,10 +634,10 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		ResumeParams:    resumeDescriptor,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !bound {
-		return ACPRouterError{Code: "session_route_conflict", Message: "resume route bind conflicted"}
+		return nil, ACPRouterError{Code: "session_route_conflict", Message: "resume route bind conflicted"}
 	}
 	log.Printf(
 		"[paxd] acp route resume complete connection_id=%s native_session_id=%s slot_id=%s process_epoch=%s",
@@ -637,7 +646,7 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		slot.SlotID(),
 		slot.ProcessEpoch(),
 	)
-	return nil
+	return resumeResult, nil
 }
 
 func (r *ACPRouter) localizeSessionLifecycleMessage(msg acpRPCMessage) (acpRPCMessage, []byte, error) {
