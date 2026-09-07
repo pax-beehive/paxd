@@ -652,14 +652,15 @@ func TestACPRouterExplicitResumeCreatesMissingRouteBeforeReply(t *testing.T) {
 	require.NoError(t, json.Unmarshal(request, &internalResume))
 	assert.Equal(t, "session/resume", internalResume.Method)
 	assert.NotEqual(t, `"resume-7"`, string(internalResume.ID))
-	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":`+string(internalResume.ID)+`,"result":{}}`)))
+	resumeResult := `{"configOptions":[{"id":"model","name":"Model","currentValue":"resumed-model","options":[]}],"models":{"currentModelId":"resumed-model","availableModels":[]},"modes":{"currentModeId":"default"},"_meta":{"extension":true}}`
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":`+string(internalResume.ID)+`,"result":`+resumeResult+`}`)))
 	require.NoError(t, <-done)
 
 	response := <-managerFrames
 	var responseMessage acpRPCMessage
 	require.NoError(t, json.Unmarshal(response, &responseMessage))
 	assert.Equal(t, `"resume-7"`, string(responseMessage.ID))
-	assert.JSONEq(t, `{}`, string(responseMessage.Result))
+	assert.JSONEq(t, resumeResult, string(responseMessage.Result))
 	route, ok, err := store.GetACPSessionRoute(ctx, "conn_1", "session_legacy")
 	require.NoError(t, err)
 	require.True(t, ok)
