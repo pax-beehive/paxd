@@ -120,6 +120,14 @@ func Default() Registry {
 			Source:      "native",
 			InstallHint: "install Kimi Code CLI and run kimi login",
 		},
+		{
+			Name:            "dsh",
+			Kind:            "acp",
+			Command:         []string{"dsh", "--profile", "acp"},
+			InstallCommands: [][]string{{"npm", "install", "-g", "@deepseek-ai/dsh@latest"}},
+			Source:          "native",
+			InstallHint:     "requires Node 22.19+ on 22.x or Node 24+; configure DEEPSEEK_API_KEY in the paxd service environment, then run paxl daemon harness discover dsh",
+		},
 	}}
 }
 

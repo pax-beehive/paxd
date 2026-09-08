@@ -333,10 +333,15 @@ ACP harness 预设：
 | `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp` |
 | `gemini` | `gemini --acp` |
 | `kimi` | `kimi acp`（需先在本机 `kimi login`） |
+| `dsh` | `dsh --profile acp`（DeepSeek Harness，需先安装并配置 `DEEPSEEK_API_KEY`） |
 | `pi` | `pi-acp`，若未安装则 `npx -y pi-acp` |
 | `custom` | 必须显式配置 `command` |
 
 `agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
+
+DeepSeek Harness 完整接入步骤见 [DSH 安装、发现与创建](docs/dsh_integration.md)。
+支持 `paxl daemon harness install dsh [--dry-run]`、`paxl daemon harness discover dsh`
+和 `paxl daemon agent create --harness dsh --name deepseek`；发现阶段不会自动下载安装。
 
 ## 配置
 

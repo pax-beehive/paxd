@@ -13,6 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultScannerNormalizesDSHSessionIdentity(t *testing.T) {
+	command := fakeACPCommand(t, `[{"sessionId":"native-dsh-id","cwd":"/work"}]`)
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(t.Context(), SessionScannerSpec{
+		Harness: "dsh", Command: command,
+	})
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "dsh:native-dsh-id", sessions[0].SessionID)
+	assert.Equal(t, "native-dsh-id", sessions[0].NativeID)
+	assert.Equal(t, "dsh", sessions[0].AgentType)
+	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
+}
+
 func TestDefaultScannerUsesPaxlBinaryWhenAvailable(t *testing.T) {
 	command := fakePaxlCommand(t)
 

@@ -3,6 +3,7 @@ package harnessregistry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/pax-beehive/paxd/internal/control"
@@ -133,11 +134,44 @@ func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
 		names = append(names, detector.Name())
 	}
 
-	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi"}, names)
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi", "dsh"}, names)
+	assertDefaultDetectorCommand(t, detectors, "dsh", []string{"dsh", "--profile", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "kimi", []string{"kimi", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "opencode", []string{"opencode", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "openclaw", []string{"openclaw", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "pi", []string{"pi-acp"}, []string{"npx", "-y", "pi-acp"})
+}
+
+func TestDSHDiscoveryRequiresInstalledCLIAndCachesResult(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		t.Run(fmt.Sprint(installed), func(t *testing.T) {
+			var detector CommandDetector
+			for _, candidate := range DefaultDetectors() {
+				if candidate.Name() == "dsh" {
+					detector = candidate.(CommandDetector)
+				}
+			}
+			require.Equal(t, "dsh", detector.Harness)
+			paths := map[string]string{"npx": "/bin/npx"}
+			if installed {
+				paths["dsh"] = "/bin/dsh"
+			}
+			detector.Lookup = fakeLookup{paths: paths}
+			store := &fakeStore{}
+			views, err := New(store, detector).Discover(t.Context(), control.DiscoverHarnessesQuery{Names: []string{"dsh"}})
+			require.NoError(t, err)
+			require.Len(t, views, 1)
+			assert.Equal(t, []string{"dsh", "--profile", "acp"}, views[0].Command)
+			assert.Equal(t, "DeepSeek Harness", views[0].DisplayName)
+			assert.Contains(t, views[0].InstallHint, "DEEPSEEK_API_KEY")
+			if installed {
+				assert.Equal(t, StateAvailable, views[0].State)
+			} else {
+				assert.Equal(t, StateMissing, views[0].State)
+			}
+			assert.Equal(t, views, store.upserted)
+		})
+	}
 }
 
 func assertDefaultDetectorCommand(t *testing.T, detectors []Detector, name string, command []string, fallback []string) {
