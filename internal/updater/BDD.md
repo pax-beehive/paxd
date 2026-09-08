@@ -15,6 +15,22 @@ Then it resolves the release from that remote's `cloud_api_url` at
 
 And it does not contact the legacy hosted Pax resolver.
 
+### Scenario: hosted tunnel is protected by Cloudflare Access
+
+Given the remote uses `https://wsapi.lakeward.net` and no resolver override
+
+When paxd derives its upgrade resolver
+
+Then it uses `https://api.lakeward.net/api/v1/public/paxd/download`
+
+And it does not change the remote's tunnel URL or follow Access login redirects.
+
+Custom origins, ports, and path prefixes retain their existing resolver behavior.
+The same hosted-origin selection applies to `paxl daemon install/update`.
+
+An already-running older daemon needs a one-time CLI update and service restart
+to load this fix; publishing the fixed binary alone cannot repair its resolver.
+
 ### Scenario: operator configures a resolver override
 
 Given `PAXD_UPDATE_RESOLVER_URL` is set

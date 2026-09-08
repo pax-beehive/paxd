@@ -322,6 +322,12 @@ func ResolverURLFromCloudAPIURL(rawURL string) (string, error) {
 	if (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
 		return "", fmt.Errorf("cloud API URL must be an absolute HTTP(S) URL")
 	}
+	// The hosted tunnel is Access-protected; anonymous artifacts use the public origin.
+	// Only map the known root origin, leaving self-hosted paths and ports intact.
+	if base.Scheme == "https" && strings.EqualFold(base.Host, "wsapi.lakeward.net") &&
+		strings.TrimRight(base.Path, "/") == "" && base.User == nil {
+		base.Host = "api.lakeward.net"
+	}
 	base.Path = strings.TrimRight(base.Path, "/") + resolverPath
 	base.RawPath = ""
 	base.RawQuery = ""
