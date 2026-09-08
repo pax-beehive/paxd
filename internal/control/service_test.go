@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -363,6 +364,40 @@ func TestServiceCreatesAgentConnectionAndWakes(t *testing.T) {
 	}
 	if len(conns) != 1 || conns[0].CloudAgentID != "" {
 		t.Fatalf("connections = %+v", conns)
+	}
+}
+
+func TestServicePersistsDSHConnectionAndWakesRuntime(t *testing.T) {
+	ctx := t.Context()
+	store := openControlTestStore(t)
+	_, err := store.CreateRemote(ctx, *createRemoteCommand("seed_dsh", "remote_prod", "https://api.example.test").CreateRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakes := &fakeSupervisors{}
+	service := control.NewService(control.ServiceOptions{Store: store, Supervisors: wakes})
+	cmd := createAgentConnectionCommand("cmd_dsh", "remote_prod", "conn_dsh")
+	cmd.CreateAgentConnection.Harness = "dsh"
+	cmd.CreateAgentConnection.AgentType = "dsh"
+	cmd.CreateAgentConnection.CloudAgentID = "agent_dsh"
+	cmd.CreateAgentConnection.Command = []string{"dsh", "--profile", "acp"}
+	ack, err := service.HandleCommand(ctx, control.Source{Kind: control.SourceLocal}, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.OK || wakes.agent != 1 {
+		t.Fatalf("ack=%+v wakes=%+v", ack, wakes)
+	}
+	conns, err := store.ListAgentConnections(ctx, control.ListAgentConnectionsQuery{IncludeDisabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conns) != 1 {
+		t.Fatalf("connections=%+v", conns)
+	}
+	conn := conns[0]
+	if conn.Harness != "dsh" || conn.AgentType != "dsh" || conn.CloudAgentID != "agent_dsh" || strings.Join(conn.Command, " ") != "dsh --profile acp" {
+		t.Fatalf("DSH connection not preserved: %+v", conn)
 	}
 }
 

@@ -54,6 +54,16 @@ func (s DefaultScanner) ListSessions(
 			Timeout:    timeout,
 		}.List(ctx)
 		if err == nil {
+			if strings.EqualFold(firstNonEmpty(spec.Harness, spec.AgentType), "dsh") {
+				for i := range sessions {
+					sessions[i].AgentType = "dsh"
+					if sessions[i].NativeID == "" {
+						sessions[i].NativeID = strings.TrimPrefix(sessions[i].SessionID, "dsh:")
+					}
+					sessions[i].SessionID = agentregistry.CanonicalSessionID("dsh", sessions[i].NativeID)
+				}
+				return limitSessions(sessions, spec.Limit), nil
+			}
 			if isHermesSpec(spec) {
 				return mergeHermesLocalSessions(ctx, spec, sessions)
 			}

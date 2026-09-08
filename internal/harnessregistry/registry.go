@@ -136,6 +136,13 @@ func (d CommandDetector) Detect(ctx context.Context, req control.DiscoverHarness
 func DefaultDetectors() []Detector {
 	return []Detector{
 		CommandDetector{
+			Harness:     "dsh",
+			DisplayName: "DeepSeek Harness",
+			Command:     []string{"dsh", "--profile", "acp"},
+			Source:      "native",
+			InstallHint: "run paxl daemon harness install dsh (Node 22.19+ on 22.x or Node 24+); configure DEEPSEEK_API_KEY in the paxd service environment",
+		},
+		CommandDetector{
 			Harness:     "hermes",
 			DisplayName: "Hermes",
 			Command:     []string{"hermes", "acp"},

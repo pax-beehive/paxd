@@ -3,9 +3,30 @@ package agentregistry
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestRegistryIncludesDSH(t *testing.T) {
+	agents, err := Default().Agents([]string{"dsh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("agents = %v", agents)
+	}
+	a := agents[0]
+	if a.Kind != "acp" || !reflect.DeepEqual(a.Command, []string{"dsh", "--profile", "acp"}) {
+		t.Fatalf("unexpected DSH entry: %+v", a)
+	}
+	if !reflect.DeepEqual(a.InstallCommands, [][]string{{"npm", "install", "-g", "@deepseek-ai/dsh@latest"}}) {
+		t.Fatalf("install commands = %v", a.InstallCommands)
+	}
+	if len(a.FallbackCommand) != 0 {
+		t.Fatal("DSH must not auto-install during discovery or sync")
+	}
+}
 
 func TestCanonicalSessionID(t *testing.T) {
 	if got := CanonicalSessionID("codex", "abc"); got != "codex:abc" {
