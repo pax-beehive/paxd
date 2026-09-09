@@ -26,6 +26,32 @@ func TestDefaultScannerNormalizesDSHSessionIdentity(t *testing.T) {
 	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
 }
 
+func TestDefaultScannerReadsDSHTitleAndHistoryUsingConnectionHome(t *testing.T) {
+	root := t.TempDir()
+	command := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+test "$DSH_HOME" = "$PWD" || exit 9
+test "$PAXL_DSH_SESSIONS_DIR" = "$PWD/sessions" || exit 10
+if [ "$2" = "list" ]; then
+  printf '{"id":"dsh:local","agent":"dsh","nativeId":"local","title":"DSH durable title","workspaceRoots":["/work"]}\n'
+else
+  printf '{"sessionId":"dsh:local","seq":1,"type":"message","role":"assistant","contentText":"DSH history"}\n'
+fi
+`
+	require.NoError(t, os.WriteFile(command, []byte(script), 0o755))
+	sessions, err := (DefaultScanner{PaxlCommand: []string{command}}).ListSessions(t.Context(), SessionScannerSpec{
+		Harness: "dsh", WorkingDir: root,
+		Env: map[string]string{"DSH_HOME": root, "PAXL_DSH_SESSIONS_DIR": filepath.Join(root, "sessions")},
+	})
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "DSH durable title", sessions[0].Name)
+	assert.Equal(t, "dsh:local", sessions[0].SessionID)
+	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
+	require.Len(t, sessions[0].Messages, 1)
+	assert.Equal(t, "DSH history", sessions[0].Messages[0].Text)
+}
+
 func TestDefaultScannerUsesPaxlBinaryWhenAvailable(t *testing.T) {
 	command := fakePaxlCommand(t)
 

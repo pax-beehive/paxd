@@ -131,6 +131,16 @@ func (s DefaultScanner) listPaxlSessions(
 	}
 	client := paxlclient.Client{Command: command}
 	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if agent == "dsh" {
+		client.WorkingDir = spec.WorkingDir
+		client.Env = map[string]string{}
+		// Forward only storage location overrides, never model credentials.
+		for _, key := range []string{"DSH_HOME", "PAXL_DSH_SESSIONS_DIR"} {
+			if value, ok := spec.Env[key]; ok {
+				client.Env[key] = value
+			}
+		}
+	}
 	sessions, err := client.ListSessions(ctx, agent, spec.Limit)
 	if err != nil {
 		return nil, err

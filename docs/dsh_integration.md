@@ -40,6 +40,13 @@ Its list contains inactive resumable sessions, not complete live session invento
 The scanner reports canonical `dsh:<native-id>` identities while retaining the
 native ID for routing. DSH does not replay historical transcript over ACP.
 
+With a paxl version containing the local DSH adapter, the scanner first reads
+durable titles, settled messages and workspace roots through paxl. It forwards
+the connection's `DSH_HOME` and `PAXL_DSH_SESSIONS_DIR` overrides and working
+directory, without forwarding other connection-specific credential variables.
+This path does not start DSH or load its credential file. Update paxl on the
+daemon host as well as paxd; ACP fallback alone lacks titles and history.
+
 Both new and resumed sessions accept stdio and Streamable HTTP `mcpServers`.
 The existing post-decryption local MCP template injection remains unchanged:
 `${PAX_AGENT_ID}`, `${PAX_SESSION_ID}` and `${PAX_SESSION_KEY}` are resolved
