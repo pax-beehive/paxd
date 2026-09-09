@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -25,11 +26,19 @@ import (
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
+	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
 	"github.com/pax-beehive/paxd/internal/updater"
 )
 
 const DefaultControlSocket = "~/.paxd/paxd.sock"
+
+// secretChannelTransientDir mirrors internal/remotesecrets' "~/.paxd/secrets/..."
+// convention. Files here are single-use hand-offs (see internal/secretchannel);
+// nothing under this directory is meant to survive past a consumer reading it,
+// or past secretChannelFileTTL if nothing reads it at all.
+const secretChannelTransientDir = "~/.paxd/secrets/transient"
+const secretChannelFileTTL = 10 * time.Minute
 
 const envPaxdUpdateResolverURL = "PAXD_UPDATE_RESOLVER_URL"
 
@@ -46,6 +55,8 @@ type Runtime struct {
 	hostMetrics      interface{ Start(context.Context) }
 	sessionReports   interface{ Start(context.Context) }
 	artifactJobs     interface{ Start(context.Context) }
+	secretChannel    *secretchannel.Registry
+	secretDrop       secretchannel.FileDrop
 	lifecycleMu      sync.Mutex
 	lifecycleCancel  context.CancelFunc
 	lifecycleStarted bool
@@ -122,6 +133,14 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate daemon boot id: %w", err)
 	}
+	secretDrop := secretchannel.FileDrop{Dir: expandHome(secretChannelTransientDir), TTL: secretChannelFileTTL}
+	if _, cleanupErr := secretDrop.CleanupStartup(); cleanupErr != nil {
+		log.Printf("[paxd] secret channel: failed to clean up transient dir on startup: %v", cleanupErr)
+	}
+	secretChannelRegistry := secretchannel.NewRegistry(secretchannel.Options{
+		NodeID: bootID,
+		Writer: secretDrop.Write,
+	})
 	e2eeRootKey, err := loadE2EERootKeyFromEnvironment()
 	if err != nil {
 		return nil, err
@@ -183,6 +202,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		SessionRuntime:      supervisors,
 		SessionRuntimeReset: supervisors,
 		PaxdLifecycle:       maintenance,
+		SecretChannel:       secretChannelRegistry,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
@@ -214,6 +234,8 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		hostMetrics:    metricsStarter,
 		sessionReports: reports,
 		artifactJobs:   artifactJobs,
+		secretChannel:  secretChannelRegistry,
+		secretDrop:     secretDrop,
 		maintenance:    maintenance,
 	}, nil
 }

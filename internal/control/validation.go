@@ -80,6 +80,7 @@ func (cmd Command) Validate() error {
 		{CommandCancelPaxdMaintenance, cmd.CancelPaxdMaintenance != nil, validatePtr(cmd.CancelPaxdMaintenance)},
 		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
 		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
+		{CommandSecretChannelPush, cmd.PushSecretChannel != nil, validatePtr(cmd.PushSecretChannel)},
 	}
 
 	count := 0
@@ -355,6 +356,22 @@ func (cmd ResetSessionRuntimeCommand) Validate() error {
 	return nil
 }
 
+func (cmd PushSecretChannelCommand) Validate() error {
+	if strings.TrimSpace(cmd.ChannelID) == "" {
+		return invalid("push_secret_channel.channel_id", "channel id is required")
+	}
+	if strings.TrimSpace(cmd.SenderPublicKey) == "" {
+		return invalid("push_secret_channel.sender_public_key", "sender public key is required")
+	}
+	if strings.TrimSpace(cmd.Nonce) == "" {
+		return invalid("push_secret_channel.nonce", "nonce is required")
+	}
+	if strings.TrimSpace(cmd.Ciphertext) == "" {
+		return invalid("push_secret_channel.ciphertext", "ciphertext is required")
+	}
+	return nil
+}
+
 func (query Query) Validate() error {
 	if query.Type == "" {
 		return invalid("type", "query type is required")
@@ -378,6 +395,7 @@ func (query Query) Validate() error {
 		{QueryLocalSessionGet, query.GetLocalSession != nil, validatePtr(query.GetLocalSession)},
 		{QueryCommandGet, query.GetCommand != nil, validatePtr(query.GetCommand)},
 		{QueryAttachmentLocalStatus, query.GetAttachmentLocalStatus != nil, validatePtr(query.GetAttachmentLocalStatus)},
+		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
 	}
 
 	count := 0
@@ -491,6 +509,10 @@ func (query GetCommandQuery) Validate() error {
 	return nil
 }
 
+func (query OpenSecretChannelQuery) Validate() error {
+	return nil
+}
+
 func (query GetAttachmentLocalStatusQuery) Validate() error {
 	if len(query.AttachmentIDs) == 0 {
 		return invalid("get_attachment_local_status.attachment_ids", "at least one attachment id is required")
@@ -548,7 +570,8 @@ func knownCommandType(typ CommandType) bool {
 		CommandUpgradePaxd,
 		CommandCancelPaxdMaintenance,
 		CommandAttachmentEnsureLocal,
-		CommandSessionRuntimeReset:
+		CommandSessionRuntimeReset,
+		CommandSecretChannelPush:
 		return true
 	default:
 		return false
@@ -570,7 +593,8 @@ func knownQueryType(typ QueryType) bool {
 		QueryLocalSessionsSync,
 		QueryLocalSessionGet,
 		QueryCommandGet,
-		QueryAttachmentLocalStatus:
+		QueryAttachmentLocalStatus,
+		QuerySecretChannelOpen:
 		return true
 	default:
 		return false

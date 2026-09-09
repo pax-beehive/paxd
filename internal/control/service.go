@@ -2,12 +2,15 @@ package control
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/pax-beehive/paxd/internal/secretchannel"
 )
 
 var (
@@ -87,6 +90,14 @@ type LocalSessions interface {
 	Get(ctx context.Context, query GetLocalSessionQuery) (*LocalSessionView, error)
 }
 
+// SecretChannel is the narrow port onto internal/secretchannel.Registry.
+// It is deliberately not persisted through Store: a paxd restart is
+// meant to invalidate every outstanding channel (see the package doc).
+type SecretChannel interface {
+	Open(identity secretchannel.Identity) (secretchannel.ChannelInfo, error)
+	Consume(identity secretchannel.Identity, req secretchannel.PushRequest) (secretchannel.PushResult, error)
+}
+
 type ServiceOptions struct {
 	Store               Store
 	Supervisors         Supervisors
@@ -99,6 +110,7 @@ type ServiceOptions struct {
 	SessionRuntime      SessionRuntimeReportService
 	SessionRuntimeReset SessionRuntimeResetService
 	PaxdLifecycle       PaxdLifecycle
+	SecretChannel       SecretChannel
 }
 
 type ControlService struct {
@@ -113,6 +125,7 @@ type ControlService struct {
 	sessionRuntime      SessionRuntimeReportService
 	sessionRuntimeReset SessionRuntimeResetService
 	paxdLifecycle       PaxdLifecycle
+	secretChannel       SecretChannel
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -128,6 +141,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		sessionRuntime:      opts.SessionRuntime,
 		sessionRuntimeReset: opts.SessionRuntimeReset,
 		paxdLifecycle:       opts.PaxdLifecycle,
+		secretChannel:       opts.SecretChannel,
 	}
 }
 
@@ -155,6 +169,9 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	}
 	if cmd.Type == CommandSessionRuntimeReset {
 		return s.handleSessionRuntimeReset(ctx, src, cmd)
+	}
+	if cmd.Type == CommandSecretChannelPush {
+		return s.handleSecretChannelPush(ctx, src, cmd)
 	}
 	if isPaxdMaintenanceCommand(cmd.Type) {
 		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
@@ -304,6 +321,105 @@ func (s *ControlService) handleSessionRuntimeReset(ctx context.Context, src Sour
 	}, nil
 }
 
+func secretChannelIdentity(src Source) secretchannel.Identity {
+	return secretchannel.Identity{Principal: string(src.Kind) + ":" + strings.TrimSpace(src.RemoteID)}
+}
+
+func (s *ControlService) handleSecretChannelOpen(src Source) (QueryResult, error) {
+	if s.secretChannel == nil {
+		return QueryResult{Type: QuerySecretChannelOpen, Error: ptr(ControlError{
+			Code: ErrCodeInternal, Message: "secret channel is not configured",
+		})}, nil
+	}
+	info, err := s.secretChannel.Open(secretChannelIdentity(src))
+	if err != nil {
+		code := ErrCodeInternal
+		if errors.Is(err, secretchannel.ErrRateLimited) || errors.Is(err, secretchannel.ErrTooManyChannels) {
+			code = ErrCodeConflict
+		}
+		return QueryResult{Type: QuerySecretChannelOpen, Error: ptr(ControlError{Code: code, Message: err.Error()})}, nil
+	}
+	return QueryResult{Type: QuerySecretChannelOpen, SecretChannelOpen: &SecretChannelOpenResult{
+		ChannelID: info.ChannelID,
+		PublicKey: base64.StdEncoding.EncodeToString(info.PublicKey),
+		ExpiresAt: info.ExpiresAt.UTC().Format(time.RFC3339),
+	}}, nil
+}
+
+// handleSecretChannelPush deliberately bypasses Store/CommandRecord
+// entirely, the same way handleSessionRuntimeReset does: the entire
+// "apply" is synchronous in-memory work (decrypt + write a local file), so
+// there is nothing to converge later, and nothing here needs the generic
+// command audit trail. secretChannel.Consume already provides its own
+// command_id-scoped idempotency (see internal/secretchannel), so this
+// handler does not need to duplicate it.
+func (s *ControlService) handleSecretChannelPush(_ context.Context, src Source, cmd Command) (CommandAck, error) {
+	push := cmd.PushSecretChannel
+	if s.secretChannel == nil {
+		return failedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: ErrCodeInternal, Message: "secret channel is not configured",
+		}), nil
+	}
+	senderPub, err := base64.StdEncoding.DecodeString(push.SenderPublicKey)
+	if err != nil {
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID,
+			invalid("push_secret_channel.sender_public_key", "sender public key must be base64")), nil
+	}
+	nonce, err := base64.StdEncoding.DecodeString(push.Nonce)
+	if err != nil {
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID,
+			invalid("push_secret_channel.nonce", "nonce must be base64")), nil
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(push.Ciphertext)
+	if err != nil {
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID,
+			invalid("push_secret_channel.ciphertext", "ciphertext must be base64")), nil
+	}
+
+	result, err := s.secretChannel.Consume(secretChannelIdentity(src), secretchannel.PushRequest{
+		ChannelID:       push.ChannelID,
+		CommandID:       cmd.CommandID,
+		SenderPublicKey: senderPub,
+		Nonce:           nonce,
+		Ciphertext:      ciphertext,
+	})
+	if err != nil {
+		return failedAck(cmd.CommandID, "secret_channel", push.ChannelID, errorToControlError(err)), nil
+	}
+
+	switch result.Status {
+	case secretchannel.StatusApplied:
+		return CommandAck{
+			CommandID: cmd.CommandID, OK: true, Status: CommandStatusApplied,
+			TargetType: "secret_channel", TargetID: push.ChannelID,
+			Result: &CommandResult{SecretChannelPush: &SecretChannelPushResult{
+				FileRef:   result.FileRef,
+				ExpiresAt: result.ExpiresAt.UTC().Format(time.RFC3339),
+			}},
+		}, nil
+	case secretchannel.StatusConflict:
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: ErrCodeConflict, Message: "command id was already used with a different payload",
+		}), nil
+	case secretchannel.StatusUnauthorized:
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: "unauthorized", Message: "this channel was not opened by the requesting source",
+		}), nil
+	case secretchannel.StatusInvalidPayload:
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: ErrCodeInvalidArgument, Message: "unable to decrypt payload",
+		}), nil
+	case secretchannel.StatusWriteFailed:
+		return failedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: ErrCodeInternal, Message: "failed to persist secret",
+		}), nil
+	default: // secretchannel.StatusExpired, and any status this build doesn't know about yet.
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: "expired", Message: "secret channel expired or unknown",
+		}), nil
+	}
+}
+
 func isDesiredSlotsOnlyUpdate(cmd Command) bool {
 	update := cmd.UpdateAgentConnection
 	return cmd.Type == CommandAgentConnectionUpdate && update != nil && update.DesiredSlots != nil &&
@@ -315,6 +431,9 @@ func isDesiredSlotsOnlyUpdate(cmd Command) bool {
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {
 	if err := query.Validate(); err != nil {
 		return QueryResult{Type: query.Type, Error: ptr(controlErr(err))}, nil
+	}
+	if query.Type == QuerySecretChannelOpen {
+		return s.handleSecretChannelOpen(src)
 	}
 	if s.store == nil {
 		return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "control store is not configured"})}, nil
@@ -648,6 +767,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "attachment", cmd.EnsureAttachmentLocal.Attachment.AttachmentID
 	case CommandSessionRuntimeReset:
 		return "session", cmd.ResetSessionRuntime.NativeSessionID
+	case CommandSecretChannelPush:
+		return "secret_channel", cmd.PushSecretChannel.ChannelID
 	default:
 		return "", ""
 	}
