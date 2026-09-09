@@ -14,7 +14,9 @@ import (
 )
 
 type Client struct {
-	Command []string
+	Command    []string
+	WorkingDir string
+	Env        map[string]string
 }
 
 func (c Client) ListSessions(ctx context.Context, agent string, limit int) ([]model.SessionInfo, error) {
@@ -51,6 +53,11 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		command = []string{"paxl"}
 	}
 	cmd := exec.CommandContext(ctx, command[0], append(command[1:], args...)...)
+	cmd.Dir = c.WorkingDir
+	cmd.Env = cmd.Environ()
+	for key, value := range c.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -113,15 +120,16 @@ func DecodeSessionMessages(data []byte) ([]model.SessionMessage, error) {
 }
 
 type paxlSession struct {
-	ID           string `json:"id"`
-	Agent        string `json:"agent"`
-	NativeID     string `json:"nativeId"`
-	Title        string `json:"title"`
-	Status       string `json:"status"`
-	Preview      string `json:"preview"`
-	ProjectID    string `json:"projectId"`
-	UpdatedAt    string `json:"updatedAt"`
-	LastSyncedAt string `json:"lastSyncedAt"`
+	WorkspaceRoots []string `json:"workspaceRoots"`
+	ID             string   `json:"id"`
+	Agent          string   `json:"agent"`
+	NativeID       string   `json:"nativeId"`
+	Title          string   `json:"title"`
+	Status         string   `json:"status"`
+	Preview        string   `json:"preview"`
+	ProjectID      string   `json:"projectId"`
+	UpdatedAt      string   `json:"updatedAt"`
+	LastSyncedAt   string   `json:"lastSyncedAt"`
 }
 
 func (s paxlSession) toSessionInfo() model.SessionInfo {
@@ -138,17 +146,18 @@ func (s paxlSession) toSessionInfo() model.SessionInfo {
 		agent = strings.SplitN(sessionID, ":", 2)[0]
 	}
 	return model.SessionInfo{
-		SessionID:   sessionID,
-		AgentType:   agent,
-		NativeID:    nativeID,
-		Name:        s.Title,
-		ProjectID:   s.ProjectID,
-		LastActive:  s.UpdatedAt,
-		Preview:     s.Preview,
-		Source:      "paxl",
-		Status:      s.Status,
-		UpdatedAt:   s.UpdatedAt,
-		CurrentTask: "",
+		WorkspaceRoots: s.WorkspaceRoots,
+		SessionID:      sessionID,
+		AgentType:      agent,
+		NativeID:       nativeID,
+		Name:           s.Title,
+		ProjectID:      s.ProjectID,
+		LastActive:     s.UpdatedAt,
+		Preview:        s.Preview,
+		Source:         "paxl",
+		Status:         s.Status,
+		UpdatedAt:      s.UpdatedAt,
+		CurrentTask:    "",
 	}
 }
 
