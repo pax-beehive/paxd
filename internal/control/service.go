@@ -341,6 +341,7 @@ func (s *ControlService) handleSecretChannelOpen(src Source) (QueryResult, error
 	}
 	return QueryResult{Type: QuerySecretChannelOpen, SecretChannelOpen: &SecretChannelOpenResult{
 		ChannelID: info.ChannelID,
+		NodeID:    info.NodeID,
 		PublicKey: base64.StdEncoding.EncodeToString(info.PublicKey),
 		ExpiresAt: info.ExpiresAt.UTC().Format(time.RFC3339),
 	}}, nil

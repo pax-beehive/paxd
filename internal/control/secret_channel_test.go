@@ -36,7 +36,11 @@ func sealPushCommand(t *testing.T, open control.QueryResult, commandID string, p
 	require.NoError(t, err)
 
 	sealed, err := secretchannel.SealSecret(pub, plaintext, secretchannel.PushContext{
-		NodeID:        "node_1",
+		// A real client must echo back whatever NodeID the open response
+		// carried, not assume it already knows the right value (see
+		// TestServicePushSecretChannelRejectsGuessedNodeID below for what
+		// happens if it doesn't).
+		NodeID:        open.SecretChannelOpen.NodeID,
 		ChannelID:     open.SecretChannelOpen.ChannelID,
 		CommandID:     commandID,
 		ExpiresAtUnix: expiresAt.Unix(),
@@ -66,8 +70,50 @@ func TestServiceOpenSecretChannelReturnsPublicKey(t *testing.T) {
 	require.Nil(t, result.Error)
 	require.NotNil(t, result.SecretChannelOpen)
 	require.NotEmpty(t, result.SecretChannelOpen.ChannelID)
+	require.Equal(t, "node_1", result.SecretChannelOpen.NodeID)
 	require.NotEmpty(t, result.SecretChannelOpen.PublicKey)
 	require.NotEmpty(t, result.SecretChannelOpen.ExpiresAt)
+}
+
+func TestServicePushSecretChannelRejectsGuessedNodeID(t *testing.T) {
+	ctx := context.Background()
+	service := control.NewService(control.ServiceOptions{SecretChannel: newTestSecretChannelRegistry(t, nil)})
+	src := control.Source{Kind: control.SourceRemote, RemoteID: "remote_a"}
+
+	open, err := service.HandleQuery(ctx, src, control.Query{Type: control.QuerySecretChannelOpen, OpenSecretChannel: &control.OpenSecretChannelQuery{}})
+	require.NoError(t, err)
+
+	pub, err := base64.StdEncoding.DecodeString(open.SecretChannelOpen.PublicKey)
+	require.NoError(t, err)
+	expiresAt, err := time.Parse(time.RFC3339, open.SecretChannelOpen.ExpiresAt)
+	require.NoError(t, err)
+
+	// A caller that supplies its own idea of "this node's ID" (e.g. the
+	// manager-assigned node ID it already knows from elsewhere) instead of
+	// echoing open.SecretChannelOpen.NodeID must fail to decrypt: the two
+	// values are not guaranteed to be the same, and silently succeeding
+	// against the wrong context would be worse than failing loudly.
+	sealed, err := secretchannel.SealSecret(pub, []byte("sk-secret"), secretchannel.PushContext{
+		NodeID:        "a-manager-assigned-node-id-the-client-already-knew",
+		ChannelID:     open.SecretChannelOpen.ChannelID,
+		CommandID:     "cmd_push_1",
+		ExpiresAtUnix: expiresAt.Unix(),
+	}, rand.Reader)
+	require.NoError(t, err)
+
+	ack, err := service.HandleCommand(ctx, src, control.Command{
+		CommandID: "cmd_push_1",
+		Type:      control.CommandSecretChannelPush,
+		PushSecretChannel: &control.PushSecretChannelCommand{
+			ChannelID:       open.SecretChannelOpen.ChannelID,
+			SenderPublicKey: base64.StdEncoding.EncodeToString(sealed.SenderPublicKey),
+			Nonce:           base64.StdEncoding.EncodeToString(sealed.Nonce),
+			Ciphertext:      base64.StdEncoding.EncodeToString(sealed.Ciphertext),
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, ack.OK)
+	require.Equal(t, control.ErrCodeInvalidArgument, ack.Error.Code)
 }
 
 func TestServiceOpenSecretChannelNotConfiguredReturnsInternalError(t *testing.T) {

@@ -30,8 +30,16 @@ type Identity struct {
 // to an untrusted browser: it carries no confidentiality requirement, only
 // an integrity one (already satisfied by the authenticated transport that
 // relays it).
+//
+// NodeID is whatever this Registry was configured with (see Options); it is
+// an AAD-binding value, not necessarily a manager-assigned node identity.
+// Callers must echo it back verbatim in the PushContext used to seal the
+// secret — they must never independently supply their own idea of "this
+// node's ID", since that will not match what Consume reconstructs and the
+// decrypt will fail closed.
 type ChannelInfo struct {
 	ChannelID string
+	NodeID    string
 	PublicKey []byte
 	ExpiresAt time.Time
 }
@@ -96,7 +104,14 @@ type resultCacheKey struct {
 	commandID string
 }
 
-type cachedResult struct {
+// pendingResult is created (under the registry lock) the instant a request
+// wins the right to consume a channel, before the slow decrypt/write work
+// starts. A concurrent duplicate request for the same (principal, channel,
+// command) — e.g. a client retry after a lost ACK — looks this up and waits
+// on ready instead of racing past the now-deleted channel entry and getting
+// a spurious "expired" for work that is already in flight or already done.
+type pendingResult struct {
+	ready    chan struct{}
 	digest   [sha256.Size]byte
 	result   PushResult
 	cachedAt time.Time
@@ -111,7 +126,7 @@ type Registry struct {
 
 	mu       sync.Mutex
 	channels map[string]*channelEntry
-	results  map[resultCacheKey]cachedResult
+	results  map[resultCacheKey]*pendingResult
 	opens    map[string][]time.Time
 }
 
@@ -140,7 +155,7 @@ func NewRegistry(opts Options) *Registry {
 	return &Registry{
 		opts:     opts,
 		channels: make(map[string]*channelEntry),
-		results:  make(map[resultCacheKey]cachedResult),
+		results:  make(map[resultCacheKey]*pendingResult),
 		opens:    make(map[string][]time.Time),
 	}
 }
@@ -179,6 +194,7 @@ func (r *Registry) Open(identity Identity) (ChannelInfo, error) {
 	}
 	return ChannelInfo{
 		ChannelID: channelID,
+		NodeID:    r.opts.NodeID,
 		PublicKey: priv.PublicKey().Bytes(),
 		ExpiresAt: expiresAt,
 	}, nil
@@ -200,12 +216,13 @@ func (r *Registry) Consume(identity Identity, req PushRequest) (PushResult, erro
 	now := r.opts.Now()
 	r.sweepLocked(now)
 
-	if cached, ok := r.results[key]; ok {
+	if pending, ok := r.results[key]; ok {
 		r.mu.Unlock()
-		if cached.digest != digest {
+		<-pending.ready // no-op if already closed
+		if pending.digest != digest {
 			return PushResult{Status: StatusConflict}, nil
 		}
-		return cached.result, nil
+		return pending.result, nil
 	}
 
 	entry, ok := r.channels[req.ChannelID]
@@ -219,17 +236,28 @@ func (r *Registry) Consume(identity Identity, req PushRequest) (PushResult, erro
 		return PushResult{Status: StatusUnauthorized}, nil
 	}
 
-	// Burn the channel now, before doing any (potentially slow) crypto or
-	// I/O, so no concurrent caller can observe or reuse the private key.
+	// Claim the channel now, before doing any (potentially slow) crypto or
+	// I/O: publish a pending placeholder for this (principal, channel,
+	// command) under the same lock that deletes the channel entry, so a
+	// concurrent duplicate request (e.g. a client retry racing the original
+	// after a slow response) finds the placeholder and waits for the real
+	// result instead of seeing a channel that just vanished and concluding
+	// "expired" — which would otherwise send it off to open a second
+	// channel and re-deliver the secret a second time.
+	pending := &pendingResult{ready: make(chan struct{}), digest: digest}
+	r.results[key] = pending
 	delete(r.channels, req.ChannelID)
 	priv := entry.priv
 	nodeID := r.opts.NodeID
+	expiresAt := entry.expiresAt
 	r.mu.Unlock()
 
-	result := r.performConsume(priv, nodeID, entry.expiresAt, req)
+	result := r.performConsume(priv, nodeID, expiresAt, req)
 
 	r.mu.Lock()
-	r.results[key] = cachedResult{digest: digest, result: result, cachedAt: r.opts.Now()}
+	pending.result = result
+	pending.cachedAt = r.opts.Now()
+	close(pending.ready)
 	r.mu.Unlock()
 	return result, nil
 }
@@ -275,8 +303,11 @@ func (r *Registry) sweepLocked(now time.Time) {
 			delete(r.channels, id)
 		}
 	}
-	for key, cached := range r.results {
-		if now.Sub(cached.cachedAt) > r.opts.ResultRetention {
+	for key, pending := range r.results {
+		if pending.cachedAt.IsZero() {
+			continue // still being computed; never sweep a result in flight
+		}
+		if now.Sub(pending.cachedAt) > r.opts.ResultRetention {
 			delete(r.results, key)
 		}
 	}

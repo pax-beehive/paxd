@@ -571,8 +571,15 @@ type OpenSecretChannelQuery struct{}
 
 // SecretChannelOpenResult hands an untrusted browser a fresh, single-use
 // public key. PublicKey is base64-encoded raw ECDH(P-256) point bytes.
+//
+// NodeID must be echoed back verbatim by the caller when sealing and
+// pushing the secret: it is an internal AAD-binding value (see
+// secretchannel.ChannelInfo), not necessarily the same identifier the
+// caller otherwise knows this node by. A caller that substitutes its own
+// idea of the node's ID here will produce a ciphertext paxd cannot decrypt.
 type SecretChannelOpenResult struct {
 	ChannelID string `json:"channel_id"`
+	NodeID    string `json:"node_id"`
 	PublicKey string `json:"public_key"`
 	ExpiresAt string `json:"expires_at"`
 }

@@ -322,13 +322,96 @@ func TestConsumeIsExclusiveUnderConcurrency(t *testing.T) {
 	wg.Wait()
 
 	require.EqualValues(t, 1, atomic.LoadInt32(&writeCount), "the private key must only ever be used once")
-	applied := 0
-	for _, result := range results {
-		if result.Status == StatusApplied {
-			applied++
-		}
-	}
-	require.Equal(t, 1, applied)
+	// Both callers submitted the identical request, so both must observe
+	// the same successful outcome: the loser waits for the winner's result
+	// instead of racing past the deleted channel entry and seeing
+	// "expired" for work that actually succeeded (or is still in flight).
+	require.Equal(t, results[0], results[1])
+	require.Equal(t, StatusApplied, results[0].Status)
+}
+
+func TestConsumeConcurrentDuplicateWithDifferentPayloadIsConflictNotExpired(t *testing.T) {
+	release := make(chan struct{})
+	writer := &recordingWriter{fn: func(plaintext []byte) (string, time.Time, error) {
+		<-release
+		return "file:/tmp/secretchannel-test", time.Now().Add(time.Minute), nil
+	}}
+	reg := newTestRegistry(t, writer, nil)
+	identity := Identity{Principal: "remote_a"}
+
+	info, err := reg.Open(identity)
+	require.NoError(t, err)
+	first := sealForChannel(t, info, "node_1", "cmd_1", []byte("sk-secret"))
+	mutated := first
+	mutated.Ciphertext = append([]byte(nil), first.Ciphertext...)
+	mutated.Ciphertext[0] ^= 0xFF
+
+	var firstResult, secondResult PushResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		result, consumeErr := reg.Consume(identity, first)
+		require.NoError(t, consumeErr)
+		firstResult = result
+	}()
+	time.Sleep(5 * time.Millisecond) // ensure `first` claims the channel before `mutated` arrives
+	go func() {
+		defer wg.Done()
+		result, consumeErr := reg.Consume(identity, mutated)
+		require.NoError(t, consumeErr)
+		secondResult = result
+	}()
+	time.Sleep(10 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, StatusApplied, firstResult.Status)
+	require.Equal(t, StatusConflict, secondResult.Status, "a concurrent request with different content for the same command_id must never be told 'expired'")
+}
+
+func TestOpenEchoesConfiguredNodeID(t *testing.T) {
+	writer := &recordingWriter{}
+	reg := NewRegistry(Options{
+		NodeID:      "node_from_registration",
+		ChannelTTL:  5 * time.Minute,
+		MaxChannels: 64,
+		RateLimit:   5,
+		RateWindow:  time.Minute,
+		Random:      rand.Reader,
+		Writer:      writer.Write,
+	})
+
+	info, err := reg.Open(Identity{Principal: "remote_a"})
+	require.NoError(t, err)
+	require.Equal(t, "node_from_registration", info.NodeID)
+}
+
+func TestConsumeFailsIfCallerSuppliesItsOwnNodeIDInsteadOfEchoingOpen(t *testing.T) {
+	writer := &recordingWriter{}
+	reg := NewRegistry(Options{
+		NodeID:      "node_from_registration",
+		ChannelTTL:  5 * time.Minute,
+		MaxChannels: 64,
+		RateLimit:   5,
+		RateWindow:  time.Minute,
+		Random:      rand.Reader,
+		Writer:      writer.Write,
+	})
+	identity := Identity{Principal: "remote_a"}
+
+	info, err := reg.Open(identity)
+	require.NoError(t, err)
+	require.NotEqual(t, "node_id_the_frontend_guessed", info.NodeID)
+
+	// A caller that seals against a node_id it invented itself (e.g. a
+	// domain node ID it already knew, rather than echoing info.NodeID)
+	// produces AAD paxd cannot reconstruct: decryption must fail closed,
+	// not silently succeed against the wrong context.
+	wrongContextReq := sealForChannel(t, info, "node_id_the_frontend_guessed", "cmd_1", []byte("sk-secret"))
+	result, err := reg.Consume(identity, wrongContextReq)
+	require.NoError(t, err)
+	require.Equal(t, StatusInvalidPayload, result.Status)
 }
 
 func TestOpenIsRateLimited(t *testing.T) {
