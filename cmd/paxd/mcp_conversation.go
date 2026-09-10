@@ -652,16 +652,6 @@ func conversationCloudClient(ctx context.Context, cfg *config.Config, agentID st
 		return nil, fmt.Errorf("node key for remote %q is empty", conn.RemoteID)
 	}
 	client := cloud.NewClient(material.CloudAPIURL, nodeKey)
-	if material.AuthKind == control.RemoteAuthCloudflareAccess {
-		if material.CloudflareAccess == nil {
-			return nil, fmt.Errorf("remote %q cloudflare access config is missing", conn.RemoteID)
-		}
-		clientSecret, err := resolver.Resolve(ctx, material.CloudflareAccess.ClientSecretRef)
-		if err != nil {
-			return nil, fmt.Errorf("resolve cloudflare access secret for remote %q: %w", conn.RemoteID, err)
-		}
-		client.WithCloudflareAccess(material.CloudflareAccess.ClientID, clientSecret)
-	}
 	return client, nil
 }
 

@@ -175,14 +175,13 @@ func TestPaxctlAgentsCreateUsesSingleRemoteAndHarnessCommand(t *testing.T) {
 	assert.Contains(t, stdout.String(), "agent_cloud_123")
 }
 
-func TestRegisterCloudAgentUsesRemoteCloudflareAccessAuth(t *testing.T) {
+func TestRegisterCloudAgentIgnoresLegacyCloudflareAccessAuth(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "cf-secret")
-	require.NoError(t, os.WriteFile(secretPath, []byte("cf-secret\n"), 0o600))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/node/agents/register", r.URL.Path)
 		assert.Equal(t, "node-secret", r.Header.Get("X-Pax-Key"))
-		assert.Equal(t, "cf-client", r.Header.Get("CF-Access-Client-Id"))
-		assert.Equal(t, "cf-secret", r.Header.Get("CF-Access-Client-Secret"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Id"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Secret"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"agent_id":"agent_cloud_123"}}`))
 	}))
@@ -418,14 +417,14 @@ func TestPaxctlRemotesLoginCommitsThroughLocalAPI(t *testing.T) {
 	assert.Contains(t, stdout.String(), "Remote staging login committed")
 }
 
-func TestPaxctlLoginCloudClientUsesCloudflareAccessEnv(t *testing.T) {
+func TestPaxctlLoginCloudClientIgnoresCloudflareAccessEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PAX_CLOUD_CF_CLIENT_ID", "cf-client")
 	t.Setenv("PAX_CLOUD_CF_CLIENT_SECRET", "cf-secret")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/node/registration/start", r.URL.Path)
-		assert.Equal(t, "cf-client", r.Header.Get("CF-Access-Client-Id"))
-		assert.Equal(t, "cf-secret", r.Header.Get("CF-Access-Client-Secret"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Id"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Secret"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"registration_id":"reg_1","pair_code":"CODE","poll_token":"poll","verification_uri":"https://example.test","expires_in":300,"interval":5}}`))
 	}))

@@ -9,8 +9,6 @@ agent:
 cloud:
   api_url: https://fleet.example.com
   api_key: ""
-  cf_client_id: ""
-  cf_client_secret: ""
 
 agent_id: ""
 instance_id: default

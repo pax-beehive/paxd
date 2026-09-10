@@ -39,12 +39,12 @@ func TestRegisterNodeAgentDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-func TestRegisterNodeAgentSendsCloudflareAccessHeaders(t *testing.T) {
+func TestRegisterNodeAgentNeedsNoCloudflareAccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("CF-Access-Client-Id"); got != "cf_id" {
+		if got := r.Header.Get("CF-Access-Client-Id"); got != "" {
 			t.Errorf("CF-Access-Client-Id = %q", got)
 		}
-		if got := r.Header.Get("CF-Access-Client-Secret"); got != "cf_secret" {
+		if got := r.Header.Get("CF-Access-Client-Secret"); got != "" {
 			t.Errorf("CF-Access-Client-Secret = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -53,7 +53,6 @@ func TestRegisterNodeAgentSendsCloudflareAccessHeaders(t *testing.T) {
 	defer server.Close()
 
 	resp, err := NewClient(server.URL, "").
-		WithCloudflareAccess("cf_id", "cf_secret").
 		RegisterNodeAgent(
 			&RegisterNodeAgentRequest{Agent: RegisterNodeAgentPayload{Name: "codex", AgentType: "codex"}},
 			"token",
@@ -72,8 +71,8 @@ func TestPostAgentSessionsPostsSessionOnlyPayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
 		assert.Equal(t, "node-key", r.Header.Get("X-Pax-Key"))
-		assert.Equal(t, "cf_id", r.Header.Get("CF-Access-Client-Id"))
-		assert.Equal(t, "cf_secret", r.Header.Get("CF-Access-Client-Secret"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Id"))
+		assert.Equal(t, "", r.Header.Get("CF-Access-Client-Secret"))
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
@@ -81,7 +80,6 @@ func TestPostAgentSessionsPostsSessionOnlyPayload(t *testing.T) {
 	defer server.Close()
 
 	err := NewClient(server.URL, "node-key").
-		WithCloudflareAccess("cf_id", "cf_secret").
 		PostAgentSessions("agent/one", &AgentSessionsReport{
 			Sessions: []SessionStatus{{
 				SessionID: "codex:sess_1",

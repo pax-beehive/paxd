@@ -236,31 +236,8 @@ func cloudURLFromCommand(cmd *cli.Command, cfg *config.Config) string {
 	return strings.TrimRight(flagURL, "/")
 }
 
-func loginCloudClient(cloudURL string, cfg *config.Config) (*cloud.Client, error) {
-	client := cloud.NewClient(cloudURL, "")
-	clientID, clientSecret, enabled, err := cloudflareAccessCredentials(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if enabled {
-		client.WithCloudflareAccess(clientID, clientSecret)
-	}
-	return client, nil
-}
-
-func cloudflareAccessCredentials(cfg *config.Config) (string, string, bool, error) {
-	if cfg == nil {
-		return "", "", false, nil
-	}
-	clientID := strings.TrimSpace(cfg.Cloud.CFClientID)
-	clientSecret := strings.TrimSpace(cfg.Cloud.CFClientSecret)
-	if clientID == "" && clientSecret == "" {
-		return "", "", false, nil
-	}
-	if clientID == "" || clientSecret == "" {
-		return "", "", false, fmt.Errorf("cloudflare access setup requires both PAX_CLOUD_CF_CLIENT_ID and PAX_CLOUD_CF_CLIENT_SECRET")
-	}
-	return clientID, clientSecret, true, nil
+func loginCloudClient(cloudURL string, _ *config.Config) (*cloud.Client, error) {
+	return cloud.NewClient(cloudURL, ""), nil
 }
 
 func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelogin.LoginResult) error {
@@ -322,25 +299,10 @@ func commitRemoteLogin(ctx context.Context, cfg *config.Config, result remotelog
 	return configureRemoteAuthFromConfig(ctx, store, secrets, remoteID, cfg)
 }
 
-func configureRemoteAuthFromConfig(ctx context.Context, store *daemonstore.Store, secrets remotesecrets.Store, remoteID string, cfg *config.Config) error {
-	clientID, clientSecret, enabled, err := cloudflareAccessCredentials(cfg)
-	if err != nil {
-		return err
-	}
-	if !enabled {
-		return nil
-	}
-	clientSecretRef, err := secrets.StoreCloudflareAccessClientSecret(ctx, remoteID, clientSecret)
-	if err != nil {
-		return err
-	}
+func configureRemoteAuthFromConfig(ctx context.Context, store *daemonstore.Store, _ remotesecrets.Store, remoteID string, _ *config.Config) error {
 	return store.ConfigureRemoteAuth(ctx, control.ConfigureRemoteAuthCommand{
 		RemoteID: remoteID,
-		Kind:     control.RemoteAuthCloudflareAccess,
-		CloudflareAccess: &control.CloudflareAccessAuth{
-			ClientID:        clientID,
-			ClientSecretRef: clientSecretRef,
-		},
+		Kind:     control.RemoteAuthNone,
 	})
 }
 

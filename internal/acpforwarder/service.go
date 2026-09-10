@@ -46,8 +46,6 @@ import (
 type Config struct {
 	CloudURL          string
 	APIKey            string
-	CFClientID        string
-	CFClientSecret    string
 	ConnectionID      string
 	AgentID           string
 	InstanceID        string
@@ -171,12 +169,6 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 
 	headers := http.Header{}
 	headers.Set("X-Pax-Key", s.cfg.APIKey)
-	if s.cfg.CFClientID != "" {
-		headers.Set("CF-Access-Client-Id", s.cfg.CFClientID)
-	}
-	if s.cfg.CFClientSecret != "" {
-		headers.Set("CF-Access-Client-Secret", s.cfg.CFClientSecret)
-	}
 
 	conn, resp, err := s.dialer.DialContext(ctx, tunnelURL.String(), headers)
 	if resp != nil && resp.Body != nil {

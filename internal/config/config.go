@@ -43,8 +43,6 @@ type CloudConfig struct {
 	NodeID            string `yaml:"node_id"`
 	APIKey            string `yaml:"api_key"`            // node key written by register command
 	RegistrationToken string `yaml:"registration_token"` // one-time node registration token
-	CFClientID        string `yaml:"cf_client_id"`       // Cloudflare Access Service Token (agent auth)
-	CFClientSecret    string `yaml:"cf_client_secret"`   // Cloudflare Access Service Token secret
 }
 
 // HermesConfig points to the local Hermes API Server.
@@ -271,8 +269,6 @@ func applyEnv(cfg *Config) {
 	setStringFromEnv(&cfg.Cloud.APIKey, "PAX_NODE_API_KEY")
 	setStringFromEnv(&cfg.Cloud.APIKey, "PAX_API_KEY")
 	setStringFromEnv(&cfg.Cloud.RegistrationToken, "PAX_REGISTRATION_TOKEN")
-	setStringFromEnv(&cfg.Cloud.CFClientID, "PAX_CLOUD_CF_CLIENT_ID")
-	setStringFromEnv(&cfg.Cloud.CFClientSecret, "PAX_CLOUD_CF_CLIENT_SECRET")
 	setStringFromEnv(&cfg.Agent.AgentID, "PAX_AGENT_ID")
 	setStringFromEnv(&cfg.AgentID, "PAX_AGENT_ID")
 	setStringFromEnv(&cfg.InstanceID, "PAX_INSTANCE_ID")
