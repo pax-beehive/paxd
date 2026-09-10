@@ -177,6 +177,29 @@ func TestServicePushSecretChannelUnknownChannelIsRejectedAsExpired(t *testing.T)
 	require.Equal(t, "expired", ack.Error.Code)
 }
 
+func TestServicePushSecretChannelAlreadyConsumedIsRejectedDistinctlyFromExpired(t *testing.T) {
+	ctx := context.Background()
+	service := control.NewService(control.ServiceOptions{SecretChannel: newTestSecretChannelRegistry(t, nil)})
+	src := control.Source{Kind: control.SourceRemote, RemoteID: "remote_a"}
+
+	open, err := service.HandleQuery(ctx, src, control.Query{Type: control.QuerySecretChannelOpen, OpenSecretChannel: &control.OpenSecretChannelQuery{}})
+	require.NoError(t, err)
+	first := sealPushCommand(t, open, "cmd_push_1", []byte("sk-secret"))
+	firstAck, err := service.HandleCommand(ctx, src, first)
+	require.NoError(t, err)
+	require.True(t, firstAck.OK)
+
+	// Same channel, a different command_id: this must not be reported as
+	// "expired" (which a caller would treat as safe to retry against a
+	// freshly opened channel) since the channel was, in fact, already used.
+	second := sealPushCommand(t, open, "cmd_push_2", []byte("sk-secret"))
+	secondAck, err := service.HandleCommand(ctx, src, second)
+	require.NoError(t, err)
+	require.False(t, secondAck.OK)
+	require.NotNil(t, secondAck.Error)
+	require.Equal(t, "consumed", secondAck.Error.Code)
+}
+
 func TestServicePushSecretChannelMalformedBase64IsRejectedAsInvalidArgument(t *testing.T) {
 	ctx := context.Background()
 	service := control.NewService(control.ServiceOptions{SecretChannel: newTestSecretChannelRegistry(t, nil)})

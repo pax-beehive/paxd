@@ -414,6 +414,14 @@ func (s *ControlService) handleSecretChannelPush(_ context.Context, src Source, 
 		return failedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
 			Code: ErrCodeInternal, Message: "failed to persist secret",
 		}), nil
+	case secretchannel.StatusConsumed:
+		// Deliberately a different code from "expired": this channel_id was
+		// already claimed (just not by this exact command_id), so opening a
+		// new channel and delivering again would risk a real duplicate.
+		// Callers must not treat this the way they treat "expired".
+		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
+			Code: "consumed", Message: "secret channel was already used",
+		}), nil
 	default: // secretchannel.StatusExpired, and any status this build doesn't know about yet.
 		return rejectedAck(cmd.CommandID, "secret_channel", push.ChannelID, ControlError{
 			Code: "expired", Message: "secret channel expired or unknown",

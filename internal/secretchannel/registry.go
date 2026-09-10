@@ -58,6 +58,7 @@ type Status string
 const (
 	StatusApplied        Status = "applied"
 	StatusExpired        Status = "expired"
+	StatusConsumed       Status = "consumed"
 	StatusUnauthorized   Status = "unauthorized"
 	StatusConflict       Status = "conflict"
 	StatusInvalidPayload Status = "invalid_payload"
@@ -127,6 +128,12 @@ type Registry struct {
 	mu       sync.Mutex
 	channels map[string]*channelEntry
 	results  map[resultCacheKey]*pendingResult
+	// consumed records every channel_id that has ever been claimed, keyed
+	// by channel_id alone (not by principal/command_id): once a channel is
+	// claimed it is gone for good regardless of who asks about it or what
+	// command_id they use, and callers must not treat "channel not found"
+	// as safe-to-retry when it actually means "already used". See Consume.
+	consumed map[string]time.Time
 	opens    map[string][]time.Time
 }
 
@@ -156,6 +163,7 @@ func NewRegistry(opts Options) *Registry {
 		opts:     opts,
 		channels: make(map[string]*channelEntry),
 		results:  make(map[resultCacheKey]*pendingResult),
+		consumed: make(map[string]time.Time),
 		opens:    make(map[string][]time.Time),
 	}
 }
@@ -225,6 +233,18 @@ func (r *Registry) Consume(identity Identity, req PushRequest) (PushResult, erro
 		return pending.result, nil
 	}
 
+	if consumedAt, ok := r.consumed[req.ChannelID]; ok && now.Sub(consumedAt) <= r.opts.ResultRetention {
+		// This exact channel_id was already claimed, just not under this
+		// (principal, command_id) pair — e.g. a caller retrying with a
+		// freshly generated command_id instead of the one it originally
+		// used. Report it distinctly from "expired": expired means safe to
+		// open a new channel and try again, consumed does not, since
+		// whatever the original attempt did (succeed, fail to decrypt,
+		// fail to write) cannot be undone or safely repeated.
+		r.mu.Unlock()
+		return PushResult{Status: StatusConsumed}, nil
+	}
+
 	entry, ok := r.channels[req.ChannelID]
 	if !ok || now.After(entry.expiresAt) {
 		delete(r.channels, req.ChannelID)
@@ -246,6 +266,7 @@ func (r *Registry) Consume(identity Identity, req PushRequest) (PushResult, erro
 	// channel and re-deliver the secret a second time.
 	pending := &pendingResult{ready: make(chan struct{}), digest: digest}
 	r.results[key] = pending
+	r.consumed[req.ChannelID] = now
 	delete(r.channels, req.ChannelID)
 	priv := entry.priv
 	nodeID := r.opts.NodeID
@@ -309,6 +330,11 @@ func (r *Registry) sweepLocked(now time.Time) {
 		}
 		if now.Sub(pending.cachedAt) > r.opts.ResultRetention {
 			delete(r.results, key)
+		}
+	}
+	for id, consumedAt := range r.consumed {
+		if now.Sub(consumedAt) > r.opts.ResultRetention {
+			delete(r.consumed, id)
 		}
 	}
 	cutoff := now.Add(-r.opts.RateWindow)

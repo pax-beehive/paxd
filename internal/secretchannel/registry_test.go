@@ -138,11 +138,14 @@ func TestConsumeIsSingleUse(t *testing.T) {
 	require.Equal(t, StatusApplied, result.Status)
 
 	// A different push (different command_id) against the same, now-burned
-	// channel must not succeed, even though it is validly encrypted.
+	// channel must not succeed, even though it is validly encrypted. It
+	// must also be reported as StatusConsumed, not StatusExpired: a caller
+	// that only auto-retries on "expired" (because retrying is only safe
+	// when nothing was ever delivered) must not be told "expired" here.
 	second := sealForChannel(t, info, "node_1", "cmd_2", []byte("second"))
 	result2, err := reg.Consume(identity, second)
 	require.NoError(t, err)
-	require.NotEqual(t, StatusApplied, result2.Status)
+	require.Equal(t, StatusConsumed, result2.Status)
 	require.Equal(t, 1, writer.callCount(), "the channel must not be usable twice")
 }
 
@@ -265,7 +268,7 @@ func TestConsumeInvalidCiphertextBurnsChannel(t *testing.T) {
 	retry := sealForChannel(t, info, "node_1", "cmd_2", []byte("sk-secret"))
 	retryResult, err := reg.Consume(identity, retry)
 	require.NoError(t, err)
-	require.NotEqual(t, StatusApplied, retryResult.Status, "a single-attempt oracle must not allow retrying after a bad decrypt")
+	require.Equal(t, StatusConsumed, retryResult.Status, "a single-attempt oracle must not allow retrying after a bad decrypt, and must not claim this channel is merely 'expired'")
 }
 
 func TestConsumeWriteFailureIsCachedAndNotRetried(t *testing.T) {
@@ -466,6 +469,34 @@ func TestSweepRemovesExpiredChannels(t *testing.T) {
 	clock.Advance(6 * time.Minute)
 	reg.Sweep()
 	require.Len(t, reg.channels, 0)
+}
+
+func TestConsumedChannelMemoryExpiresAfterResultRetention(t *testing.T) {
+	writer := &recordingWriter{}
+	clock := newFakeClock()
+	reg := newTestRegistry(t, writer, clock)
+	identity := Identity{Principal: "remote_a"}
+
+	info, err := reg.Open(identity)
+	require.NoError(t, err)
+	first := sealForChannel(t, info, "node_1", "cmd_1", []byte("first"))
+	result, err := reg.Consume(identity, first)
+	require.NoError(t, err)
+	require.Equal(t, StatusApplied, result.Status)
+
+	second := sealForChannel(t, info, "node_1", "cmd_2", []byte("second"))
+	immediateRetry, err := reg.Consume(identity, second)
+	require.NoError(t, err)
+	require.Equal(t, StatusConsumed, immediateRetry.Status)
+
+	// Past the retention window, paxd no longer remembers this channel_id
+	// at all (same as after a restart): it reports plain "expired", which
+	// is honest — it genuinely does not know whether it was consumed.
+	clock.Advance(16 * time.Minute)
+	reg.Sweep()
+	lateRetry, err := reg.Consume(identity, second)
+	require.NoError(t, err)
+	require.Equal(t, StatusExpired, lateRetry.Status)
 }
 
 func TestConsumeRejectsMalformedRequest(t *testing.T) {
