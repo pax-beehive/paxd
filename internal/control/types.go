@@ -95,6 +95,7 @@ const (
 	CommandCancelPaxdMaintenance  CommandType = "paxd.maintenance.cancel"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
 	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
+	CommandSecretChannelPush      CommandType = "secret_channel.push"
 )
 
 type CommandStatus string
@@ -129,6 +130,27 @@ type Command struct {
 	CancelPaxdMaintenance *CancelPaxdMaintenanceCommand `json:"cancel_paxd_maintenance,omitempty"`
 	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
 	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
+	PushSecretChannel     *PushSecretChannelCommand     `json:"push_secret_channel,omitempty"`
+}
+
+// PushSecretChannelCommand redeems a short-lived secret channel (see
+// internal/secretchannel). All byte fields are base64-encoded because a
+// Command travels as JSON. paxd never sees the plaintext until it decrypts
+// Ciphertext locally with the channel's private key; pax-manager only ever
+// relays these bytes.
+type PushSecretChannelCommand struct {
+	ChannelID       string `json:"channel_id"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Nonce           string `json:"nonce"`
+	Ciphertext      string `json:"ciphertext"`
+}
+
+// SecretChannelPushResult is only populated when the push was applied.
+// Every other outcome (expired, unauthorized, conflict, bad payload, write
+// failure) is reported through CommandAck.Error instead.
+type SecretChannelPushResult struct {
+	FileRef   string `json:"file_ref"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 type ResetSessionRuntimeCommand struct {
@@ -369,6 +391,7 @@ type CommandResult struct {
 	AgentConnection     *AgentConnectionView       `json:"agent_connection,omitempty"`
 	Command             *CommandView               `json:"command,omitempty"`
 	SessionRuntimeReset *SessionRuntimeResetResult `json:"session_runtime_reset,omitempty"`
+	SecretChannelPush   *SecretChannelPushResult   `json:"secret_channel_push,omitempty"`
 }
 
 type PaxdRestartResult struct {
@@ -519,6 +542,7 @@ const (
 	QueryLocalSessionGet       QueryType = "local_session.get"
 	QueryCommandGet            QueryType = "command.get"
 	QueryAttachmentLocalStatus QueryType = "attachment.local_status"
+	QuerySecretChannelOpen     QueryType = "secret_channel.open"
 )
 
 type Query struct {
@@ -538,6 +562,26 @@ type Query struct {
 	GetLocalSession          *GetLocalSessionQuery          `json:"get_local_session,omitempty"`
 	GetCommand               *GetCommandQuery               `json:"get_command,omitempty"`
 	GetAttachmentLocalStatus *GetAttachmentLocalStatusQuery `json:"get_attachment_local_status,omitempty"`
+	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
+}
+
+// OpenSecretChannelQuery has no fields: the channel is bound to whatever
+// authenticated Source issued the query, never to a caller-supplied id.
+type OpenSecretChannelQuery struct{}
+
+// SecretChannelOpenResult hands an untrusted browser a fresh, single-use
+// public key. PublicKey is base64-encoded raw ECDH(P-256) point bytes.
+//
+// NodeID must be echoed back verbatim by the caller when sealing and
+// pushing the secret: it is an internal AAD-binding value (see
+// secretchannel.ChannelInfo), not necessarily the same identifier the
+// caller otherwise knows this node by. A caller that substitutes its own
+// idea of the node's ID here will produce a ciphertext paxd cannot decrypt.
+type SecretChannelOpenResult struct {
+	ChannelID string `json:"channel_id"`
+	NodeID    string `json:"node_id"`
+	PublicKey string `json:"public_key"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 type GetAttachmentLocalStatusQuery struct {
@@ -682,6 +726,7 @@ type QueryResult struct {
 	LocalSessionSync      *LocalSessionSyncResult      `json:"local_session_sync,omitempty"`
 	Command               *CommandView                 `json:"command,omitempty"`
 	AttachmentLocalStatus *AttachmentLocalStatusResult `json:"attachment_local_status,omitempty"`
+	SecretChannelOpen     *SecretChannelOpenResult     `json:"secret_channel_open,omitempty"`
 }
 
 type AttachmentLocalStatusResult struct {

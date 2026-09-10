@@ -21,6 +21,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/e2ee"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
+	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/supervisor"
 	"github.com/pax-beehive/paxkit/reliablemq"
 	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
@@ -457,7 +458,38 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 	if r.sessionReports != nil {
 		r.sessionReports.Start(runCtx)
 	}
+	startSecretChannelSweep(runCtx, r.secretChannel, r.secretDrop)
 	r.supervisors.Start(runCtx)
+}
+
+// startSecretChannelSweep is the periodic safety net for
+// internal/secretchannel: Open/Consume already enforce TTLs inline, and
+// FileDrop.Write's own TTL return value tells a well-behaved consumer when
+// to stop trusting a file, but nothing else proactively deletes an
+// abandoned in-memory channel or an unclaimed transient file until this
+// runs.
+func startSecretChannelSweep(ctx context.Context, registry *secretchannel.Registry, drop secretchannel.FileDrop) {
+	if registry == nil {
+		return
+	}
+	go func() {
+		sweep := func() {
+			registry.Sweep()
+			if _, err := drop.Sweep(); err != nil && ctx.Err() == nil {
+				log.Printf("[paxd] secret channel: transient file sweep failed: %v", err)
+			}
+		}
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweep()
+			}
+		}
+	}()
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
