@@ -25,10 +25,6 @@ func (r CloudReporter) ReportAgentSessions(
 	if err != nil {
 		return err
 	}
-	client := cloud.NewClient(target.CloudAPIURL, headers.Get(auth.HeaderPaxKey)).
-		WithCloudflareAccess(
-			headers.Get(auth.HeaderCloudflareAccessID),
-			headers.Get(auth.HeaderCloudflareAccessSecret),
-		)
+	client := cloud.NewClient(target.CloudAPIURL, headers.Get(auth.HeaderPaxKey))
 	return client.PostAgentSessionsContext(ctx, agentID, &cloud.AgentSessionsReport{Sessions: sessions})
 }

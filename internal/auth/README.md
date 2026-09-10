@@ -37,7 +37,8 @@ type CloudflareAccessAuth struct {
 This package owns:
 
 - `X-Pax-Key` header construction from the remote node key ref
-- optional Cloudflare Access headers from `remote_auth`
+- compatibility with legacy `cloudflare_access` records, without resolving or
+  transmitting their service-token credentials
 - secret ref resolution through `SecretResolver`
 
 This package must not:

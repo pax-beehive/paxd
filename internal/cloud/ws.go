@@ -27,14 +27,8 @@ type WSClient struct {
 }
 
 // NewWSClient creates a new WebSocket client.
-func NewWSClient(wsURL string, cfClientID, cfClientSecret string) *WSClient {
+func NewWSClient(wsURL string) *WSClient {
 	headers := http.Header{}
-	if cfClientID != "" {
-		headers.Set("CF-Access-Client-Id", cfClientID)
-	}
-	if cfClientSecret != "" {
-		headers.Set("CF-Access-Client-Secret", cfClientSecret)
-	}
 	return &WSClient{
 		url:     wsURL,
 		headers: headers,

@@ -70,9 +70,6 @@ var loadRemoteNodeKey = func(ctx context.Context, remoteID string) (string, erro
 	}
 	return auth.NewDefaultResolver().Resolve(ctx, ref)
 }
-var resolveRemoteSecretRef = func(ctx context.Context, ref string) (string, error) {
-	return auth.NewDefaultResolver().Resolve(ctx, ref)
-}
 var registerCloudAgent = func(ctx context.Context, remote control.RemoteView, nodeKey string, name string, agentType string) (string, error) {
 	client, err := cloudClientForRemoteView(ctx, remote, nodeKey)
 	if err != nil {
@@ -90,31 +87,15 @@ var registerCloudAgent = func(ctx context.Context, remote control.RemoteView, no
 	return resp.AgentID, nil
 }
 
-func cloudClientForRemoteView(ctx context.Context, remote control.RemoteView, nodeKey string) (*cloud.Client, error) {
-	client := cloud.NewClient(remote.Remote.CloudAPIURL, nodeKey)
-	if remote.Auth == nil || remote.Auth.Kind == "" || remote.Auth.Kind == control.RemoteAuthNone {
-		return client, nil
+func cloudClientForRemoteView(_ context.Context, remote control.RemoteView, nodeKey string) (*cloud.Client, error) {
+	if remote.Auth != nil {
+		switch remote.Auth.Kind {
+		case "", control.RemoteAuthNone, control.RemoteAuthCloudflareAccess:
+		default:
+			return nil, fmt.Errorf("remote %q has unsupported auth kind %q", remote.Remote.ID, remote.Auth.Kind)
+		}
 	}
-
-	switch remote.Auth.Kind {
-	case control.RemoteAuthCloudflareAccess:
-		clientID := strings.TrimSpace(remote.Auth.ClientID)
-		if clientID == "" {
-			return nil, fmt.Errorf("remote %q cloudflare access auth is missing client id", remote.Remote.ID)
-		}
-		secretRef := strings.TrimSpace(remote.Auth.ClientSecretRef)
-		if secretRef == "" {
-			return nil, fmt.Errorf("remote %q cloudflare access auth is missing client secret ref", remote.Remote.ID)
-		}
-		clientSecret, err := resolveRemoteSecretRef(ctx, secretRef)
-		if err != nil {
-			return nil, fmt.Errorf("resolve cloudflare access client secret for remote %q: %w", remote.Remote.ID, err)
-		}
-		client.WithCloudflareAccess(clientID, clientSecret)
-		return client, nil
-	default:
-		return nil, fmt.Errorf("remote %q has unsupported auth kind %q", remote.Remote.ID, remote.Auth.Kind)
-	}
+	return cloud.NewClient(remote.Remote.CloudAPIURL, nodeKey), nil
 }
 
 var newLocalControlClient = func() localControlClient {
@@ -527,21 +508,7 @@ func remotesLogin(ctx context.Context, client localControlClient, stdout io.Writ
 }
 
 func paxctlLoginCloudClient(cloudURL string) (*cloud.Client, error) {
-	cfg, err := config.Load("")
-	if err != nil {
-		return nil, err
-	}
-	client := cloud.NewClient(cloudURL, "")
-	clientID := strings.TrimSpace(cfg.Cloud.CFClientID)
-	clientSecret := strings.TrimSpace(cfg.Cloud.CFClientSecret)
-	if clientID == "" && clientSecret == "" {
-		return client, nil
-	}
-	if clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf("cloudflare access login requires both PAX_CLOUD_CF_CLIENT_ID and PAX_CLOUD_CF_CLIENT_SECRET")
-	}
-	client.WithCloudflareAccess(clientID, clientSecret)
-	return client, nil
+	return cloud.NewClient(cloudURL, ""), nil
 }
 
 func remotesRestart(ctx context.Context, client localControlClient, stdout io.Writer, remoteID string) error {

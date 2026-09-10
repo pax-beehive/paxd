@@ -18,11 +18,9 @@ import (
 
 // Client communicates with the Fleet Cloud API.
 type Client struct {
-	baseURL        string
-	apiKey         string
-	cfClientID     string
-	cfClientSecret string
-	httpClient     *http.Client
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
 }
 
 // APIResponse is the standard pax-manager response envelope.
@@ -330,13 +328,6 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
-// WithCloudflareAccess attaches Cloudflare Access service-token headers.
-func (c *Client) WithCloudflareAccess(clientID, clientSecret string) *Client {
-	c.cfClientID = clientID
-	c.cfClientSecret = clientSecret
-	return c
-}
-
 func (c *Client) do(method, path string, body any) (*http.Response, error) {
 	return c.doWithHeaders(method, path, body, nil)
 }
@@ -372,12 +363,6 @@ func (c *Client) doWithContextAndHeaders(
 	}
 	if c.apiKey != "" {
 		req.Header.Set("X-Pax-Key", c.apiKey)
-	}
-	if c.cfClientID != "" {
-		req.Header.Set("CF-Access-Client-Id", c.cfClientID)
-	}
-	if c.cfClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Secret", c.cfClientSecret)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "paxd/0.1.0")

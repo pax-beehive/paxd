@@ -10,7 +10,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/control"
 )
 
-func TestProviderHeadersReturnsPaxKeyAndCloudflareAccess(t *testing.T) {
+func TestProviderHeadersIgnoresLegacyCloudflareAccess(t *testing.T) {
 	store := fakeStore{
 		material: control.RemoteAuthMaterial{
 			RemoteID:       "remote_prod",
@@ -23,8 +23,7 @@ func TestProviderHeadersReturnsPaxKeyAndCloudflareAccess(t *testing.T) {
 		},
 	}
 	resolver := fakeResolver{values: map[string]string{
-		"env:PAX_NODE_KEY":  "node-secret",
-		"env:PAX_CF_SECRET": "cf-secret",
+		"env:PAX_NODE_KEY": "node-secret",
 	}}
 
 	headers, err := NewProvider(store, resolver).Headers(context.Background(), "remote_prod")
@@ -32,8 +31,8 @@ func TestProviderHeadersReturnsPaxKeyAndCloudflareAccess(t *testing.T) {
 		t.Fatalf("Headers() error = %v", err)
 	}
 	assertHeader(t, headers, HeaderPaxKey, "node-secret")
-	assertHeader(t, headers, HeaderCloudflareAccessID, "cf-client")
-	assertHeader(t, headers, HeaderCloudflareAccessSecret, "cf-secret")
+	assertHeader(t, headers, HeaderCloudflareAccessID, "")
+	assertHeader(t, headers, HeaderCloudflareAccessSecret, "")
 }
 
 func TestProviderHeadersNoRemoteAuthReturnsOnlyPaxKey(t *testing.T) {
@@ -66,18 +65,6 @@ func TestProviderHeadersReturnsNoPartialHeadersOnErrors(t *testing.T) {
 			material: control.RemoteAuthMaterial{
 				RemoteID: "remote_prod",
 				AuthKind: control.RemoteAuthNone,
-			},
-			wantErr: ErrMissingSecretRef,
-		},
-		{
-			name: "missing cloudflare secret ref",
-			material: control.RemoteAuthMaterial{
-				RemoteID:       "remote_prod",
-				CloudAPIKeyRef: "inline:node-secret",
-				AuthKind:       control.RemoteAuthCloudflareAccess,
-				CloudflareAccess: &control.CloudflareAccessAuth{
-					ClientID: "cf-client",
-				},
 			},
 			wantErr: ErrMissingSecretRef,
 		},

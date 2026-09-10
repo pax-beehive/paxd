@@ -71,23 +71,9 @@ func (p *Provider) Headers(ctx context.Context, remoteID string) (http.Header, e
 	header.Set(HeaderPaxKey, paxKey)
 
 	switch material.AuthKind {
-	case "", control.RemoteAuthNone:
-		return header, nil
-	case control.RemoteAuthCloudflareAccess:
-		cf := material.CloudflareAccess
-		if cf == nil {
-			return nil, fmt.Errorf("%w: cloudflare access config is required", ErrMissingCredential)
-		}
-		clientID := strings.TrimSpace(cf.ClientID)
-		if clientID == "" {
-			return nil, fmt.Errorf("%w: cloudflare access client id", ErrMissingCredential)
-		}
-		clientSecret, err := resolveRequired(ctx, resolver, "cloudflare access client secret", cf.ClientSecretRef)
-		if err != nil {
-			return nil, err
-		}
-		header.Set(HeaderCloudflareAccessID, clientID)
-		header.Set(HeaderCloudflareAccessSecret, clientSecret)
+	case "", control.RemoteAuthNone, control.RemoteAuthCloudflareAccess:
+		// Legacy records may still reference CF secrets. Node authentication
+		// no longer resolves or transmits those credentials.
 		return header, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedAuth, material.AuthKind)

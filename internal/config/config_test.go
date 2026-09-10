@@ -96,9 +96,6 @@ func TestLoadAcceptsSmokeTestEnvAliases(t *testing.T) {
 	if cfg.Agent.AgentID != "agent_123" {
 		t.Fatalf("Agent.AgentID = %q", cfg.Agent.AgentID)
 	}
-	if cfg.Cloud.CFClientID != "cf_id" || cfg.Cloud.CFClientSecret != "cf_secret" {
-		t.Fatalf("Cloudflare service token aliases were not applied")
-	}
 	if cfg.ACPForwarder.Harness != "codex" {
 		t.Fatalf("ACPForwarder.Harness = %q", cfg.ACPForwarder.Harness)
 	}

@@ -45,14 +45,13 @@ When `HeaderProvider.Headers` is called for `remote_prod`
 Then the returned headers include `X-Pax-Key`  
 And the header value equals the resolved node API key
 
-### Scenario: returns Cloudflare Access headers
+### Scenario: legacy Cloudflare Access records need only the node key
 
-Given remote auth store returns Cloudflare Access client id and secret ref  
-And the secret resolver resolves the ref  
-When `HeaderProvider.Headers` is called  
-Then headers include `CF-Access-Client-Id`  
-And headers include `CF-Access-Client-Secret`  
-And the secret is resolved only in memory
+Given a remote has a legacy Cloudflare Access credential reference
+And that reference no longer resolves
+When headers are requested with a valid node key reference
+Then only `X-Pax-Key` is returned
+And the Cloudflare credential is not resolved
 
 ### Scenario: no remote auth returns only Pax key
 
@@ -67,13 +66,6 @@ Given the remote has no node API key ref
 When headers are requested  
 Then `HeaderProvider` returns an auth error  
 And no partial headers are returned
-
-### Scenario: missing secret ref returns auth error
-
-Given Cloudflare Access auth is configured without a secret ref  
-When headers are requested  
-Then `HeaderProvider` returns an auth or config error according to policy  
-And no partial CF Access secret header is returned
 
 ## Secret resolver
 

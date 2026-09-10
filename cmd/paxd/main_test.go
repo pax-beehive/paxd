@@ -82,7 +82,7 @@ func TestPaxdLoginCommitsRemoteAndLocalSecretRef(t *testing.T) {
 	assert.FileExists(t, secretPath)
 }
 
-func TestPaxdLoginPersistsCloudflareAccessAuthFromEnv(t *testing.T) {
+func TestPaxdLoginIgnoresLegacyCloudflareAccessEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PAX_CLOUD_CF_CLIENT_ID", "cf-client")
@@ -108,15 +108,9 @@ func TestPaxdLoginPersistsCloudflareAccessAuthFromEnv(t *testing.T) {
 	store := openTestDaemonStore(t, filepath.Join(home, ".paxd", "paxd.db"))
 	material, err := store.GetRemoteAuthMaterial(context.Background(), "prod")
 	require.NoError(t, err)
-	require.NotNil(t, material.CloudflareAccess)
-	secretPath := filepath.Join(home, ".paxd", "secrets", "remotes", "prod", "cf_access_client_secret")
-	assert.Equal(t, control.RemoteAuthCloudflareAccess, material.AuthKind)
-	assert.Equal(t, "cf-client", material.CloudflareAccess.ClientID)
-	assert.Equal(t, "file:"+secretPath, material.CloudflareAccess.ClientSecretRef)
-	assert.NotContains(t, material.CloudflareAccess.ClientSecretRef, "cf-secret")
-	data, err := os.ReadFile(secretPath)
-	require.NoError(t, err)
-	assert.Equal(t, "cf-secret\n", string(data))
+	assert.Nil(t, material.CloudflareAccess)
+	assert.Equal(t, control.RemoteAuthNone, material.AuthKind)
+	assert.NoFileExists(t, filepath.Join(home, ".paxd", "secrets", "remotes", "prod", "cf_access_client_secret"))
 }
 
 func TestPaxdLoginDoesNotExposeConfigFlag(t *testing.T) {
@@ -568,14 +562,9 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	store := openTestDaemonStore(t, filepath.Join(home, ".paxd", "paxd.db"))
 	material, err := store.GetRemoteAuthMaterial(context.Background(), "default")
 	require.NoError(t, err)
-	require.NotNil(t, material.CloudflareAccess)
-	secretPath := filepath.Join(home, ".paxd", "secrets", "remotes", "default", "cf_access_client_secret")
-	assert.Equal(t, control.RemoteAuthCloudflareAccess, material.AuthKind)
-	assert.Equal(t, "cf-client", material.CloudflareAccess.ClientID)
-	assert.Equal(t, "file:"+secretPath, material.CloudflareAccess.ClientSecretRef)
-	data, err := os.ReadFile(secretPath)
-	require.NoError(t, err)
-	assert.Equal(t, "cf-secret\n", string(data))
+	assert.Nil(t, material.CloudflareAccess)
+	assert.Equal(t, control.RemoteAuthNone, material.AuthKind)
+	assert.NoFileExists(t, filepath.Join(home, ".paxd", "secrets", "remotes", "default", "cf_access_client_secret"))
 }
 
 func TestPaxdSetupExposesOnlyCloudURLFlagWithDefault(t *testing.T) {

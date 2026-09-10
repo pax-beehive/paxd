@@ -82,7 +82,9 @@ func TestPairingGivenInvalidInputsWhenDerivingOrWrappingThenRejectsThem(t *testi
 	_, err = WrapAgentRootKey(make([]byte, 31), recipient.PublicKey().Bytes(), []byte("0123456789abcdef"), context, rand.Reader)
 	require.Error(t, err)
 	_, err = WrapAgentRootKey(make([]byte, 32), recipient.PublicKey().Bytes(), []byte("0123456789abcdef"), context, bytes.NewReader(nil))
-	require.ErrorContains(t, err, "wrapping nonce")
+	// Go compatibility settings determine whether ECDH consumes this reader.
+	// Either key generation or nonce generation must reject an empty source.
+	require.ErrorContains(t, err, "generate wrapping")
 	_, err = UnwrapAgentRootKey([]byte("bad"), []byte("0123456789abcdef"), context, WrappedAgentRootKey{})
 	require.ErrorContains(t, err, "private key")
 	_, err = UnwrapAgentRootKey(recipient.Bytes(), []byte("0123456789abcdef"), context, WrappedAgentRootKey{
