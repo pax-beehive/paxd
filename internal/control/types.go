@@ -542,6 +542,7 @@ const (
 	QueryLocalSessionGet       QueryType = "local_session.get"
 	QueryCommandGet            QueryType = "command.get"
 	QueryAttachmentLocalStatus QueryType = "attachment.local_status"
+	QueryBrowserControl        QueryType = "browser.control"
 	QuerySecretChannelOpen     QueryType = "secret_channel.open"
 )
 
@@ -562,12 +563,22 @@ type Query struct {
 	GetLocalSession          *GetLocalSessionQuery          `json:"get_local_session,omitempty"`
 	GetCommand               *GetCommandQuery               `json:"get_command,omitempty"`
 	GetAttachmentLocalStatus *GetAttachmentLocalStatusQuery `json:"get_attachment_local_status,omitempty"`
+	BrowserControl           *BrowserControlQuery           `json:"browser_control,omitempty"`
 	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
 }
 
 // OpenSecretChannelQuery has no fields: the channel is bound to whatever
 // authenticated Source issued the query, never to a caller-supplied id.
 type OpenSecretChannelQuery struct{}
+
+type BrowserControlQuery struct {
+	Operation string          `json:"operation"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+type BrowserControl interface {
+	Request(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+}
 
 // SecretChannelOpenResult hands an untrusted browser a fresh, single-use
 // public key. PublicKey is base64-encoded raw ECDH(P-256) point bytes.
@@ -726,6 +737,7 @@ type QueryResult struct {
 	LocalSessionSync      *LocalSessionSyncResult      `json:"local_session_sync,omitempty"`
 	Command               *CommandView                 `json:"command,omitempty"`
 	AttachmentLocalStatus *AttachmentLocalStatusResult `json:"attachment_local_status,omitempty"`
+	BrowserControl        json.RawMessage              `json:"browser_control,omitempty"`
 	SecretChannelOpen     *SecretChannelOpenResult     `json:"secret_channel_open,omitempty"`
 }
 

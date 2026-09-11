@@ -17,6 +17,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/artifactpublisher"
 	"github.com/pax-beehive/paxd/internal/attachmentlocalizer"
 	"github.com/pax-beehive/paxd/internal/auth"
+	"github.com/pax-beehive/paxd/internal/browsercontrol"
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
@@ -203,6 +204,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		SessionRuntimeReset: supervisors,
 		PaxdLifecycle:       maintenance,
 		SecretChannel:       secretChannelRegistry,
+		BrowserControl:      &browsercontrol.Client{},
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)

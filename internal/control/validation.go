@@ -395,6 +395,7 @@ func (query Query) Validate() error {
 		{QueryLocalSessionGet, query.GetLocalSession != nil, validatePtr(query.GetLocalSession)},
 		{QueryCommandGet, query.GetCommand != nil, validatePtr(query.GetCommand)},
 		{QueryAttachmentLocalStatus, query.GetAttachmentLocalStatus != nil, validatePtr(query.GetAttachmentLocalStatus)},
+		{QueryBrowserControl, query.BrowserControl != nil, validatePtr(query.BrowserControl)},
 		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
 	}
 
@@ -594,7 +595,7 @@ func knownQueryType(typ QueryType) bool {
 		QueryLocalSessionGet,
 		QueryCommandGet,
 		QueryAttachmentLocalStatus,
-		QuerySecretChannelOpen:
+		QuerySecretChannelOpen, QueryBrowserControl:
 		return true
 	default:
 		return false
@@ -603,4 +604,16 @@ func knownQueryType(typ QueryType) bool {
 
 func invalid(target, message string) ControlError {
 	return ControlError{Code: ErrCodeInvalidArgument, Message: message, Target: target}
+}
+
+func (query BrowserControlQuery) Validate() error {
+	if len(query.Payload) > 16384 {
+		return invalid("browser_control", "payload is too large")
+	}
+	switch query.Operation {
+	case "state", "policy", "decide", "revoke", "secret", "resume_sensitive", "view", "vnc_open", "vnc_exchange", "vnc_close":
+		return nil
+	default:
+		return invalid("browser_control", "unsupported operation")
+	}
 }

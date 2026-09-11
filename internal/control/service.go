@@ -110,6 +110,7 @@ type ServiceOptions struct {
 	SessionRuntime      SessionRuntimeReportService
 	SessionRuntimeReset SessionRuntimeResetService
 	PaxdLifecycle       PaxdLifecycle
+	BrowserControl      BrowserControl
 	SecretChannel       SecretChannel
 }
 
@@ -125,6 +126,7 @@ type ControlService struct {
 	sessionRuntime      SessionRuntimeReportService
 	sessionRuntimeReset SessionRuntimeResetService
 	paxdLifecycle       PaxdLifecycle
+	browserControl      BrowserControl
 	secretChannel       SecretChannel
 }
 
@@ -142,6 +144,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		sessionRuntimeReset: opts.SessionRuntimeReset,
 		paxdLifecycle:       opts.PaxdLifecycle,
 		secretChannel:       opts.SecretChannel,
+		browserControl:      opts.BrowserControl,
 	}
 }
 
@@ -440,6 +443,16 @@ func isDesiredSlotsOnlyUpdate(cmd Command) bool {
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {
 	if err := query.Validate(); err != nil {
 		return QueryResult{Type: query.Type, Error: ptr(controlErr(err))}, nil
+	}
+	if query.Type == QueryBrowserControl {
+		if s.browserControl == nil || src.Kind != SourceLocal && (src.Kind != SourceRemote || src.RemoteID == "") {
+			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "browser control unavailable"})}, nil
+		}
+		body, err := s.browserControl.Request(ctx, string(src.Kind)+":"+src.RemoteID, query.BrowserControl.Operation, query.BrowserControl.Payload)
+		if err != nil {
+			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: err.Error()})}, nil
+		}
+		return QueryResult{Type: query.Type, BrowserControl: body}, nil
 	}
 	if query.Type == QuerySecretChannelOpen {
 		return s.handleSecretChannelOpen(src)
