@@ -83,7 +83,7 @@ type ACPRouter struct {
 	store        ACPRouteStore
 	output       ACPRouterOutputSink
 	executable   func() (string, error)
-	workspace    func(string) (string, error)
+	workspace    func(string, bool) (string, error)
 	projector    *SessionRuntimeTurnProjector
 
 	mu                 sync.Mutex
@@ -126,7 +126,9 @@ func WithACPRouterWorkspaceResolver(
 ) ACPRouterOption {
 	return func(router *ACPRouter) {
 		if resolver != nil {
-			router.workspace = resolver
+			router.workspace = func(value string, _ bool) (string, error) {
+				return resolver(value)
+			}
 		}
 	}
 }
@@ -578,7 +580,7 @@ func (r *ACPRouter) handleSessionNewResponse(ctx context.Context, slotID string,
 }
 
 func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, route ACPRoute) (json.RawMessage, error) {
-	resumeDescriptor, err := r.localizeSessionLifecycleParams(route.ResumeParams)
+	resumeDescriptor, err := r.localizeSessionLifecycleParams(route.ResumeParams, false)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +652,7 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 }
 
 func (r *ACPRouter) localizeSessionLifecycleMessage(msg acpRPCMessage) (acpRPCMessage, []byte, error) {
-	params, err := r.localizeSessionLifecycleParams(msg.Params)
+	params, err := r.localizeSessionLifecycleParams(msg.Params, msg.Method == "session/new")
 	if err != nil {
 		return acpRPCMessage{}, nil, err
 	}
@@ -662,14 +664,14 @@ func (r *ACPRouter) localizeSessionLifecycleMessage(msg acpRPCMessage) (acpRPCMe
 	return msg, payload, nil
 }
 
-func (r *ACPRouter) localizeSessionLifecycleParams(params json.RawMessage) (json.RawMessage, error) {
+func (r *ACPRouter) localizeSessionLifecycleParams(params json.RawMessage, createWorkspace bool) (json.RawMessage, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(params, &raw); err != nil {
 		return nil, ACPRouterError{Code: "invalid_session_lifecycle", Message: "session lifecycle params must be an object"}
 	}
 	cwd := stringField(raw, "cwd")
 	if cwd != "" {
-		resolvedCWD, err := r.workspace(cwd)
+		resolvedCWD, err := r.workspace(cwd, createWorkspace)
 		if err != nil {
 			return nil, err
 		}

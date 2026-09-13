@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func resolveSessionWorkspace(input string) (string, error) {
+func resolveSessionWorkspace(input string, create bool) (string, error) {
 	value := strings.TrimSpace(input)
 	switch {
 	case value == "~":
@@ -45,10 +45,26 @@ func resolveSessionWorkspace(input string) (string, error) {
 		}
 	}
 	info, err := os.Stat(value)
+	if create && errors.Is(err, fs.ErrNotExist) {
+		// MkdirAll checks actual filesystem permissions, including ACLs and read-only mounts.
+		if err := os.MkdirAll(value, 0o700); err != nil {
+			code := "workspace_create_failed"
+			if errors.Is(err, fs.ErrPermission) {
+				code = "workspace_permission_denied"
+			}
+			return "", ACPRouterError{
+				Code:    code,
+				Message: "create workspace directory: " + err.Error(),
+			}
+		}
+		info, err = os.Stat(value)
+	}
 	if err != nil {
 		code := "workspace_unavailable"
 		if errors.Is(err, fs.ErrNotExist) {
 			code = "workspace_not_found"
+		} else if errors.Is(err, fs.ErrPermission) {
+			code = "workspace_permission_denied"
 		}
 		return "", ACPRouterError{
 			Code:    code,

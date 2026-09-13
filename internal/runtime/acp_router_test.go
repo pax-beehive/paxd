@@ -57,6 +57,52 @@ func TestACPRouterGivenHomeWorkspaceWhenCreatingSessionThenSendsResolvedAbsolute
 	assert.JSONEq(t, fmt.Sprintf(`{"cwd":%q,"mcpServers":[]}`, workspace), string(request.Params))
 }
 
+func TestACPRouterCreatesWorkspaceBeforeForwardingNewSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "nested", "project")
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+
+	err := router.HandleManagerFrame(t.Context(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"~/nested/project"}}`))
+	require.NoError(t, err)
+	require.DirExists(t, workspace)
+	require.Len(t, slot.writes, 1)
+	var request acpRPCMessage
+	require.NoError(t, json.Unmarshal(slot.writes[0], &request))
+	assert.JSONEq(t, fmt.Sprintf(`{"cwd":%q,"mcpServers":[]}`, workspace), string(request.Params))
+}
+
+func TestACPRouterRejectsInvalidWorkspaceBeforeForwardingNewSession(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(file, []byte("keep"), 0o600))
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+
+	err := router.HandleManagerFrame(t.Context(), []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":%q}}`, file)))
+	require.Error(t, err)
+	assert.Equal(t, "workspace_not_directory", routerErrorCode(err))
+	assert.Empty(t, slot.writes)
+}
+
+func TestACPRouterDoesNotCreateWorkspaceForExistingSession(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "missing", "project")
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	router := NewACPRouter("conn_1", store)
+	router.UpsertSlot(slot)
+
+	err := router.HandleManagerFrame(t.Context(), []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"session_1","cwd":%q}}`, workspace)))
+	require.Error(t, err)
+	assert.Equal(t, "workspace_not_found", routerErrorCode(err))
+	assert.NoDirExists(t, filepath.Dir(workspace))
+	assert.Empty(t, slot.writes)
+}
+
 func TestACPRouterCommitsNewSessionRouteBeforeEmittingResponse(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
