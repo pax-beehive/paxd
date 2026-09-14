@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -147,6 +148,7 @@ type pendingPrompt struct {
 }
 
 type pendingWorkerRequest struct {
+	requestID       json.RawMessage
 	slotID          string
 	processEpoch    string
 	nativeSessionID string
@@ -395,7 +397,8 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 			key := workerRequestKey(nativeSessionID, msg.ID)
 			r.mu.Lock()
 			pending := pendingWorkerRequest{
-				slotID: slotID, processEpoch: processEpoch, nativeSessionID: nativeSessionID,
+				requestID: append(json.RawMessage(nil), msg.ID...),
+				slotID:    slotID, processEpoch: processEpoch, nativeSessionID: nativeSessionID,
 			}
 			if isRuntimeApprovalMethod(msg.Method) {
 				if turn, active := r.projector.ActiveTurn(nativeSessionID); active {
@@ -495,6 +498,39 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 	}
 	if reserved {
 		r.releaseSlotReservation(slot.SlotID())
+	}
+	if msg.Method == "session/cancel" {
+		return r.cancelPendingPermissions(ctx, nativeSessionID, slot)
+	}
+	return nil
+}
+
+func (r *ACPRouter) cancelPendingPermissions(ctx context.Context, nativeSessionID string, slot ACPRouterSlot) error {
+	r.mu.Lock()
+	var requests []pendingWorkerRequest
+	for _, pending := range r.pendingWorkerReqs {
+		if pending.runtimeApproval && pending.nativeSessionID == nativeSessionID &&
+			pending.slotID == slot.SlotID() && pending.processEpoch == slot.ProcessEpoch() {
+			requests = append(requests, pending)
+		}
+	}
+	r.mu.Unlock()
+	for _, pending := range requests {
+		response := acpRPCMessage{
+			JSONRPC: "2.0", ID: pending.requestID,
+			Result: json.RawMessage(`{"outcome":{"outcome":"cancelled"}}`),
+		}
+		payload, err := json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		if err := r.handleManagerResponse(ctx, nativeSessionID, response, payload); err != nil {
+			var routerErr ACPRouterError
+			if errors.As(err, &routerErr) && routerErr.Code == "worker_request_missing" {
+				continue
+			}
+			return err
+		}
 	}
 	return nil
 }
