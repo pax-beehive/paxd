@@ -20,6 +20,7 @@ import (
 type Client struct {
 	DataDir     string
 	mu          sync.Mutex
+	previewMu   sync.Mutex
 	vncSessions map[string]*vncSession
 }
 
@@ -32,6 +33,26 @@ func (c *Client) Request(ctx context.Context, source, operation string, payload 
 	}
 	if operation == "vnc_open" || operation == "vnc_exchange" || operation == "vnc_close" {
 		return c.vnc(ctx, source, operation, payload)
+	}
+	if operation == "view" {
+		var view struct {
+			Source string `json:"source"`
+			Action struct {
+				Type string `json:"type"`
+			} `json:"action"`
+		}
+		if json.Unmarshal(payload, &view) != nil {
+			return nil, errors.New("invalid browser view")
+		}
+		if view.Source == "docker" {
+			if view.Action.Type != "screenshot" {
+				return nil, errors.New("unsupported Docker preview action")
+			}
+			return c.dockerPreview(ctx)
+		}
+		if view.Source != "" && view.Source != "native" {
+			return nil, errors.New("unsupported browser source")
+		}
 	}
 	routes := map[string]string{"view": "view", "state": "state", "policy": "policy", "decide": "decide", "revoke": "revoke", "secret": "secret", "resume_sensitive": "resume-sensitive"}
 	route, ok := routes[operation]

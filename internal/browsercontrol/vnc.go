@@ -103,6 +103,27 @@ func (c *Client) openVNC(ctx context.Context, source string) (json.RawMessage, e
 	if len(c.vncSessions) >= 2 {
 		return nil, errors.New("too many VNC viewers")
 	}
+	conn, err := dialDockerVNC(ctx)
+	if err != nil {
+		return nil, err
+	}
+	idBytes := make([]byte, 24)
+	if _, err := rand.Read(idBytes); err != nil {
+		conn.Close()
+		return nil, errors.New("VNC session creation failed")
+	}
+	id := hex.EncodeToString(idBytes)
+	s := &vncSession{source: source, conn: conn, created: time.Now()}
+	s.timer = time.AfterFunc(30*time.Second, func() { s.mu.Lock(); defer s.mu.Unlock(); s.close() })
+	if c.vncSessions == nil {
+		c.vncSessions = make(map[string]*vncSession)
+	}
+	c.vncSessions[id] = s
+	go s.read()
+	return json.Marshal(vncResult{ID: id, Data: base64.StdEncoding.EncodeToString([]byte("RFB 003.008\n"))})
+}
+
+func dialDockerVNC(ctx context.Context) (net.Conn, error) {
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", "127.0.0.1:5900")
 	if err != nil {
@@ -124,20 +145,7 @@ func (c *Client) openVNC(ctx context.Context, source string) (json.RawMessage, e
 		conn.Close()
 		return nil, errors.New("VNC authentication failed")
 	}
-	idBytes := make([]byte, 24)
-	if _, err := rand.Read(idBytes); err != nil {
-		conn.Close()
-		return nil, errors.New("VNC session creation failed")
-	}
-	id := hex.EncodeToString(idBytes)
-	s := &vncSession{source: source, conn: conn, created: time.Now()}
-	s.timer = time.AfterFunc(30*time.Second, func() { s.mu.Lock(); defer s.mu.Unlock(); s.close() })
-	if c.vncSessions == nil {
-		c.vncSessions = make(map[string]*vncSession)
-	}
-	c.vncSessions[id] = s
-	go s.read()
-	return json.Marshal(vncResult{ID: id, Data: base64.StdEncoding.EncodeToString([]byte("RFB 003.008\n"))})
+	return conn, nil
 }
 
 func authenticateVNC(conn net.Conn, password []byte) error {

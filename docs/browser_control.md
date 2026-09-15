@@ -23,6 +23,17 @@ connection routing constraints. VNC displays the complete shared Docker desktop.
 Operator action metadata is logged without request payloads, pixels, password
 values or VNC session credentials. Input bytes are not an individual-click audit.
 
+Docker preview uses the existing `view` operation with
+`{"source":"docker","action":{"type":"screenshot"}}`. It creates a short-lived,
+shared, authenticated local RFB connection, requests only Raw full-frame pixels,
+encodes a JPEG of at most 1280 pixels wide, and closes the connection. It creates
+no interactive viewer ID and sends no input. Captures are concurrency-limited,
+bounded to six seconds and eight megapixels, and never written to disk or history.
+The frontend retains only the latest frame and retries failed captures. Deploy
+this paxd before the preview-first Console; the existing Manager `view` forwarding
+and Docker VNC runtime need no change. Interactive takeover still uses the existing
+VNC exchange transport and does not add an agent broker pause or a WebSocket relay.
+
 Build with the repository's Go 1.26 toolchain. Verification:
 
 ```
