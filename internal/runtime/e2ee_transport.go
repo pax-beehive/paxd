@@ -116,6 +116,9 @@ func (s *AgentTunnelSession) sendSessionOutput(
 		return err
 	}
 	metadata := reliablemq.Metadata{"agent_id": s.spec.CloudAgentID}
+	if turnID := acpTurnID(ctx); turnID != "" {
+		metadata["turn_id"] = turnID
+	}
 	if managerSessionID != "" {
 		metadata["manager_session_id"] = managerSessionID
 	}

@@ -414,7 +414,7 @@ func (s *AgentTunnelSession) runWithACPPool(
 		if err != nil {
 			return err
 		}
-		return pool.HandleManagerFrameForSession(ctx, nativeSessionID, rewritten)
+		return pool.HandleManagerFrameForSession(withACPTurnID(ctx, frame.Metadata["turn_id"]), nativeSessionID, rewritten)
 	}))
 	bridge = s.newE2EEBridge(engine)
 	defer func() { _ = bridge.close(context.Background()) }()

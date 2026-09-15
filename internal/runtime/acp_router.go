@@ -87,21 +87,23 @@ type ACPRouter struct {
 	workspace    func(string, bool) (string, error)
 	projector    *SessionRuntimeTurnProjector
 
-	mu                 sync.Mutex
-	slots              map[string]ACPRouterSlot
-	pendingNew         map[string]pendingNewSession
-	pendingPrompts     map[string]pendingPrompt
-	pendingWorkerReqs  map[string]pendingWorkerRequest
-	activeSlotPrompts  map[string]string
-	activeSessionTurns map[string]string
-	waiters            map[string]chan acpRPCWaitResult
-	slotReservations   map[string]int
-	lastPrompt         map[string]uint64
-	lastAssigned       map[string]uint64
-	drainingSlots      map[string]*slotDrain
-	promptSeq          uint64
-	assignmentSeq      uint64
-	resumeSeq          int64
+	mu                  sync.Mutex
+	slots               map[string]ACPRouterSlot
+	pendingNew          map[string]pendingNewSession
+	pendingPrompts      map[string]pendingPrompt
+	completedPrompts    map[string]pendingPrompt
+	completedPromptKeys []string
+	pendingWorkerReqs   map[string]pendingWorkerRequest
+	activeSlotPrompts   map[string]string
+	activeSessionTurns  map[string]string
+	waiters             map[string]chan acpRPCWaitResult
+	slotReservations    map[string]int
+	lastPrompt          map[string]uint64
+	lastAssigned        map[string]uint64
+	drainingSlots       map[string]*slotDrain
+	promptSeq           uint64
+	assignmentSeq       uint64
+	resumeSeq           int64
 }
 
 type ACPRouterOption func(*ACPRouter)
@@ -142,7 +144,7 @@ type pendingNewSession struct {
 
 type pendingPrompt struct {
 	nativeSessionID string
-	turnInstanceID  string
+	turnID          string
 	slotID          string
 	processEpoch    string
 }
@@ -152,7 +154,7 @@ type pendingWorkerRequest struct {
 	slotID          string
 	processEpoch    string
 	nativeSessionID string
-	turnInstanceID  string
+	turnID          string
 	runtimeApproval bool
 }
 
@@ -242,10 +244,11 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 	}
 	for id, prompt := range r.pendingPrompts {
 		if prompt.slotID == slotID && prompt.processEpoch == processEpoch {
+			r.rememberPromptLocked(id, prompt)
 			delete(r.pendingPrompts, id)
 			delete(r.activeSessionTurns, prompt.nativeSessionID)
 			delete(r.activeSlotPrompts, slotID)
-			r.projector.CompleteTurn(prompt.nativeSessionID, prompt.turnInstanceID)
+			r.projector.CompleteTurn(prompt.nativeSessionID, prompt.turnID)
 		}
 	}
 	for id, pending := range r.pendingNew {
@@ -385,6 +388,7 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		if nativeSessionID == "" {
 			nativeSessionID = promptSessionID
 		}
+		ctx = withACPTurnID(ctx, r.promptTurnForResponse(msg.ID, slotID, processEpoch))
 		emitErr := r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
 		if promptSessionID != "" {
 			r.releasePromptForResponse(msg.ID, slotID, processEpoch)
@@ -392,6 +396,7 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		return emitErr
 	}
 	nativeSessionID := firstSessionID("", msg.Params)
+	ctx = r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch)
 	if len(bytes.TrimSpace(msg.ID)) > 0 {
 		if nativeSessionID != "" {
 			key := workerRequestKey(nativeSessionID, msg.ID)
@@ -401,10 +406,10 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 				slotID:    slotID, processEpoch: processEpoch, nativeSessionID: nativeSessionID,
 			}
 			if isRuntimeApprovalMethod(msg.Method) {
-				if turn, active := r.projector.ActiveTurn(nativeSessionID); active {
-					pending.turnInstanceID = turn.TurnInstanceID
+				if turn, active := r.projector.ActiveTurn(nativeSessionID); active && turn.SlotID == slotID && turn.ProcessEpoch == processEpoch {
+					pending.turnID = turn.TurnID
 					pending.runtimeApproval = true
-					r.projector.WaitForApproval(nativeSessionID, turn.TurnInstanceID, msg.ID)
+					r.projector.WaitForApproval(nativeSessionID, turn.TurnID, msg.ID)
 				}
 			}
 			r.pendingWorkerReqs[key] = pending
@@ -477,7 +482,7 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 		}
 	}
 	if needsPromptLease {
-		if err := r.acquirePromptLease(nativeSessionID, slot, msg.ID); err != nil {
+		if err := r.acquirePromptLease(nativeSessionID, slot, msg.ID, acpTurnID(ctx)); err != nil {
 			if reserved {
 				r.releaseSlotReservation(slot.SlotID())
 			}
@@ -542,6 +547,10 @@ func (r *ACPRouter) handleManagerResponse(ctx context.Context, nativeSessionID s
 	key := workerRequestKey(nativeSessionID, msg.ID)
 	r.mu.Lock()
 	source, ok := r.pendingWorkerReqs[key]
+	if turnID := acpTurnID(ctx); ok && turnID != "" && source.turnID != "" && turnID != source.turnID {
+		r.mu.Unlock()
+		return ACPRouterError{Code: "turn_mismatch", Message: "permission response belongs to another turn"}
+	}
 	if ok {
 		delete(r.pendingWorkerReqs, key)
 	}
@@ -557,7 +566,7 @@ func (r *ACPRouter) handleManagerResponse(ctx context.Context, nativeSessionID s
 	}
 	err := slot.Send(ctx, append([]byte(nil), payload...))
 	if err == nil && source.runtimeApproval {
-		r.projector.ResolveApproval(source.nativeSessionID, source.turnInstanceID)
+		r.projector.ResolveApproval(source.nativeSessionID, source.turnID)
 	}
 	r.notifySlotDrain(source.slotID)
 	return err
@@ -867,7 +876,7 @@ func (r *ACPRouter) routeSlotDraining(route ACPRoute) bool {
 	return drain != nil && drain.processEpoch == route.BoundProcessEpoch
 }
 
-func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlot, requestID json.RawMessage) error {
+func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlot, requestID json.RawMessage, turnIDs ...string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.activeSessionTurns[nativeSessionID] != "" {
@@ -880,7 +889,7 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	if key == "" {
 		return ACPRouterError{Code: "request_id_required", Message: "session/prompt requires an id"}
 	}
-	turn, err := r.projector.StartTurn(nativeSessionID, requestID, slot.SlotID(), slot.ProcessEpoch())
+	turn, err := r.projector.StartTurn(nativeSessionID, requestID, slot.SlotID(), slot.ProcessEpoch(), turnIDs...)
 	if err != nil {
 		return ACPRouterError{Code: "runtime_projection_failed", Message: err.Error()}
 	}
@@ -888,7 +897,7 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	r.activeSlotPrompts[slot.SlotID()] = nativeSessionID
 	r.pendingPrompts[key] = pendingPrompt{
 		nativeSessionID: nativeSessionID,
-		turnInstanceID:  turn.TurnInstanceID,
+		turnID:          turn.TurnID,
 		slotID:          slot.SlotID(),
 		processEpoch:    slot.ProcessEpoch(),
 	}
@@ -899,6 +908,9 @@ func (r *ACPRouter) promptSessionForResponse(requestID json.RawMessage, slotID s
 	key := rpcIDKey(requestID)
 	r.mu.Lock()
 	pending, ok := r.pendingPrompts[key]
+	if !ok {
+		pending, ok = r.completedPrompts[internalWaiterKey(slotID, processEpoch, requestID)]
+	}
 	r.mu.Unlock()
 	if !ok || pending.slotID != slotID || pending.processEpoch != processEpoch {
 		return ""
@@ -911,10 +923,11 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 	r.mu.Lock()
 	pending, ok := r.pendingPrompts[key]
 	if ok && pending.slotID == slotID && pending.processEpoch == processEpoch {
+		r.rememberPromptLocked(key, pending)
 		delete(r.pendingPrompts, key)
 		delete(r.activeSessionTurns, pending.nativeSessionID)
 		delete(r.activeSlotPrompts, slotID)
-		r.projector.CompleteTurn(pending.nativeSessionID, pending.turnInstanceID)
+		r.projector.CompleteTurn(pending.nativeSessionID, pending.turnID)
 		r.signalSlotDrainIfIdleLocked(slotID)
 	}
 	r.mu.Unlock()
@@ -927,13 +940,14 @@ func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID s
 func (r *ACPRouter) releasePrompt(nativeSessionID string, slotID string, requestKey string) {
 	r.mu.Lock()
 	pending := r.pendingPrompts[requestKey]
+	r.rememberPromptLocked(requestKey, pending)
 	delete(r.pendingPrompts, requestKey)
 	delete(r.activeSessionTurns, nativeSessionID)
 	delete(r.activeSlotPrompts, slotID)
 	r.signalSlotDrainIfIdleLocked(slotID)
 	r.mu.Unlock()
-	if pending.turnInstanceID != "" {
-		r.projector.CompleteTurn(nativeSessionID, pending.turnInstanceID)
+	if pending.turnID != "" {
+		r.projector.CompleteTurn(nativeSessionID, pending.turnID)
 	}
 }
 

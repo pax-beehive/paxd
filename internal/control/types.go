@@ -438,6 +438,7 @@ type SessionRuntimeSnapshotReport struct {
 }
 
 type SessionActiveTurnReport struct {
+	TurnID            string          `json:"turn_id,omitempty"`
 	NativeSessionID   string          `json:"native_session_id"`
 	TurnInstanceID    string          `json:"turn_instance_id"`
 	PromptRequestID   json.RawMessage `json:"prompt_request_id"`

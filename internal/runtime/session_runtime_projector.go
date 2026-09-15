@@ -20,7 +20,7 @@ const (
 
 type SessionActiveTurn struct {
 	NativeSessionID   string               `json:"native_session_id"`
-	TurnInstanceID    string               `json:"turn_instance_id"`
+	TurnID            string               `json:"turn_id"`
 	PromptRequestID   json.RawMessage      `json:"prompt_request_id"`
 	RuntimeStatus     SessionRuntimeStatus `json:"runtime_status"`
 	PendingApprovalID json.RawMessage      `json:"pending_approval_id,omitempty"`
@@ -76,6 +76,7 @@ func (p *SessionRuntimeTurnProjector) StartTurn(
 	promptRequestID json.RawMessage,
 	slotID string,
 	processEpoch string,
+	turnIDs ...string,
 ) (SessionActiveTurn, error) {
 	if p == nil {
 		return SessionActiveTurn{}, fmt.Errorf("session runtime projector is required")
@@ -88,13 +89,24 @@ func (p *SessionRuntimeTurnProjector) StartTurn(
 	if len(requestID) == 0 || !json.Valid(requestID) || bytes.Equal(requestID, []byte("null")) {
 		return SessionActiveTurn{}, fmt.Errorf("prompt request id is required")
 	}
-	turnInstanceID, err := newSessionRuntimeTurnInstanceID()
-	if err != nil {
-		return SessionActiveTurn{}, err
+	turnID := ""
+	if len(turnIDs) > 0 {
+		turnID = strings.TrimSpace(turnIDs[0])
+	}
+	if turnID == "" {
+		// Compatibility for older managers and local callers without envelope metadata.
+		var err error
+		turnID, err = newSessionRuntimeTurnID()
+		if err != nil {
+			return SessionActiveTurn{}, err
+		}
+	}
+	if len(turnID) > 512 {
+		return SessionActiveTurn{}, fmt.Errorf("turn id is too long")
 	}
 	turn := SessionActiveTurn{
 		NativeSessionID: nativeSessionID,
-		TurnInstanceID:  turnInstanceID,
+		TurnID:          turnID,
 		PromptRequestID: append(json.RawMessage(nil), requestID...),
 		RuntimeStatus:   SessionRuntimeRunning,
 		SlotID:          strings.TrimSpace(slotID),
@@ -105,6 +117,9 @@ func (p *SessionRuntimeTurnProjector) StartTurn(
 	if _, exists := p.active[nativeSessionID]; exists {
 		return SessionActiveTurn{}, fmt.Errorf("native session already has an active turn")
 	}
+	if _, completed := p.terminal[runtimeTurnKey(nativeSessionID, turnID)]; completed {
+		return SessionActiveTurn{}, fmt.Errorf("turn already completed; start a new turn")
+	}
 	p.active[nativeSessionID] = turn
 	p.markChangedLocked()
 	return cloneSessionActiveTurn(turn), nil
@@ -112,7 +127,7 @@ func (p *SessionRuntimeTurnProjector) StartTurn(
 
 func (p *SessionRuntimeTurnProjector) WaitForApproval(
 	nativeSessionID string,
-	turnInstanceID string,
+	turnID string,
 	pendingApprovalID json.RawMessage,
 ) bool {
 	if p == nil {
@@ -121,7 +136,7 @@ func (p *SessionRuntimeTurnProjector) WaitForApproval(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	turn, ok := p.active[nativeSessionID]
-	if !ok || turn.TurnInstanceID != turnInstanceID {
+	if !ok || turn.TurnID != turnID {
 		return false
 	}
 	turn.RuntimeStatus = SessionRuntimeWaitingApproval
@@ -133,14 +148,14 @@ func (p *SessionRuntimeTurnProjector) WaitForApproval(
 	return true
 }
 
-func (p *SessionRuntimeTurnProjector) ResolveApproval(nativeSessionID string, turnInstanceID string) bool {
+func (p *SessionRuntimeTurnProjector) ResolveApproval(nativeSessionID string, turnID string) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	turn, ok := p.active[nativeSessionID]
-	if !ok || turn.TurnInstanceID != turnInstanceID {
+	if !ok || turn.TurnID != turnID {
 		return false
 	}
 	changed := turn.RuntimeStatus != SessionRuntimeRunning || len(turn.PendingApprovalID) > 0
@@ -153,20 +168,20 @@ func (p *SessionRuntimeTurnProjector) ResolveApproval(nativeSessionID string, tu
 	return true
 }
 
-func (p *SessionRuntimeTurnProjector) CompleteTurn(nativeSessionID string, turnInstanceID string) bool {
+func (p *SessionRuntimeTurnProjector) CompleteTurn(nativeSessionID string, turnID string) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	turn, ok := p.active[nativeSessionID]
-	if !ok || turn.TurnInstanceID != turnInstanceID {
+	if !ok || turn.TurnID != turnID {
 		return false
 	}
 	hidden := p.isSuppressedLocked(turn)
 	delete(p.active, nativeSessionID)
-	delete(p.suppressed, runtimeTurnKey(nativeSessionID, turnInstanceID))
-	p.rememberTerminalLocked(nativeSessionID, turnInstanceID)
+	delete(p.suppressed, runtimeTurnKey(nativeSessionID, turnID))
+	p.rememberTerminalLocked(nativeSessionID, turnID)
 	if !hidden {
 		p.markChangedLocked()
 	}
@@ -189,8 +204,8 @@ func (p *SessionRuntimeTurnProjector) CompleteSlot(slotID string, processEpoch s
 			visibleChanged = true
 		}
 		delete(p.active, nativeSessionID)
-		delete(p.suppressed, runtimeTurnKey(nativeSessionID, turn.TurnInstanceID))
-		p.rememberTerminalLocked(nativeSessionID, turn.TurnInstanceID)
+		delete(p.suppressed, runtimeTurnKey(nativeSessionID, turn.TurnID))
+		p.rememberTerminalLocked(nativeSessionID, turn.TurnID)
 		removed++
 	}
 	if visibleChanged {
@@ -263,7 +278,7 @@ func (p *SessionRuntimeTurnProjector) Reset(nativeSessionID string, expectedTurn
 	if !ok {
 		return SessionRuntimeResetResult{Status: SessionRuntimeResetNotFound, Revision: p.revision}
 	}
-	if turn.TurnInstanceID != expectedTurnInstanceID {
+	if turn.TurnID != expectedTurnInstanceID {
 		return SessionRuntimeResetResult{Status: SessionRuntimeResetConflict, Revision: p.revision}
 	}
 	if _, suppressed := p.suppressed[key]; suppressed {
@@ -298,12 +313,12 @@ func (p *SessionRuntimeTurnProjector) markChangedLocked() {
 }
 
 func (p *SessionRuntimeTurnProjector) isSuppressedLocked(turn SessionActiveTurn) bool {
-	_, suppressed := p.suppressed[runtimeTurnKey(turn.NativeSessionID, turn.TurnInstanceID)]
+	_, suppressed := p.suppressed[runtimeTurnKey(turn.NativeSessionID, turn.TurnID)]
 	return suppressed
 }
 
-func (p *SessionRuntimeTurnProjector) rememberTerminalLocked(nativeSessionID string, turnInstanceID string) {
-	key := runtimeTurnKey(nativeSessionID, turnInstanceID)
+func (p *SessionRuntimeTurnProjector) rememberTerminalLocked(nativeSessionID string, turnID string) {
+	key := runtimeTurnKey(nativeSessionID, turnID)
 	if _, exists := p.terminal[key]; exists {
 		return
 	}
@@ -317,8 +332,8 @@ func (p *SessionRuntimeTurnProjector) rememberTerminalLocked(nativeSessionID str
 	delete(p.terminal, oldest)
 }
 
-func runtimeTurnKey(nativeSessionID string, turnInstanceID string) string {
-	return nativeSessionID + "\x00" + turnInstanceID
+func runtimeTurnKey(nativeSessionID string, turnID string) string {
+	return nativeSessionID + "\x00" + turnID
 }
 
 func cloneSessionActiveTurn(turn SessionActiveTurn) SessionActiveTurn {
@@ -327,7 +342,7 @@ func cloneSessionActiveTurn(turn SessionActiveTurn) SessionActiveTurn {
 	return turn
 }
 
-func newSessionRuntimeTurnInstanceID() (string, error) {
+func newSessionRuntimeTurnID() (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", fmt.Errorf("allocate turn instance id: %w", err)

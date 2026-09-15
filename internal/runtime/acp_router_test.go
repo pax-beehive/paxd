@@ -417,7 +417,7 @@ func TestACPRouterProjectsCanonicalRuntimeFromPromptLifecycle(t *testing.T) {
 	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":"approval-1","method":"session/request_permission","params":{"sessionId":"session_1"}}`)))
 	snapshot = router.RuntimeSnapshot()
 	require.Len(t, snapshot.ActiveTurns, 1)
-	assert.Equal(t, turn.TurnInstanceID, snapshot.ActiveTurns[0].TurnInstanceID)
+	assert.Equal(t, turn.TurnID, snapshot.ActiveTurns[0].TurnID)
 	assert.Equal(t, SessionRuntimeWaitingApproval, snapshot.ActiveTurns[0].RuntimeStatus)
 
 	require.NoError(t, router.HandleManagerFrameForSession(ctx, "session_1", []byte(`{"jsonrpc":"2.0","id":"approval-1","result":{"outcome":"cancelled"}}`)))

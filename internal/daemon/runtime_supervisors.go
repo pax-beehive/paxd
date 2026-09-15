@@ -253,7 +253,7 @@ func (s *runtimeSupervisors) BuildSessionRuntimeSnapshots(
 		}
 		for _, turn := range snapshot.ActiveTurns {
 			report.ActiveTurns = append(report.ActiveTurns, control.SessionActiveTurnReport{
-				NativeSessionID: turn.NativeSessionID, TurnInstanceID: turn.TurnInstanceID,
+				NativeSessionID: turn.NativeSessionID, TurnID: turn.TurnID, TurnInstanceID: turn.TurnID,
 				PromptRequestID:   append(json.RawMessage(nil), turn.PromptRequestID...),
 				RuntimeStatus:     string(turn.RuntimeStatus),
 				PendingApprovalID: append(json.RawMessage(nil), turn.PendingApprovalID...),
