@@ -18,7 +18,7 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 推荐先安装 `paxl`，再通过 `paxl setup --with-daemon` 安装和配置 `paxd`。`paxctl` 已退役，不再作为独立 binary 发布：
 
 ```bash
-curl -fsSL --max-redirs 1 https://api.lakeward.net/api/v1/public/paxl/install.sh | bash
+curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxl/install.sh | bash
 paxl setup --with-daemon
 ```
 
@@ -35,7 +35,7 @@ paxl setup --with-daemon --cloud-url "$PAX_MANAGER_URL"
 如果只需要直接安装 daemon runtime，`paxd` installer 仍然可用，但它只安装 `paxd` binary：
 
 ```text
-https://api.lakeward.net/api/v1/public/paxd/install.sh
+https://api.paxworkspace.net/api/v1/public/paxd/install.sh
 ```
 
 installer 默认把 `paxd` 安装到 `~/.local/bin`。如果该目录不在 `PATH` 中，安装仍会
@@ -62,14 +62,14 @@ installer 入口允许且最多跟随 manager 返回的第一次 302；拿到脚
 支持的 stable `paxd` binary 平台链接：
 
 ```text
-https://api.lakeward.net/api/v1/public/paxd/download?platform=darwin/arm64&tags=stable
-https://api.lakeward.net/api/v1/public/paxd/download?platform=darwin/amd64&tags=stable
-https://api.lakeward.net/api/v1/public/paxd/download?platform=linux/arm64&tags=stable
-https://api.lakeward.net/api/v1/public/paxd/download?platform=linux/amd64&tags=stable
-https://api.lakeward.net/api/v1/public/paxd/download?platform=windows/amd64&tags=stable
+https://api.paxworkspace.net/api/v1/public/paxd/download?platform=darwin/arm64&tags=stable
+https://api.paxworkspace.net/api/v1/public/paxd/download?platform=darwin/amd64&tags=stable
+https://api.paxworkspace.net/api/v1/public/paxd/download?platform=linux/arm64&tags=stable
+https://api.paxworkspace.net/api/v1/public/paxd/download?platform=linux/amd64&tags=stable
+https://api.paxworkspace.net/api/v1/public/paxd/download?platform=windows/amd64&tags=stable
 ```
 
-安装器和 binary 下载接口走 `https://api.lakeward.net`。paxd 默认也使用 `https://api.lakeward.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://ws.lakeward.net`。
+安装器和 binary 下载接口走 `https://api.paxworkspace.net`。paxd 默认使用 `https://wsapi.paxworkspace.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://paxworkspace.net`。
 
 如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行 `paxl setup --with-daemon`。setup 会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
 
@@ -232,7 +232,7 @@ paxd run
 paxd run --debug-http 127.0.0.1:8765
 ```
 
-默认生产入口是 `https://api.lakeward.net`。`paxd setup/login` 使用 browser approval flow；CLI 本身不需要用户手动提供 node secret。
+默认机器连接入口是 `https://wsapi.paxworkspace.net`。`paxd setup/login` 使用 browser approval flow；CLI 本身不需要用户手动提供 node secret。
 
 ## 架构
 

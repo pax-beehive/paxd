@@ -324,9 +324,9 @@ func ResolverURLFromCloudAPIURL(rawURL string) (string, error) {
 	}
 	// The hosted tunnel is Access-protected; anonymous artifacts use the public origin.
 	// Only map the known root origin, leaving self-hosted paths and ports intact.
-	if base.Scheme == "https" && strings.EqualFold(base.Host, "wsapi.lakeward.net") &&
+	if base.Scheme == "https" && strings.EqualFold(base.Host, "wsapi.paxworkspace.net") &&
 		strings.TrimRight(base.Path, "/") == "" && base.User == nil {
-		base.Host = "api.lakeward.net"
+		base.Host = "api.paxworkspace.net"
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + resolverPath
 	base.RawPath = ""

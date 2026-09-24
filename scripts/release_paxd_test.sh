@@ -27,9 +27,9 @@ trap 'rm -rf "$installer_test_dir"' EXIT
 installer_test_path="${installer_test_dir}/install.sh"
 installer_default_line="$(sed -n '4p' "${script_dir}/installer.sh")"
 assert_equal \
-  "https://api.lakeward.net" \
+  "https://api.paxworkspace.net" \
   "$(env -u PAX_DOWNLOAD_URL bash -c "${installer_default_line}; printf '%s' \"\$PAX_DOWNLOAD_URL\"")" \
-  "generic installer defaults binary resolution to the Lakeward manager"
+  "generic installer defaults binary resolution to the PaxWorkspace manager"
 bake_installer_manager_url \
   "${script_dir}/installer.sh" \
   "$installer_test_path" \

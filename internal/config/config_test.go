@@ -14,7 +14,7 @@ func TestLoadDefaultsCloudAPIURL(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 
 	require.NoError(t, err)
-	assert.Equal(t, "https://api.lakeward.net", DefaultCloudAPIURL)
+	assert.Equal(t, "https://wsapi.paxworkspace.net", DefaultCloudAPIURL)
 	assert.Equal(t, DefaultCloudAPIURL, cfg.Cloud.APIURL)
 	assert.Equal(t, DefaultCloudAPIURL, cfg.Cloud.URL)
 }

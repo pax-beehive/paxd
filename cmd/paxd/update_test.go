@@ -59,10 +59,10 @@ func TestPaxdUpdateCheckReportsAvailableVersion(t *testing.T) {
 	assert.NotContains(t, stdout.String(), "https://download.test/paxd")
 }
 
-func TestDefaultPaxdUpdateResolverUsesLakewardHostedManager(t *testing.T) {
+func TestDefaultPaxdUpdateResolverUsesPaxWorkspaceHostedManager(t *testing.T) {
 	assert.Equal(
 		t,
-		"https://api.lakeward.net/api/v1/public/paxd/download",
+		"https://api.paxworkspace.net/api/v1/public/paxd/download",
 		defaultPaxdUpdateResolverURL,
 	)
 }

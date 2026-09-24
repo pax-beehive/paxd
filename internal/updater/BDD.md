@@ -17,11 +17,11 @@ And it does not contact the legacy hosted Pax resolver.
 
 ### Scenario: hosted tunnel is protected by Cloudflare Access
 
-Given the remote uses `https://wsapi.lakeward.net` and no resolver override
+Given the remote uses `https://wsapi.paxworkspace.net` and no resolver override
 
 When paxd derives its upgrade resolver
 
-Then it uses `https://api.lakeward.net/api/v1/public/paxd/download`
+Then it uses `https://api.paxworkspace.net/api/v1/public/paxd/download`
 
 And it does not change the remote's tunnel URL or follow Access login redirects.
 

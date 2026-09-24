@@ -233,23 +233,23 @@ func TestResolverURLFromCloudAPIURL(t *testing.T) {
 	}{
 		{
 			name:    "hosted tunnel uses public download origin",
-			baseURL: "https://wsapi.lakeward.net/",
-			want:    "https://api.lakeward.net/api/v1/public/paxd/download",
+			baseURL: "https://wsapi.paxworkspace.net/",
+			want:    "https://api.paxworkspace.net/api/v1/public/paxd/download",
 		},
 		{
 			name:    "custom hosted port stays explicit",
-			baseURL: "https://wsapi.lakeward.net:8443",
-			want:    "https://wsapi.lakeward.net:8443/api/v1/public/paxd/download",
+			baseURL: "https://wsapi.paxworkspace.net:8443",
+			want:    "https://wsapi.paxworkspace.net:8443/api/v1/public/paxd/download",
 		},
 		{
 			name:    "custom hosted path stays explicit",
-			baseURL: "https://wsapi.lakeward.net/custom",
-			want:    "https://wsapi.lakeward.net/custom/api/v1/public/paxd/download",
+			baseURL: "https://wsapi.paxworkspace.net/custom",
+			want:    "https://wsapi.paxworkspace.net/custom/api/v1/public/paxd/download",
 		},
 		{
 			name:    "similar hostname stays self hosted",
-			baseURL: "https://wsapi.lakeward.net.example",
-			want:    "https://wsapi.lakeward.net.example/api/v1/public/paxd/download",
+			baseURL: "https://wsapi.paxworkspace.net.example",
+			want:    "https://wsapi.paxworkspace.net.example/api/v1/public/paxd/download",
 		},
 		{
 			name:    "origin",

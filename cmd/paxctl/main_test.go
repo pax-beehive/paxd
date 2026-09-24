@@ -394,7 +394,7 @@ func TestPaxctlRemotesLoginCommitsThroughLocalAPI(t *testing.T) {
 	defer restoreClient()
 	restoreLogin := stubPaxctlRemoteLogin(t, func(ctx context.Context, spec remotelogin.LoginSpec, opts remotelogin.Options) (remotelogin.LoginResult, error) {
 		assert.Equal(t, "staging", spec.RemoteID)
-		assert.Equal(t, "https://api.lakeward.net", spec.CloudAPIURL)
+		assert.Equal(t, "https://wsapi.paxworkspace.net", spec.CloudAPIURL)
 		return remotelogin.LoginResult{
 			RemoteID:    spec.RemoteID,
 			CloudAPIURL: spec.CloudAPIURL,
