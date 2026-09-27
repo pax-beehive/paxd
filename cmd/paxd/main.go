@@ -135,6 +135,7 @@ func cmdSetupCommand() *cli.Command {
 		Usage: "login this machine and start paxd as a background service",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
+			&cli.BoolFlag{Name: "registration-token-env", Usage: "register using the one-time PAX_REGISTRATION_TOKEN environment variable instead of browser pairing"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return cmdSetup(ctx, cmd)
@@ -156,7 +157,7 @@ func cmdSetup(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	remoteID := "default"
-	result, err := runRemoteLogin(ctx, remotelogin.LoginSpec{
+	spec := remotelogin.LoginSpec{
 		RemoteID:    remoteID,
 		CloudAPIURL: cloudURL,
 		Node: remotelogin.NodeRegistrationInfo{
@@ -167,10 +168,13 @@ func cmdSetup(ctx context.Context, cmd *cli.Command) error {
 			Arch:        runtime.GOARCH,
 			PaxdVersion: version,
 		},
-	}, remotelogin.Options{
-		Client: client,
-		Stdout: commandWriter(cmd),
-	})
+	}
+	var result remotelogin.LoginResult
+	if cmd.Bool("registration-token-env") {
+		result, err = registerSetupToken(ctx, cfg, spec, client)
+	} else {
+		result, err = runRemoteLogin(ctx, spec, remotelogin.Options{Client: client, Stdout: commandWriter(cmd)})
+	}
 	if err != nil {
 		return err
 	}

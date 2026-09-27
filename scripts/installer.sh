@@ -289,6 +289,9 @@ main() {
   if [[ "$PAX_SETUP_AFTER_INSTALL" == "1" ]]; then
     log "Starting interactive Pax setup"
     setup_args=(setup)
+    if [[ -n "${PAX_REGISTRATION_TOKEN:-}" ]]; then
+      setup_args+=(--registration-token-env)
+    fi
     if [[ -n "$PAX_CLOUD_URL" ]]; then
       setup_args+=(--cloud-url "${PAX_CLOUD_URL%/}")
     fi

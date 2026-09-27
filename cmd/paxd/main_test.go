@@ -567,10 +567,11 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(home, ".paxd", "secrets", "remotes", "default", "cf_access_client_secret"))
 }
 
-func TestPaxdSetupExposesOnlyCloudURLFlagWithDefault(t *testing.T) {
+func TestPaxdSetupExposesCloudURLAndTokenEnvironmentOption(t *testing.T) {
 	cmd := cmdSetupCommand()
 
-	require.Len(t, cmd.Flags, 1)
+	require.Len(t, cmd.Flags, 2)
+	assert.Contains(t, flagNames(cmd.Flags), "registration-token-env")
 	flag, ok := cmd.Flags[0].(*cli.StringFlag)
 	require.True(t, ok)
 	assert.Equal(t, "cloud-url", flag.Names()[0])
