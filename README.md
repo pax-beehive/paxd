@@ -568,3 +568,19 @@ tail -f ~/.pax/paxd.log
 ## License
 
 MIT
+
+### Console Quick connect
+
+Settings → Devices → Add device now offers Quick connect alongside the existing
+browser pairing flow. Console generates an installer command with a one-use
+registration token in `PAX_REGISTRATION_TOKEN` and `PAX_SETUP_AFTER_INSTALL=1`.
+The installer calls `paxd setup --registration-token-env`; setup consumes the
+credential, clears it before launching the service, saves the returned node key
+using the existing owner-only storage, and installs/restarts the background
+service. Existing configured devices are rejected before token consumption;
+use their existing connection or explicitly run login to change accounts.
+Running setup without this flag retains browser pairing.
+
+Release the updated installer and paxd binary before enabling Console Quick
+connect. The command requires macOS or Linux; token expiry is controlled by the
+server and Console offers regeneration when needed.

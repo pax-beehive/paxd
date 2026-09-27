@@ -195,3 +195,25 @@ grep -Fq 'installation succeeded' <<<"$main_output" ||
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' <<<"$main_output" ||
   fail_test "successful install without PATH did not print guidance"
 printf 'ok - installation succeeds outside PATH and prints guidance\n'
+
+# Exercise setup dispatch without installing a real binary or service.
+download_and_install_product() {
+  installed_target="$test_dir/fake-paxd"
+  cat >"$installed_target" <<'BIN'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo 'paxd test'
+else
+  printf 'setup-args:%s\n' "$*"
+  [[ "${PAX_REGISTRATION_TOKEN:-}" == 'test-onetime-token' ]] && echo 'token-present' || true
+fi
+BIN
+  chmod 0755 "$installed_target"
+}
+setup_output="$(PAX_SETUP_AFTER_INSTALL=1 PAX_CLOUD_URL=https://test.example PAX_REGISTRATION_TOKEN=test-onetime-token main)"
+grep -Fq 'setup-args:setup --registration-token-env --cloud-url https://test.example' <<<"$setup_output" || fail_test 'token setup option was not forwarded'
+grep -Fq 'token-present' <<<"$setup_output" || fail_test 'token environment was not inherited by setup'
+if grep -Fq 'test-onetime-token' <<<"$setup_output"; then fail_test 'token value leaked into setup output'; fi
+pair_output="$(PAX_SETUP_AFTER_INSTALL=1 PAX_CLOUD_URL=https://test.example PAX_REGISTRATION_TOKEN= main)"
+grep -Fq 'setup-args:setup --cloud-url https://test.example' <<<"$pair_output" || fail_test 'pairing setup was not preserved'
+printf 'ok - token setup and browser pairing dispatch remain distinct\n'
