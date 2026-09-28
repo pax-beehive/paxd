@@ -97,6 +97,7 @@ type ACPRouter struct {
 	activeSlotPrompts   map[string]string
 	activeSessionTurns  map[string]string
 	waiters             map[string]chan acpRPCWaitResult
+	resumeTranscripts   map[resumeTranscriptScope]struct{}
 	slotReservations    map[string]int
 	lastPrompt          map[string]uint64
 	lastAssigned        map[string]uint64
@@ -197,6 +198,11 @@ func (r *ACPRouter) UpsertSlot(slot ACPRouterSlot) {
 		return
 	}
 	r.mu.Lock()
+	for scope := range r.resumeTranscripts {
+		if scope.slotID == slot.SlotID() && scope.processEpoch != slot.ProcessEpoch() {
+			delete(r.resumeTranscripts, scope)
+		}
+	}
 	if drain := r.drainingSlots[slot.SlotID()]; drain != nil && drain.processEpoch != slot.ProcessEpoch() {
 		r.closeSlotDrainLocked(drain)
 		delete(r.drainingSlots, slot.SlotID())
@@ -225,6 +231,11 @@ func (r *ACPRouter) BeginSlotDrain(slotID string, processEpoch string) <-chan st
 
 func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 	r.mu.Lock()
+	for scope := range r.resumeTranscripts {
+		if scope.slotID == slotID && (processEpoch == "" || scope.processEpoch == processEpoch) {
+			delete(r.resumeTranscripts, scope)
+		}
+	}
 	if slot := r.slots[slotID]; slot != nil && (processEpoch == "" || slot.ProcessEpoch() == processEpoch) {
 		delete(r.slots, slotID)
 	}
@@ -396,6 +407,9 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		return emitErr
 	}
 	nativeSessionID := firstSessionID("", msg.Params)
+	if r.suppressResumeTranscript(nativeSessionID, slotID, processEpoch, msg) {
+		return nil
+	}
 	ctx = r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch)
 	if len(bytes.TrimSpace(msg.ID)) > 0 {
 		if nativeSessionID != "" {
@@ -489,12 +503,25 @@ func (r *ACPRouter) handleSessionOperation(ctx context.Context, nativeSessionID 
 			return err
 		}
 	}
+	scope := resumeTranscriptScope{nativeSessionID, slot.SlotID(), slot.ProcessEpoch()}
+	if msg.Method == "session/resume" {
+		r.setResumeTranscriptSuppressed(scope, true)
+	}
+	// Keep the guard through the resume response and configuration publication.
+	// Only an actual prompt (or an explicitly requested history load) opens it.
+	openedTranscript := false
+	if needsPromptLease || msg.Method == "session/load" {
+		openedTranscript = r.setResumeTranscriptSuppressed(scope, false)
+	}
 	if err := slot.Send(ctx, append([]byte(nil), payload...)); err != nil {
 		if reserved {
 			r.releaseSlotReservation(slot.SlotID())
 		}
 		if needsPromptLease {
 			r.releasePrompt(nativeSessionID, slot.SlotID(), rpcIDKey(msg.ID))
+		}
+		if openedTranscript {
+			r.setResumeTranscriptSuppressed(scope, true)
 		}
 		return err
 	}
@@ -652,6 +679,7 @@ func (r *ACPRouter) resumeColdRoute(ctx context.Context, slot ACPRouterSlot, rou
 		return nil, err
 	}
 	waiter := r.registerInternalWaiter(slot.SlotID(), slot.ProcessEpoch(), json.RawMessage(fmt.Sprintf("%q", id)))
+	r.setResumeTranscriptSuppressed(resumeTranscriptScope{route.NativeSessionID, slot.SlotID(), slot.ProcessEpoch()}, true)
 	if err := slot.Send(ctx, request); err != nil {
 		r.dropInternalWaiter(slot.SlotID(), slot.ProcessEpoch(), json.RawMessage(fmt.Sprintf("%q", id)))
 		return nil, err
