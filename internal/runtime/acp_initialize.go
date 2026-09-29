@@ -27,8 +27,9 @@ type acpRPCError struct {
 }
 
 type acpClientInitProfile struct {
-	Params      json.RawMessage
-	ProfileHash string
+	Params           json.RawMessage
+	ProfileHash      string
+	CapabilitiesHash string
 }
 
 type acpWorkerInitResult struct {
@@ -60,9 +61,26 @@ func buildACPClientInitProfile(paxdVersion string) (acpClientInitProfile, error)
 		return acpClientInitProfile{}, err
 	}
 	return acpClientInitProfile{
-		Params:      params,
-		ProfileHash: hashBytes(params),
+		Params:           params,
+		ProfileHash:      hashBytes(params),
+		CapabilitiesHash: clientCapabilitiesHash(params),
 	}, nil
+}
+
+// clientCapabilitiesHash excludes descriptive clientInfo, including the daemon version.
+func clientCapabilitiesHash(params json.RawMessage) string {
+	var value struct {
+		ProtocolVersion    int            `json:"protocolVersion"`
+		ClientCapabilities map[string]any `json:"clientCapabilities"`
+	}
+	if json.Unmarshal(params, &value) != nil || value.ProtocolVersion == 0 || value.ClientCapabilities == nil {
+		return ""
+	}
+	payload, err := canonicalJSON(value)
+	if err != nil {
+		return ""
+	}
+	return hashBytes(payload)
 }
 
 func buildInternalACPInitializeRequest(profile acpClientInitProfile) ([]byte, error) {

@@ -15,16 +15,17 @@ func TestACPCapabilityReportsStoresRuntimeReportForControlSnapshot(t *testing.T)
 	initializedAt := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
 
 	err := reports.ReportACPPoolCapability(ctx, runtimes.ACPPoolCapabilityReport{
-		SchemaVersion:        runtimes.ACPPoolCapabilityReportSchemaVersion,
-		ConnectionID:         "conn_codex",
-		ReportGeneration:     7,
-		PaxdVersion:          "dev",
-		CommandFingerprint:   "fingerprint_1",
-		ClientProfileHash:    "profile_hash_1",
-		WorkerResultHash:     "worker_hash_1",
-		ProtocolVersion:      1,
-		ClientCapabilityKeys: []string{"fs"},
-		WorkerCapabilityKeys: []string{"prompt"},
+		SchemaVersion:          runtimes.ACPPoolCapabilityReportSchemaVersion,
+		ConnectionID:           "conn_codex",
+		ReportGeneration:       7,
+		PaxdVersion:            "dev",
+		CommandFingerprint:     "fingerprint_1",
+		ClientProfileHash:      "profile_hash_1",
+		ClientCapabilitiesHash: "capabilities_hash_1",
+		WorkerResultHash:       "worker_hash_1",
+		ProtocolVersion:        1,
+		ClientCapabilityKeys:   []string{"fs"},
+		WorkerCapabilityKeys:   []string{"prompt"},
 		Implementation: &runtimes.ACPImplementationIdentity{
 			ACPAgent:            &runtimes.ACPAgentImplementation{Name: "hermes-agent", Version: "0.17.0"},
 			IdentityFingerprint: "identity_1",
@@ -37,6 +38,7 @@ func TestACPCapabilityReportsStoresRuntimeReportForControlSnapshot(t *testing.T)
 	report, ok := reports.ACPPoolCapabilityReport(ctx, "conn_codex")
 	require.True(t, ok)
 	require.Equal(t, "dev", report.PaxdVersion)
+	require.Equal(t, "capabilities_hash_1", report.ClientCapabilitiesHash)
 	require.Equal(t, "worker_hash_1", report.WorkerResultHash)
 	require.Equal(t, []string{"prompt"}, report.WorkerCapabilityKeys)
 	require.Equal(t, initializedAt, report.InitializedAt)

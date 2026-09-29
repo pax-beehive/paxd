@@ -378,20 +378,21 @@ func (p *persistentACPProcess) reportCapability(ctx context.Context, phase strin
 	runtimeFallback := p.runtimeFallback
 	p.mu.Unlock()
 	report := ACPPoolCapabilityReport{
-		ConnectionID:         p.spec.ConnectionID,
-		ReportGeneration:     p.reportGen,
-		PaxdVersion:          p.paxdVersion,
-		CommandFingerprint:   p.fingerprint,
-		ClientProfileHash:    profile.ProfileHash,
-		WorkerResultHash:     result.ResultHash,
-		ProtocolVersion:      protocolVersionFromResult(result.Result),
-		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
-		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
-		Implementation:       implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
-		InitPhase:            phase,
-		InitializedAt:        result.InitializedAt,
-		LastErrorCode:        errCode,
-		LastErrorMessage:     errMessage,
+		ConnectionID:           p.spec.ConnectionID,
+		ReportGeneration:       p.reportGen,
+		PaxdVersion:            p.paxdVersion,
+		CommandFingerprint:     p.fingerprint,
+		ClientProfileHash:      profile.ProfileHash,
+		ClientCapabilitiesHash: profile.CapabilitiesHash,
+		WorkerResultHash:       result.ResultHash,
+		ProtocolVersion:        protocolVersionFromResult(result.Result),
+		ClientCapabilityKeys:   capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
+		WorkerCapabilityKeys:   capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		Implementation:         implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
+		InitPhase:              phase,
+		InitializedAt:          result.InitializedAt,
+		LastErrorCode:          errCode,
+		LastErrorMessage:       errMessage,
 	}.WithDefaults()
 	return p.reporter.ReportACPPoolCapability(ctx, report)
 }
