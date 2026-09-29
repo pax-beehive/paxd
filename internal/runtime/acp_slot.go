@@ -189,18 +189,19 @@ func (s *ACPSlot) capabilityReport() ACPPoolCapabilityReport {
 	runtimeFallback := s.runtimeFallback
 	s.mu.Unlock()
 	return ACPPoolCapabilityReport{
-		ConnectionID:         s.spec.ConnectionID,
-		ReportGeneration:     s.spec.Generation,
-		PaxdVersion:          s.spec.PaxdVersion,
-		CommandFingerprint:   s.spec.CommandFingerprint,
-		ClientProfileHash:    profile.ProfileHash,
-		WorkerResultHash:     result.ResultHash,
-		ProtocolVersion:      protocolVersionFromResult(result.Result),
-		ClientCapabilityKeys: capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
-		WorkerCapabilityKeys: capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
-		Implementation:       implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
-		InitPhase:            ACPPoolInitPhaseReady,
-		InitializedAt:        result.InitializedAt,
+		ConnectionID:           s.spec.ConnectionID,
+		ReportGeneration:       s.spec.Generation,
+		PaxdVersion:            s.spec.PaxdVersion,
+		CommandFingerprint:     s.spec.CommandFingerprint,
+		ClientProfileHash:      profile.ProfileHash,
+		ClientCapabilitiesHash: profile.CapabilitiesHash,
+		WorkerResultHash:       result.ResultHash,
+		ProtocolVersion:        protocolVersionFromResult(result.Result),
+		ClientCapabilityKeys:   capabilityKeys(profile.Params, "clientCapabilities", "client_capabilities"),
+		WorkerCapabilityKeys:   capabilityKeys(result.Result, "agentCapabilities", "agent_capabilities", "capabilities"),
+		Implementation:         implementationIdentityWithRuntimeFallback(result.Result, runtimeFallback),
+		InitPhase:              ACPPoolInitPhaseReady,
+		InitializedAt:          result.InitializedAt,
 	}.WithDefaults()
 }
 

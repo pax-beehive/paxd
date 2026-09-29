@@ -128,6 +128,7 @@ func TestACPSlotSessionReportsReadyAfterInitialize(t *testing.T) {
 		assert.Equal(t, "fingerprint_a", report.CommandFingerprint)
 		assert.NotEmpty(t, report.ClientProfileHash)
 		assert.NotEmpty(t, report.WorkerResultHash)
+		assert.NotEmpty(t, report.ClientCapabilitiesHash)
 		assert.Equal(t, 1, report.ProtocolVersion)
 		assert.Equal(t, ACPPoolInitPhaseReady, report.InitPhase)
 		assert.Equal(t, ACPPoolConsistencyConsistent, report.PoolConsistency)
