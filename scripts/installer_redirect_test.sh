@@ -201,7 +201,7 @@ download_and_install_product() {
   installed_target="$test_dir/fake-paxd"
   cat >"$installed_target" <<'BIN'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
+if [[ "${1:-}" == "--version" || "${1:-}" == "version" ]]; then
   echo 'paxd test'
 else
   printf 'setup-args:%s\n' "$*"

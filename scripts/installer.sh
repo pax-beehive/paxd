@@ -121,7 +121,8 @@ choose_install_dir() {
 print_path_hint() {
   local install_dir="$1"
   local target="$2"
-  local shell_name="${SHELL##*/}"
+  local shell_name="${SHELL:-}"
+  shell_name="${shell_name##*/}"
   local path_command quoted_dir profile
 
   if path_has_dir "$install_dir"; then
@@ -226,25 +227,25 @@ download_and_install_product() {
     fail "expected JSON from $api; got a non-JSON response. Check whether the public artifact download endpoint is behind an auth/login redirect."
   fi
 
-  download_url="$(printf '%s' "$response" | json_field data.url)"
-  sha256="$(printf '%s' "$response" | json_field data.sha256)"
-  size="$(printf '%s' "$response" | json_field data.size_bytes)"
-  version="$(printf '%s' "$response" | json_field data.version)"
+  download_url="$(printf '%s' "$response" | json_field data.url)" || return 1
+  sha256="$(printf '%s' "$response" | json_field data.sha256)" || return 1
+  size="$(printf '%s' "$response" | json_field data.size_bytes)" || return 1
+  version="$(printf '%s' "$response" | json_field data.version)" || return 1
   binary_path="$pax_installer_tmpdir/$binary_name"
 
   log "Downloading ${product} ${bold}${version}${reset} (${size} bytes)"
-  download_with_progress "$download_url" "$binary_path"
+  download_with_progress "$download_url" "$binary_path" || return 1
 
-  got_sha="$(checksum_file "$binary_path")"
+  got_sha="$(checksum_file "$binary_path")" || return 1
   [[ "$got_sha" == "$sha256" ]] || fail "${product} sha256 mismatch: got $got_sha expected $sha256"
-  chmod 0755 "$binary_path"
+  chmod 0755 "$binary_path" || return 1
 
   target="$install_dir/$binary_name"
   log "Installing ${product} to ${bold}${target}${reset}"
   if ! cp "$binary_path" "$target" 2>/dev/null; then
     if command -v sudo >/dev/null 2>&1; then
-      sudo cp "$binary_path" "$target"
-      sudo chmod 0755 "$target"
+      sudo cp "$binary_path" "$target" || return 1
+      sudo chmod 0755 "$target" || return 1
     else
       fail "cannot write to $install_dir and sudo is unavailable"
     fi
@@ -258,8 +259,11 @@ main() {
   require_cmd curl
   require_cmd python3
 
-  local platform binary_name encoded_platform tmpdir install_dir target
+  local platform binary_name encoded_platform tmpdir install_dir target installed_version
   platform="$(detect_platform)"
+  if [[ "$PAX_SETUP_AFTER_INSTALL" == "1" && "$platform" != darwin/* && "$platform" != linux/* ]]; then
+    fail "one-command device setup requires macOS or Linux"
+  fi
   binary_name="$PAX_BINARY_NAME"
   if [[ -z "$binary_name" ]]; then
     binary_name="paxd"
@@ -277,31 +281,49 @@ main() {
   trap 'rm -rf "${pax_installer_tmpdir:-}"' EXIT
 
   install_dir="$(choose_install_dir)"
-  mkdir -p "$install_dir"
+  mkdir -p "$install_dir" || fail "cannot create the installation directory"
+  install_dir="$(cd "$install_dir" && pwd)" || fail "cannot resolve the installation directory"
 
-  download_and_install_product "paxd" "$binary_name" "$encoded_platform" "$install_dir"
+  if [[ "$PAX_SETUP_AFTER_INSTALL" == "1" ]]; then
+    download_and_install_product "paxl" "paxl" "$encoded_platform" "$install_dir" ||
+      fail "failed to install paxl; device setup was not started"
+    installed_version="$("$installed_target" version)" || fail "installed paxl could not run"
+    log "Installed: $installed_version"
+  fi
+
+  download_and_install_product "paxd" "$binary_name" "$encoded_platform" "$install_dir" ||
+    fail "failed to install paxd; device setup was not started"
   target="$installed_target"
 
   print_path_hint "$install_dir" "$target"
 
-  log "Installed: $("${target}" --version)"
+  installed_version="$("$target" --version)" || fail "installed paxd could not run"
+  log "Installed: $installed_version"
 
   if [[ "$PAX_SETUP_AFTER_INSTALL" == "1" ]]; then
-    log "Starting interactive Pax setup"
+    # The calling shell cannot inherit PATH changes from a piped installer.
+    # Setup and the background service must still resolve both installed tools.
+    export PATH="$install_dir:${PATH:-}"
     setup_args=(setup)
     if [[ -n "${PAX_REGISTRATION_TOKEN:-}" ]]; then
+      log "Connecting this device with the registration token"
       setup_args+=(--registration-token-env)
+    else
+      log "Starting Pax browser login"
     fi
     if [[ -n "$PAX_CLOUD_URL" ]]; then
       setup_args+=(--cloud-url "${PAX_CLOUD_URL%/}")
     fi
+    # exec skips EXIT traps, so remove downloaded artifacts before handing off.
+    rm -rf "$pax_installer_tmpdir"
+    pax_installer_tmpdir=""
     exec "$target" "${setup_args[@]}"
   fi
 
   if [[ -n "$PAX_CLOUD_URL" ]]; then
-    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxl setup --with-daemon --cloud-url ${PAX_CLOUD_URL%/}${reset}"
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}\"$target\" setup --cloud-url ${PAX_CLOUD_URL%/}${reset}"
   else
-    printf '%s\n' "${green}Done.${reset} Run: ${bold}paxl setup --with-daemon${reset}"
+    printf '%s\n' "${green}Done.${reset} Run: ${bold}\"$target\" setup${reset}"
   fi
 }
 
