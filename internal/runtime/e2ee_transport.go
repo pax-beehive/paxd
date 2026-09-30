@@ -176,6 +176,22 @@ func (b *e2eeTransportBridge) handleCommand(
 		sessionID: envelope.SessionID, keyEpoch: envelope.KeyEpoch, connectionEpoch: epoch,
 	}
 	b.trackCommand(plaintext, session)
+	localized, err := localizeE2EEAttachments(ctx, plaintext, rootKey, envelope)
+	if err != nil {
+		var original struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(plaintext, &original)
+		response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": original.ID, "error": map[string]any{"code": -32000, "message": err.Error()}})
+		if _, sendErr := b.sendOutput(ctx, "", response); sendErr != nil {
+			return true, sendErr
+		}
+		if completeErr := b.receipts.CompleteE2EECommand(ctx, b.agentID, envelope.RecordID); completeErr != nil {
+			return true, completeErr
+		}
+		return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
+	}
+	plaintext = localized
 	historyRecords, err := b.history.projectCommand(envelope.SessionID, plaintext)
 	if err != nil {
 		return true, err
