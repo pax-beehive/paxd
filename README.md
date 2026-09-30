@@ -15,11 +15,56 @@ paxd 本身不运行 Agent — 它是 Agent 和 Cloud 之间的**可靠消息中
 
 ## How to install
 
-推荐先安装 `paxl`，再通过 `paxl setup --with-daemon` 安装和配置 `paxd`。`paxctl` 已退役，不再作为独立 binary 发布：
+### 一键连接设备（macOS / Linux）
+
+连接模式会将 `paxl` 和 `paxd` 安装到同一目录，检查两个程序能运行，然后完成设备
+授权并启动后台服务。默认目录是 `~/.local/bin`；安装过程不需要 Node.js。
+运行脚本需要 Bash、curl、Python 3，以及 shasum 或 sha256sum。
+
+方式一：从已登录的 Console 获取一次性 token，在需要连接的电脑上运行。
+Console 应把下面的占位符替换成实际 token，让用户直接复制完整命令：
+
+```bash
+curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxd/install.sh |
+  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN='<Console token>' bash
+```
+
+方式二：从电脑终端发起原有浏览器登录。运行后按照终端显示的链接和配对码完成授权：
+
+```bash
+curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxd/install.sh |
+  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN= bash
+```
+
+两种方式均由 installer 执行 `paxd setup`，token 方式额外传入
+`--registration-token-env`。两个工具都安装成功后才开始设备注册；下载、校验或安装
+失败会停止。setup 使用安装目录中的绝对路径，并把该目录加入自身和后台服务的
+PATH，即使用户当前终端尚未配置 PATH 也能完成连接。后续终端使用可按脚本提示设置
+PATH，或使用 `~/.local/bin/paxl`；脚本不会修改用户的 shell 配置。
+
+token 已使用或过期时，回到 Console 生成新命令。已经配置的设备会被 token setup
+拒绝覆盖；恢复连接使用 `paxd service restart`，需要更换账号时显式运行 `paxd login`。
+Agent 及 ACP adapter 的检查、安装和创建属于下一步，不在设备连接脚本中执行。
+
+自托管环境应同时指定下载入口和设备连接的 API 地址，token 必须来自同一个环境：
+
+```bash
+export PAX_MANAGER_URL='https://pax.home.example'
+curl -fsSL --max-redirs 1 "$PAX_MANAGER_URL/api/v1/public/paxd/install.sh" |
+  PAX_DOWNLOAD_URL="$PAX_MANAGER_URL" PAX_CLOUD_URL="$PAX_MANAGER_URL" \
+  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN='<Console token>' bash
+```
+
+`PAX_INSTALL_DIR` 可覆盖两个工具的共同安装目录，`PAX_TAG` 选择两者的发布通道
+（默认为 `stable`）。以上双工具连接行为需要发布更新后的 installer 才会在线上生效。
+
+### 分别安装
+
+也可以先安装 `paxl`，再通过 `paxl daemon setup` 安装和配置 `paxd`。`paxctl` 已退役，不再作为独立 binary 发布：
 
 ```bash
 curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxl/install.sh | bash
-paxl setup --with-daemon
+~/.local/bin/paxl daemon setup
 ```
 
 自托管 manager 使用自己的入口。release 生成的 installer 已默认指向发布它的
@@ -29,10 +74,10 @@ manager；显式传下载入口也兼容旧 installer，并能避免误回 hoste
 export PAX_MANAGER_URL='https://pax.home.example'
 curl -fsSL --max-redirs 1 "$PAX_MANAGER_URL/api/v1/public/paxl/install.sh" |
   PAXL_DOWNLOAD_URL="$PAX_MANAGER_URL" bash
-paxl setup --with-daemon --cloud-url "$PAX_MANAGER_URL"
+~/.local/bin/paxl daemon setup --cloud-url "$PAX_MANAGER_URL"
 ```
 
-如果只需要直接安装 daemon runtime，`paxd` installer 仍然可用，但它只安装 `paxd` binary：
+未设置 `PAX_SETUP_AFTER_INSTALL=1` 时，`paxd` installer 只安装 `paxd` binary：
 
 ```text
 https://api.paxworkspace.net/api/v1/public/paxd/install.sh
@@ -71,7 +116,7 @@ https://api.paxworkspace.net/api/v1/public/paxd/download?platform=windows/amd64&
 
 安装器和 binary 下载接口走 `https://api.paxworkspace.net`。paxd 默认使用 `https://wsapi.paxworkspace.net` 调用 Pax API；pairing/login 的用户入口由 pax-manager 返回，默认是 `https://paxworkspace.net`。
 
-如果你把这个仓库或安装链接交给一个 coding agent，可以直接让它运行 `paxl setup --with-daemon`。setup 会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会把 node API key 写入本机配置。
+如果已经安装 `paxl`，可以运行 `paxl daemon setup`。setup 会打印 Pax pairing URL 和 6 位 code；用户登录并 approve 后，paxd 会保存 node API key 并启动后台服务。`paxl setup --with-daemon` 还会安装 Agent hooks，不是单纯连接设备的入口。
 
 ## Release artifacts
 
@@ -574,7 +619,9 @@ MIT
 Settings → Devices → Add device now offers Quick connect alongside the existing
 browser pairing flow. Console generates an installer command with a one-use
 registration token in `PAX_REGISTRATION_TOKEN` and `PAX_SETUP_AFTER_INSTALL=1`.
-The installer calls `paxd setup --registration-token-env`; setup consumes the
+In setup mode the installer installs both paxl and paxd, verifies that both
+executables run, and adds their install directory to the setup process PATH.
+It then calls `paxd setup --registration-token-env`; setup consumes the
 credential, clears it before launching the service, saves the returned node key
 using the existing owner-only storage, and installs/restarts the background
 service. Existing configured devices are rejected before token consumption;
