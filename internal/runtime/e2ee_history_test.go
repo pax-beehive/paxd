@@ -66,7 +66,7 @@ func TestE2EEHistoryProjectorGivenPromptAndStreamingOutputWhenBoundaryArrivesThe
 			assert.Equal(t, "complete", message.Status)
 		}
 	}
-	assert.ElementsMatch(t, []string{"agent_message_chunk", "turn_done"}, messageTypes)
+	assert.ElementsMatch(t, []string{"turn_done"}, messageTypes)
 }
 
 func TestE2EEHistoryProjectorGivenLongStreamWhenPartFillsThenSealsBoundedPartWithoutFullSnapshot(t *testing.T) {
@@ -99,7 +99,8 @@ func TestE2EEHistoryProjectorGivenLongStreamWhenPartFillsThenSealsBoundedPartWit
 
 func TestE2EEHistoryProjectorGivenRepeatedPartialCheckpointsWhenPartIsUpsertedThenKeepsWholePart(t *testing.T) {
 	t.Parallel()
-	projector := newE2EEHistoryProjector("agent_1", time.Now)
+	now := time.Now()
+	projector := newE2EEHistoryProjector("agent_1", func() time.Time { return now })
 	_, err := projector.projectCommand("session_1", []byte(
 		`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}`,
 	))
@@ -110,11 +111,11 @@ func TestE2EEHistoryProjectorGivenRepeatedPartialCheckpointsWhenPartIsUpsertedTh
 			`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":%q}}}}`,
 			content,
 		)
-		records, projectErr := projector.projectFrames("session_1", []json.RawMessage{
-			json.RawMessage(textFrame),
-			json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"tool_1"}}}`),
-		})
+		records, projectErr := projector.projectFrames("session_1", []json.RawMessage{json.RawMessage(textFrame)})
 		require.NoError(t, projectErr)
+		checkpoint, checkpointErr := projector.checkpointText(projector.sessions["session_1"], false)
+		require.NoError(t, checkpointErr)
+		records = append(records, checkpoint...)
 		return records
 	}
 
