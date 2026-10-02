@@ -416,8 +416,7 @@ func (s *AgentTunnelSession) runWithACPPool(
 		}
 		return pool.HandleManagerFrameForSession(withACPTurnID(ctx, frame.Metadata["turn_id"]), nativeSessionID, rewritten)
 	}))
-	bridge = s.newE2EEBridge(engine)
-	defer func() { _ = bridge.close(context.Background()) }()
+	bridge = s.poolE2EEBridge(pool, engine)
 	pool.AttachOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, nativeSessionID string, payload []byte) error {
 		managerSessionID, rewritten, err := boundary.outbound(ctx, nativeSessionID, payload)
 		if err != nil {

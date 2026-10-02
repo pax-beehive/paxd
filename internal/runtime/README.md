@@ -87,6 +87,13 @@ the routing metadata as AES-256-GCM AAD, decrypts immediately before local ACP
 dispatch, and encrypts attributable ACP output before it enters the reliable
 outbound journal.
 
+In slot-pool mode, the pool owns the E2EE bridge for the lifetime of its ACP
+processes. WebSocket reconnects replace only its reliable sender; native-session
+routes, pending requests/batches, active turns, and history revisions survive.
+The output sink continues journaling encrypted frames during network backoff.
+A different agent identity starts a new bridge. A daemon restart still requires
+normal session resume; this state is not persisted across daemon restarts.
+
 Business IDs are independent from reliable transport sequence numbers:
 
 - `command_id` is persisted in `e2ee_command_receipts`. An incomplete receipt is
