@@ -75,6 +75,9 @@ https://api.paxworkspace.net/api/v1/public/paxd/download?platform=windows/amd64&
 
 ## Release artifacts
 
+Paired-node regional routing and disposable cache recovery are documented in
+[docs/node_routing.md](docs/node_routing.md).
+
 `scripts/release_paxd.sh` 使用 AWS CLI 把 binary 和 installer 上传到 AWS
 S3 或 S3-compatible storage。每个 object 都设置 content type 与 `sha256`
 metadata，并把同一 digest 的 base64 形式作为原生 S3 SHA-256 checksum；所有上传

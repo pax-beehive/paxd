@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/noderouting"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
@@ -320,7 +321,8 @@ func NewClient(baseURL, apiKey string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: &noderouting.Transport{},
+			Timeout:   30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
