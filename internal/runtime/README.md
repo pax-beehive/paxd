@@ -103,6 +103,10 @@ Business IDs are independent from reliable transport sequence numbers:
   journal. Reliable replay preserves that envelope and ID for Manager-side
   deduplication.
 - `connection_epoch` fences commands from old Manager WebSocket connections.
+- `turn_ref` groups encrypted events for whole-turn replay. It matches the
+  `turn_id` inside the authenticated batch and contains no ACP content. The
+  original user prompt enters this journal before dispatch, allowing replay
+  without waiting for canonical history projection. See `docs/e2ee_history.md`.
 
 Streaming `session/update` text/thought deltas are collected per canonical PAX
 session and flushed after 75 ms or 16 KiB. Turn boundaries, tool calls,
