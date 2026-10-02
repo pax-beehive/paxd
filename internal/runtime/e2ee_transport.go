@@ -48,6 +48,7 @@ type e2eeTransportBridge struct {
 
 	mu             sync.Mutex
 	sendMu         sync.Mutex
+	flushMu        sync.Mutex
 	closed         bool
 	byNative       map[string]e2eeSessionContext
 	bySession      map[string]e2eeSessionContext
@@ -209,10 +210,20 @@ func (b *e2eeTransportBridge) handleCommand(
 		}
 		return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
 	}
+	originalPrompt := append([]byte(nil), plaintext...)
 	plaintext = localized
+	// Finish an earlier batch before assigning the next turn identity.
+	if err := b.flush(ctx, session.sessionID); err != nil {
+		return true, err
+	}
 	historyRecords, err := b.history.projectCommand(envelope.SessionID, plaintext)
 	if err != nil {
 		return true, err
+	}
+	if hasE2EEReplayPrompt(originalPrompt) {
+		if err := b.sendReplayPrompt(ctx, session, rootKey, originalPrompt); err != nil {
+			return true, err
+		}
 	}
 	if err := b.enqueueCanonical(session, historyRecords); err != nil {
 		return true, err
@@ -300,6 +311,8 @@ func (b *e2eeTransportBridge) close(ctx context.Context) error {
 }
 
 func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
 	b.mu.Lock()
 	batch := b.batches[sessionID]
 	if batch == nil || len(batch.frames) == 0 {
@@ -318,7 +331,7 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 	}
 	turnID := ""
 	if b.history != nil {
-		turnID = b.history.activeTurnID(sessionID)
+		turnID = b.history.replayTurnID(sessionID)
 	}
 	plaintext, err := json.Marshal(struct {
 		TurnID string            `json:"turn_id,omitempty"`
@@ -353,7 +366,7 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 	}
 	b.sendMu.Lock()
 	err = b.send(ctx, payload, reliablemq.Metadata{
-		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID,
+		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID, "turn_ref": turnID,
 		"connection_epoch": strconv.FormatInt(session.connectionEpoch, 10),
 	})
 	b.sendMu.Unlock()

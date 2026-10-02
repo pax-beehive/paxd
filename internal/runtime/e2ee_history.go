@@ -66,6 +66,7 @@ type e2eeTextHistoryState struct {
 type e2eeSessionHistoryState struct {
 	turnByRequest map[string]string
 	activeTurnID  string
+	lastTurnID    string
 	text          map[string]*e2eeTextHistoryState
 	rawOrdinal    int64
 	textOrdinal   int64
@@ -125,6 +126,7 @@ func (p *e2eeHistoryProjector) projectCommand(sessionID string, payload []byte) 
 	turnID := e2eeStableID("turn", p.agentID, sessionID, requestKey)
 	state.turnByRequest[requestKey] = turnID
 	state.activeTurnID = turnID
+	state.lastTurnID = turnID
 	if text.Len() == 0 && !hasAttachments {
 		return nil, nil
 	}
@@ -219,6 +221,13 @@ func (p *e2eeHistoryProjector) activeTurnID(sessionID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.session(sessionID).activeTurnID
+}
+
+// Late usage/status frames still belong to the most recently started turn.
+func (p *e2eeHistoryProjector) replayTurnID(sessionID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.session(sessionID).lastTurnID
 }
 
 func (p *e2eeHistoryProjector) flushAll() (map[string][]e2eeCanonicalRecord, error) {
