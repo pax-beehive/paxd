@@ -104,6 +104,24 @@ func (s *AgentTunnelSession) newE2EEBridge(engine ReliableEngine) *e2eeTransport
 	)
 }
 
+// Pool processes outlive individual WebSockets. Keep their encryption routes,
+// pending batches, and history projector alive while the durable producer is
+// disconnected, then rebind only the sender on the next tunnel attempt.
+func (s *AgentTunnelSession) poolE2EEBridge(pool *ACPPool, engine ReliableEngine) *e2eeTransportBridge {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	candidate := s.newE2EEBridge(engine)
+	if pool.e2eeBridge == nil || candidate == nil || candidate.agentID != pool.e2eeBridge.agentID {
+		pool.e2eeBridge = candidate
+		return candidate
+	}
+	bridge := pool.e2eeBridge
+	bridge.sendMu.Lock()
+	bridge.send = candidate.send
+	bridge.sendMu.Unlock()
+	return bridge
+}
+
 func (s *AgentTunnelSession) sendSessionOutput(
 	ctx context.Context,
 	managerSessionID string,
