@@ -87,6 +87,13 @@ the routing metadata as AES-256-GCM AAD, decrypts immediately before local ACP
 dispatch, and encrypts attributable ACP output before it enters the reliable
 outbound journal.
 
+In slot-pool mode, the pool owns the E2EE bridge for the lifetime of its ACP
+processes. WebSocket reconnects replace only its reliable sender; native-session
+routes, pending requests/batches, active turns, and history revisions survive.
+The output sink continues journaling encrypted frames during network backoff.
+A different agent identity starts a new bridge. A daemon restart still requires
+normal session resume; this state is not persisted across daemon restarts.
+
 Business IDs are independent from reliable transport sequence numbers:
 
 - `command_id` is persisted in `e2ee_command_receipts`. An incomplete receipt is
@@ -96,6 +103,10 @@ Business IDs are independent from reliable transport sequence numbers:
   journal. Reliable replay preserves that envelope and ID for Manager-side
   deduplication.
 - `connection_epoch` fences commands from old Manager WebSocket connections.
+- `turn_ref` groups encrypted events for whole-turn replay. It matches the
+  `turn_id` inside the authenticated batch and contains no ACP content. The
+  original user prompt enters this journal before dispatch, allowing replay
+  without waiting for canonical history projection. See `docs/e2ee_history.md`.
 
 Streaming `session/update` text/thought deltas are collected per canonical PAX
 session and flushed after 75 ms or 16 KiB. Turn boundaries, tool calls,

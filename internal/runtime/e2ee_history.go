@@ -66,8 +66,11 @@ type e2eeTextHistoryState struct {
 type e2eeSessionHistoryState struct {
 	turnByRequest map[string]string
 	activeTurnID  string
+	lastTurnID    string
 	text          map[string]*e2eeTextHistoryState
 	rawOrdinal    int64
+	textOrdinal   int64
+	activeTextKey string
 }
 
 type e2eeHistoryProjector struct {
@@ -108,7 +111,11 @@ func (p *e2eeHistoryProjector) projectCommand(sessionID string, payload []byte) 
 		return nil, err
 	}
 	var text strings.Builder
+	hasAttachments := false
 	for _, part := range params.Prompt {
+		if part.Type == "resource_link" {
+			hasAttachments = true
+		}
 		if part.Type == "" || part.Type == "text" {
 			text.WriteString(part.Text)
 		}
@@ -119,7 +126,8 @@ func (p *e2eeHistoryProjector) projectCommand(sessionID string, payload []byte) 
 	turnID := e2eeStableID("turn", p.agentID, sessionID, requestKey)
 	state.turnByRequest[requestKey] = turnID
 	state.activeTurnID = turnID
-	if text.Len() == 0 {
+	state.lastTurnID = turnID
+	if text.Len() == 0 && !hasAttachments {
 		return nil, nil
 	}
 	messageID := e2eeStableID("msg", p.agentID, sessionID, "user", requestKey)
@@ -132,6 +140,9 @@ func (p *e2eeHistoryProjector) projectCommand(sessionID string, payload []byte) 
 		Source: "e2ee_acp", Direction: "user_to_agent", Role: "user",
 		Status: "complete", MessageType: "user_message", TurnID: turnID,
 		CreatedAt: now, UpdatedAt: now,
+	}
+	if hasAttachments {
+		message.RawJSON = append(json.RawMessage(nil), payload...)
 	}
 	state.text["user:"+requestKey] = &e2eeTextHistoryState{
 		message: message, revision: 1, text: text.String(), emittedBytes: text.Len(),
@@ -166,7 +177,7 @@ func (p *e2eeHistoryProjector) projectFrames(
 		}
 		isResponse := len(msg.Result) > 0 || msg.Error != nil
 		if msg.Method != "" || isResponse {
-			finalized, err := p.checkpointText(state, isResponse)
+			finalized, err := p.checkpointText(state, true)
 			if err != nil {
 				return nil, err
 			}
@@ -212,6 +223,13 @@ func (p *e2eeHistoryProjector) activeTurnID(sessionID string) string {
 	return p.session(sessionID).activeTurnID
 }
 
+// Late usage/status frames still belong to the most recently started turn.
+func (p *e2eeHistoryProjector) replayTurnID(sessionID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.session(sessionID).lastTurnID
+}
+
 func (p *e2eeHistoryProjector) flushAll() (map[string][]e2eeCanonicalRecord, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -233,23 +251,33 @@ func (p *e2eeHistoryProjector) appendText(
 	delta string,
 ) ([]e2eeCanonicalRecord, error) {
 	turnID := firstNonEmpty(state.activeTurnID, "turn_unbound")
-	key := turnID + "\x00" + updateType
-	textState := state.text[key]
+	textState := state.text[state.activeTextKey]
 	var records []e2eeCanonicalRecord
+	if textState != nil && (textState.message.TurnID != turnID || textState.message.MessageType != updateType) {
+		finalized, err := p.checkpointText(state, true)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, finalized...)
+		textState = nil
+	}
 	if textState == nil {
+		state.textOrdinal++
+		key := turnID + "\x00" + updateType + "\x00" + fmt.Sprint(state.textOrdinal)
 		now := p.now().UTC()
-		role := "assistant"
-		messageID := e2eeStableID("msg", p.agentID, sessionID, turnID, updateType)
+		messageID := e2eeStableID("msg", p.agentID, sessionID, turnID, updateType, "segment", fmt.Sprint(state.textOrdinal))
 		textState = &e2eeTextHistoryState{
 			message: e2eeHistoryMessagePayload{
 				MessageID: messageID, AgentID: p.agentID, SessionID: sessionID,
-				Source: "e2ee_acp", Direction: "agent_to_user", Role: role,
+				Source: "e2ee_acp", Direction: "agent_to_user", Role: "assistant",
 				Status: "streaming", MessageType: updateType, TurnID: turnID,
+				RawJSON:   json.RawMessage(`{"text_layout":"segment"}`),
 				CreatedAt: now, UpdatedAt: now,
 			},
 			revision: 1, checkpointAt: now,
 		}
 		state.text[key] = textState
+		state.activeTextKey = key
 		header, err := marshalE2EEHistoryRecords(textState.message, textState.revision, nil)
 		if err != nil {
 			return nil, err
@@ -340,6 +368,12 @@ func (p *e2eeHistoryProjector) checkpointText(
 			records = append(records, part)
 			textState.emittedBytes = len(textState.text)
 			textState.checkpointAt = now
+		}
+		if complete {
+			delete(state.text, key)
+			if state.activeTextKey == key {
+				state.activeTextKey = ""
+			}
 		}
 	}
 	return records, nil

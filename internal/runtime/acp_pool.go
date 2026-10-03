@@ -148,6 +148,7 @@ type ACPPool struct {
 	mu              sync.Mutex
 	outputSink      ACPRouterOutputSink
 	outputSinkToken uint64
+	e2eeBridge      *e2eeTransportBridge
 }
 
 func NewACPPool(connectionID string, routeStore ACPRouteStore) *ACPPool {

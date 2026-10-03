@@ -48,6 +48,7 @@ type e2eeTransportBridge struct {
 
 	mu             sync.Mutex
 	sendMu         sync.Mutex
+	flushMu        sync.Mutex
 	closed         bool
 	byNative       map[string]e2eeSessionContext
 	bySession      map[string]e2eeSessionContext
@@ -102,6 +103,24 @@ func (s *AgentTunnelSession) newE2EEBridge(engine ReliableEngine) *e2eeTransport
 			})
 		},
 	)
+}
+
+// Pool processes outlive individual WebSockets. Keep their encryption routes,
+// pending batches, and history projector alive while the durable producer is
+// disconnected, then rebind only the sender on the next tunnel attempt.
+func (s *AgentTunnelSession) poolE2EEBridge(pool *ACPPool, engine ReliableEngine) *e2eeTransportBridge {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	candidate := s.newE2EEBridge(engine)
+	if pool.e2eeBridge == nil || candidate == nil || candidate.agentID != pool.e2eeBridge.agentID {
+		pool.e2eeBridge = candidate
+		return candidate
+	}
+	bridge := pool.e2eeBridge
+	bridge.sendMu.Lock()
+	bridge.send = candidate.send
+	bridge.sendMu.Unlock()
+	return bridge
 }
 
 func (s *AgentTunnelSession) sendSessionOutput(
@@ -176,9 +195,35 @@ func (b *e2eeTransportBridge) handleCommand(
 		sessionID: envelope.SessionID, keyEpoch: envelope.KeyEpoch, connectionEpoch: epoch,
 	}
 	b.trackCommand(plaintext, session)
+	localized, err := localizeE2EEAttachments(ctx, plaintext, rootKey, envelope)
+	if err != nil {
+		var original struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(plaintext, &original)
+		response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": original.ID, "error": map[string]any{"code": -32000, "message": err.Error()}})
+		if _, sendErr := b.sendOutput(ctx, "", response); sendErr != nil {
+			return true, sendErr
+		}
+		if completeErr := b.receipts.CompleteE2EECommand(ctx, b.agentID, envelope.RecordID); completeErr != nil {
+			return true, completeErr
+		}
+		return true, b.sendCommandACK(ctx, envelope.RecordID, epoch)
+	}
+	originalPrompt := append([]byte(nil), plaintext...)
+	plaintext = localized
+	// Finish an earlier batch before assigning the next turn identity.
+	if err := b.flush(ctx, session.sessionID); err != nil {
+		return true, err
+	}
 	historyRecords, err := b.history.projectCommand(envelope.SessionID, plaintext)
 	if err != nil {
 		return true, err
+	}
+	if hasE2EEReplayPrompt(originalPrompt) {
+		if err := b.sendReplayPrompt(ctx, session, rootKey, originalPrompt); err != nil {
+			return true, err
+		}
 	}
 	if err := b.enqueueCanonical(session, historyRecords); err != nil {
 		return true, err
@@ -266,6 +311,8 @@ func (b *e2eeTransportBridge) close(ctx context.Context) error {
 }
 
 func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
 	b.mu.Lock()
 	batch := b.batches[sessionID]
 	if batch == nil || len(batch.frames) == 0 {
@@ -284,7 +331,7 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 	}
 	turnID := ""
 	if b.history != nil {
-		turnID = b.history.activeTurnID(sessionID)
+		turnID = b.history.replayTurnID(sessionID)
 	}
 	plaintext, err := json.Marshal(struct {
 		TurnID string            `json:"turn_id,omitempty"`
@@ -319,7 +366,7 @@ func (b *e2eeTransportBridge) flush(ctx context.Context, sessionID string) error
 	}
 	b.sendMu.Lock()
 	err = b.send(ctx, payload, reliablemq.Metadata{
-		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID,
+		"agent_id": b.agentID, "e2ee_kind": "event", "local_id": recordID, "turn_ref": turnID,
 		"connection_epoch": strconv.FormatInt(session.connectionEpoch, 10),
 	})
 	b.sendMu.Unlock()
