@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/daemonstore"
+	"github.com/pax-beehive/paxd/internal/noderouting"
 	"github.com/pax-beehive/paxd/internal/safehttp"
 )
 
@@ -26,7 +27,7 @@ type HTTPManager struct {
 
 func NewHTTPManager(client HTTPDoer) *HTTPManager {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: 30 * time.Second, Transport: &noderouting.Transport{}}
 	}
 	return &HTTPManager{client: client}
 }

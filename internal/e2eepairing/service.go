@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
 	"net/url"
 	"strings"
+
+	"github.com/pax-beehive/paxd/internal/noderouting"
 
 	"github.com/pax-beehive/paxd/internal/auth"
 	"github.com/pax-beehive/paxd/internal/control"
@@ -75,7 +78,7 @@ type managerResponse[T any] struct {
 func New(opts ServiceOptions) *Service {
 	client := opts.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: &noderouting.Transport{}}
 	}
 	return &Service{store: opts.Store, headers: opts.Headers, rootKeys: opts.RootKeys, http: client}
 }

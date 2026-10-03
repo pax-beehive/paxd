@@ -28,18 +28,22 @@ import (
 	"io"
 	"log"
 	"net/http"
+
 	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/noderouting"
+
 	"github.com/gorilla/websocket"
+	"github.com/pax-beehive/paxkit/reliablemq"
+	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
+
 	"github.com/pax-beehive/paxd/internal/acphistory"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/store"
-	"github.com/pax-beehive/paxkit/reliablemq"
-	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
 )
 
 // Config controls the stateless ACP forwarder service.
@@ -169,6 +173,8 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 
 	headers := http.Header{}
 	headers.Set("X-Pax-Key", s.cfg.APIKey)
+	routing := noderouting.DefaultCache()
+	headers = routing.Headers(tunnelURL.String(), headers)
 
 	conn, resp, err := s.dialer.DialContext(ctx, tunnelURL.String(), headers)
 	if resp != nil && resp.Body != nil {
@@ -177,6 +183,7 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("dial tunnel: %w", err)
 	}
+	routing.Observe(tunnelURL.String(), headers, resp)
 	defer conn.Close()
 
 	runCtx, cancel := context.WithCancel(ctx)
