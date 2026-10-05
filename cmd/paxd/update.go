@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,8 @@ type paxdUpdateHTTPDoer interface {
 }
 
 type paxdUpdateCheckResponse struct {
+	CurrentStatus   string    `json:"current_status,omitempty"`
+	Warning         string    `json:"warning,omitempty"`
 	CurrentVersion  string    `json:"current_version"`
 	LatestVersion   string    `json:"latest_version"`
 	Status          string    `json:"status"`
@@ -55,6 +58,7 @@ type paxdUpdateCheckResponse struct {
 }
 
 type paxdApplyUpdateResponse struct {
+	Warning         string `json:"warning,omitempty"`
 	CurrentVersion  string `json:"current_version"`
 	LatestVersion   string `json:"latest_version"`
 	Status          string `json:"status"`
@@ -67,19 +71,22 @@ type paxdApplyUpdateResponse struct {
 }
 
 type paxdUpdateArtifact struct {
-	URL     string
-	SHA256  string
-	Version string
-	Size    int64
+	CurrentStatus string
+	URL           string
+	SHA256        string
+	Version       string
+	Size          int64
 }
 
 type paxdUpdateResolverResponse struct {
 	Data struct {
-		URL       string `json:"url"`
-		SHA256    string `json:"sha256"`
-		Version   string `json:"version"`
-		SizeBytes int64  `json:"size_bytes"`
-		Size      int64  `json:"size"`
+		CurrentStatus string   `json:"current_status"`
+		Tags          []string `json:"tags"`
+		URL           string   `json:"url"`
+		SHA256        string   `json:"sha256"`
+		Version       string   `json:"version"`
+		SizeBytes     int64    `json:"size_bytes"`
+		Size          int64    `json:"size"`
 	} `json:"data"`
 }
 
@@ -137,6 +144,7 @@ func paxdUpdateCommand(ctx context.Context, cmd *cli.Command) error {
 	}
 	resp := &paxdApplyUpdateResponse{
 		CurrentVersion:  check.CurrentVersion,
+		Warning:         check.Warning,
 		LatestVersion:   check.LatestVersion,
 		Status:          check.Status,
 		UpdateAvailable: check.UpdateAvailable,
@@ -182,6 +190,8 @@ func paxdCheckUpdate(ctx context.Context, cmd *cli.Command) (*paxdUpdateCheckRes
 	}
 	return &paxdUpdateCheckResponse{
 		CurrentVersion:  version,
+		CurrentStatus:   artifact.CurrentStatus,
+		Warning:         paxdBinaryQualityWarning(artifact.CurrentStatus),
 		LatestVersion:   artifact.Version,
 		Status:          status,
 		UpdateAvailable: updateAvailable,
@@ -258,6 +268,7 @@ func resolvePaxdUpdateArtifact(
 	}
 	query := endpoint.Query()
 	query.Set("platform", platform)
+	query.Set("current_version", version)
 	query.Set("tags", firstNonEmpty(tag, defaultPaxdUpdateTag))
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil) // #nosec G107
@@ -272,21 +283,28 @@ func resolvePaxdUpdateArtifact(
 	}
 	defer closePaxdUpdateBody(resp.Body)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusGone {
+			return nil, fmt.Errorf("Current binary has known issues. No replacement is available; upgrade when a verified version is published.")
+		}
 		return nil, fmt.Errorf("resolver returned HTTP %d", resp.StatusCode)
 	}
 	var resolverResp paxdUpdateResolverResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&resolverResp); err != nil {
 		return nil, fmt.Errorf("decode resolver response: %w", err)
 	}
+	if slices.Contains(resolverResp.Data.Tags, "disabled") {
+		return nil, fmt.Errorf("Refusing disabled binary with known issues.")
+	}
 	size := resolverResp.Data.SizeBytes
 	if size == 0 {
 		size = resolverResp.Data.Size
 	}
 	artifact := &paxdUpdateArtifact{
-		URL:     normalizePaxdArtifactURL(resolverResp.Data.URL),
-		SHA256:  strings.TrimSpace(resolverResp.Data.SHA256),
-		Version: strings.TrimSpace(resolverResp.Data.Version),
-		Size:    size,
+		CurrentStatus: resolverResp.Data.CurrentStatus,
+		URL:           normalizePaxdArtifactURL(resolverResp.Data.URL),
+		SHA256:        strings.TrimSpace(resolverResp.Data.SHA256),
+		Version:       strings.TrimSpace(resolverResp.Data.Version),
+		Size:          size,
 	}
 	if artifact.Version == "" {
 		return nil, fmt.Errorf("resolver version is required")
@@ -467,6 +485,9 @@ func replacePaxdExecutable(path string, binary []byte) error {
 func renderPaxdUpdateCheck(stdout io.Writer, resp *paxdUpdateCheckResponse, format string) error {
 	switch format {
 	case "text":
+		if resp.Warning != "" {
+			fmt.Fprintln(stdout, "Warning: "+resp.Warning)
+		}
 		fmt.Fprintf(stdout, "Current: %s\n", resp.CurrentVersion)
 		fmt.Fprintf(stdout, "Latest:  %s\n", resp.LatestVersion)
 		fmt.Fprintf(stdout, "Status:  %s\n", resp.Status)
@@ -481,6 +502,11 @@ func renderPaxdUpdateCheck(stdout io.Writer, resp *paxdUpdateCheckResponse, form
 func renderPaxdApplyUpdate(stdout io.Writer, resp *paxdApplyUpdateResponse, format string) error {
 	switch format {
 	case "text":
+		if resp.Warning != "" {
+			if _, err := fmt.Fprintln(stdout, "Warning: "+resp.Warning); err != nil {
+				return err
+			}
+		}
 		if resp.Updated {
 			fmt.Fprintf(stdout, "Updated paxd %s -> %s\n", resp.CurrentVersion, resp.LatestVersion)
 			fmt.Fprintf(stdout, "Path: %s\n", resp.Path)
@@ -524,4 +550,11 @@ func closePaxdUpdateBody(body io.Closer) {
 	if body != nil {
 		_ = body.Close()
 	}
+}
+
+func paxdBinaryQualityWarning(state string) string {
+	if state == "disabled" {
+		return "Current version has known issues. Upgrade to a verified stable version as soon as possible."
+	}
+	return ""
 }

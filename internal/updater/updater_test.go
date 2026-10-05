@@ -395,3 +395,13 @@ type updateHTTPDoerFunc func(*http.Request) (*http.Response, error)
 func (f updateHTTPDoerFunc) Do(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
+func TestGivenDisabledCandidateWhenDaemonResolvesThenRefuseIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"url":"https://download.test/paxd","sha256":"abc123","size_bytes":42,"version":"0.1.50","tags":["disabled"]}}`))
+	}))
+	defer server.Close()
+	u := New(Options{HTTPClient: server.Client()})
+	_, err := u.resolve(context.Background(), server.URL, "stable")
+	require.ErrorContains(t, err, "disabled")
+}

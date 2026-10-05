@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,11 +98,12 @@ func (e ActivationCommittedError) Unwrap() error { return e.Err }
 
 type resolverResponse struct {
 	Data struct {
-		URL       string `json:"url"`
-		SHA256    string `json:"sha256"`
-		Version   string `json:"version"`
-		SizeBytes int64  `json:"size_bytes"`
-		Size      int64  `json:"size"`
+		Tags      []string `json:"tags"`
+		URL       string   `json:"url"`
+		SHA256    string   `json:"sha256"`
+		Version   string   `json:"version"`
+		SizeBytes int64    `json:"size_bytes"`
+		Size      int64    `json:"size"`
 	} `json:"data"`
 }
 
@@ -299,6 +301,9 @@ func (u *Updater) resolve(ctx context.Context, resolverURL string, tag string) (
 	var payload resolverResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
 		return artifact{}, fmt.Errorf("decode resolver response: %w", err)
+	}
+	if slices.Contains(payload.Data.Tags, "disabled") {
+		return artifact{}, errors.New("refusing disabled binary with known issues")
 	}
 	size := payload.Data.SizeBytes
 	if size == 0 {

@@ -729,3 +729,41 @@ type roundTripFunc func(req *http.Request) (*http.Response, error)
 func (f roundTripFunc) Do(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
+func TestGivenDisabledCurrentBinaryWhenCheckingThenWarnWithoutDowngrade(t *testing.T) {
+	restore := stubPaxdUpdateHTTPClient(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "0.1.49", req.URL.Query().Get("current_version"))
+		return paxdUpdateJSONResponse(`{"data":{"url":"https://download.test/paxd","sha256":"abc123","size_bytes":42,"version":"0.1.48","current_status":"disabled","tags":["stable"]}}`), nil
+	})
+	defer restore()
+	oldVersion := version
+	version = "0.1.49"
+	defer func() { version = oldVersion }()
+	var stdout bytes.Buffer
+	app := newApp()
+	app.Writer = &stdout
+	err := app.Run(context.Background(), []string{"paxd", "update", "check", "--resolver-url", defaultPaxdUpdateResolverURL, "--format", "text"})
+	require.NoError(t, err)
+	assert.Contains(t, stdout.String(), "known issues")
+}
+
+func TestGivenDisabledCandidateWhenResolvingThenRefuseIt(t *testing.T) {
+	restore := stubPaxdUpdateHTTPClient(func(req *http.Request) (*http.Response, error) {
+		return paxdUpdateJSONResponse(`{"data":{"url":"https://download.test/paxd","sha256":"abc123","size_bytes":42,"version":"0.1.50","tags":["disabled"]}}`), nil
+	})
+	defer restore()
+	_, err := resolvePaxdUpdateArtifact(context.Background(), defaultPaxdUpdateResolverURL, "darwin/arm64", "stable")
+	require.ErrorContains(t, err, "disabled")
+}
+
+func TestGivenDisabledCurrentVersionWithoutReplacementThenWarn(t *testing.T) {
+	restore := stubPaxdUpdateHTTPClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusGone, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	})
+	defer restore()
+	_, err := resolvePaxdUpdateArtifact(context.Background(), defaultPaxdUpdateResolverURL, "darwin/arm64", "stable")
+	require.ErrorContains(t, err, "known issues")
+	var out bytes.Buffer
+	require.NoError(t, renderPaxdApplyUpdate(&out, &paxdApplyUpdateResponse{Warning: "Current version has known issues."}, "text"))
+	assert.Contains(t, out.String(), "Warning:")
+}
