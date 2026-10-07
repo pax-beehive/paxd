@@ -99,6 +99,7 @@ type SecretChannel interface {
 }
 
 type ServiceOptions struct {
+	HarnessAuth         HarnessAuth
 	Store               Store
 	Supervisors         Supervisors
 	Harnesses           HarnessRegistry
@@ -115,6 +116,7 @@ type ServiceOptions struct {
 }
 
 type ControlService struct {
+	harnessAuth         HarnessAuth
 	store               Store
 	supervisors         Supervisors
 	harnesses           HarnessRegistry
@@ -132,6 +134,7 @@ type ControlService struct {
 
 func NewService(opts ServiceOptions) *ControlService {
 	return &ControlService{
+		harnessAuth:         opts.HarnessAuth,
 		store:               opts.Store,
 		supervisors:         opts.Supervisors,
 		harnesses:           opts.Harnesses,
@@ -169,6 +172,9 @@ func (s *ControlService) SubscribeSessionRuntime(remoteID string) (<-chan struct
 func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
 	if err := cmd.Validate(); err != nil {
 		return rejectedAck(cmd.CommandID, "", "", controlErr(err)), nil
+	}
+	if cmd.Type == CommandHarnessAuthLogin {
+		return s.handleHarnessAuthLogin(ctx, src, cmd)
 	}
 	if cmd.Type == CommandSessionRuntimeReset {
 		return s.handleSessionRuntimeReset(ctx, src, cmd)
@@ -443,6 +449,9 @@ func isDesiredSlotsOnlyUpdate(cmd Command) bool {
 func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Query) (QueryResult, error) {
 	if err := query.Validate(); err != nil {
 		return QueryResult{Type: query.Type, Error: ptr(controlErr(err))}, nil
+	}
+	if query.Type == QueryHarnessAuthStatus {
+		return s.handleHarnessAuthStatus(ctx, src, *query.HarnessAuthStatus)
 	}
 	if query.Type == QueryBrowserControl {
 		if s.browserControl == nil || src.Kind != SourceLocal && (src.Kind != SourceRemote || src.RemoteID == "") {

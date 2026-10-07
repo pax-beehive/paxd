@@ -57,6 +57,8 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("DELETE /v1/agent-connections/{id}", h.routeAgentConnectionDelete)
 	h.mux.HandleFunc("POST /v1/agent-connections/{id}/restart", h.routeAgentConnectionRestart)
 
+	h.mux.HandleFunc("POST /v1/harnesses/{harness}/auth/login", h.routeHarnessAuthLogin)
+	h.mux.HandleFunc("GET /v1/harnesses/{harness}/auth/status", h.routeHarnessAuthStatus)
 	h.mux.HandleFunc("GET /v1/harnesses", h.routeHarnessesList)
 	h.mux.HandleFunc("POST /v1/harnesses/discover", h.routeHarnessesDiscover)
 

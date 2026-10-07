@@ -496,6 +496,9 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	if r.harnessAuth != nil {
+		r.harnessAuth.Close()
+	}
 	r.lifecycleMu.Lock()
 	cancel := r.lifecycleCancel
 	supervisors := r.supervisors

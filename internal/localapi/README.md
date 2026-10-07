@@ -62,3 +62,10 @@ They should assert:
 - a mock service result maps to the expected HTTP status and response body
 
 They should not assert database state.
+
+## Harness authentication
+
+`harness_auth.login` and `harness_auth.status` expose short-lived Claude and Codex native CLI
+login sessions through the shared control layer. Login commands bypass the
+durable command journal so authorization codes are never persisted there.
+See [the login protocol and lifecycle](../harnessauth/README.md).

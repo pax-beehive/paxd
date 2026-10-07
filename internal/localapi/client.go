@@ -266,3 +266,10 @@ func (c *Client) doCommand(req *http.Request) (control.CommandAck, error) {
 	}
 	return ack, nil
 }
+
+func (c *Client) HarnessAuthLogin(ctx context.Context, commandID string, cmd control.HarnessAuthLoginCommand) (control.CommandAck, error) {
+	return c.postCommand(ctx, "/v1/harnesses/"+url.PathEscape(cmd.Harness)+"/auth/login", cmd, commandID)
+}
+func (c *Client) HarnessAuthStatus(ctx context.Context, harness, sessionID string) (control.QueryResult, error) {
+	return c.get(ctx, "/v1/harnesses/"+url.PathEscape(harness)+"/auth/status?session_id="+url.QueryEscape(sessionID))
+}

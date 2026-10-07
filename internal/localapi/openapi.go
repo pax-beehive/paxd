@@ -97,6 +97,7 @@ function curlFor(path, method, example) {
 }
 
 function examplePath(path) {
+  if (path.includes("{harness}")) return path.replace("{harness}", "claude");
   if (path.includes('/agent-connections/{id}')) return path.replace('{id}', 'conn_codex');
   if (path.includes('/commands/{id}')) return path.replace('{id}', 'cmd_local_example');
   if (path.includes('/local/sessions/{id}')) return path.replace('{id}', 'codex:sess_1');
@@ -177,6 +178,8 @@ func localAPIEndpoints() []apiEndpoint {
 		{Method: "DELETE", Path: "/v1/agent-connections/{id}", Summary: "Delete an agent tunnel connection.", OperationID: "deleteAgentConnection", Parameters: []apiParameter{pathID, commandID, {Name: "deregister", In: "query", Type: "boolean"}}, Response: "CommandAck", Tags: []string{"agent connections"}},
 		{Method: "POST", Path: "/v1/agent-connections/{id}/restart", Summary: "Restart an agent tunnel connection.", OperationID: "restartAgentConnection", Parameters: []apiParameter{pathID, commandID}, Response: "CommandAck", Tags: []string{"agent connections"}},
 
+		{Method: "POST", Path: "/v1/harnesses/{harness}/auth/login", Summary: "Start, submit, or cancel an ephemeral native harness login.", OperationID: "harnessAuthLogin", Parameters: []apiParameter{commandID, {Name: "harness", In: "path", Type: "string", Required: true}}, RequestBody: "HarnessAuthLoginCommand", Response: "CommandAck", Tags: []string{"harnesses"}},
+		{Method: "GET", Path: "/v1/harnesses/{harness}/auth/status", Summary: "Get harness authentication or login session status.", OperationID: "harnessAuthStatus", Parameters: []apiParameter{{Name: "harness", In: "path", Type: "string", Required: true}, {Name: "session_id", In: "query", Type: "string"}}, Response: "QueryResult", Tags: []string{"harnesses"}},
 		{Method: "GET", Path: "/v1/harnesses", Summary: "List known harnesses.", OperationID: "listHarnesses", Parameters: []apiParameter{includeMissing}, Response: "QueryResult", Tags: []string{"harnesses"}},
 		{Method: "POST", Path: "/v1/harnesses/discover", Summary: "Discover harness availability.", OperationID: "discoverHarnesses", RequestBody: "DiscoverHarnessesQuery", Response: "QueryResult", Tags: []string{"harnesses"}},
 
@@ -311,6 +314,8 @@ func requestExample(schema string) map[string]any {
 			"enabled":       true,
 			"desired_state": "running",
 		}
+	case "HarnessAuthLoginCommand":
+		return map[string]any{"harness": "claude", "operation": "start"}
 	case "DiscoverHarnessesQuery":
 		return map[string]any{
 			"probe": true,
@@ -389,6 +394,7 @@ func openAPISchemas() map[string]any {
 			"key_epoch": map[string]any{"type": "integer", "format": "int64"},
 		}, "pairing_id", "agent_id", "device_id", "key_epoch"),
 		"CommandAck": objectSchema(map[string]any{
+			"result":             map[string]any{"type": "object", "properties": map[string]any{"harness_auth": schemaRef("HarnessAuthView")}},
 			"command_id":         stringSchema,
 			"ok":                 boolSchema,
 			"status":             enumSchema("unknown", "received", "rejected", "applied", "failed"),
@@ -397,7 +403,14 @@ func openAPISchemas() map[string]any {
 			"desired_generation": map[string]any{"type": "integer", "format": "int64"},
 			"error":              schemaRef("ControlError"),
 		}, "command_id", "ok", "status"),
+		"HarnessAuthLoginCommand": objectSchema(map[string]any{
+			"harness": enumSchema("claude", "codex"), "operation": enumSchema("start", "submit", "cancel"), "method": enumSchema("subscription", "console", "device", "api-key", "access-token"), "session_id": stringSchema, "code": map[string]any{"type": "string", "writeOnly": true, "maxLength": 4096},
+		}, "operation"),
+		"HarnessAuthView": objectSchema(map[string]any{
+			"harness": enumSchema("claude", "codex"), "session_id": stringSchema, "state": enumSchema("starting", "awaiting_browser", "awaiting_code", "exchanging", "succeeded", "failed", "expired", "cancelled", "logged_in", "logged_out"), "authorization_url": stringSchema, "user_code": stringSchema, "method": stringSchema, "expires_at": stringSchema, "logged_in": boolSchema, "auth_method": stringSchema, "error_code": stringSchema,
+		}, "harness", "state"),
 		"QueryResult": objectSchema(map[string]any{
+			"harness_auth":       schemaRef("HarnessAuthView"),
 			"type":               stringSchema,
 			"error":              schemaRef("ControlError"),
 			"status":             map[string]any{"type": "object"},

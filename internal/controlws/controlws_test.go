@@ -782,3 +782,22 @@ func (s *confirmingService) confirmedIDs() []string {
 	defer s.mu.Unlock()
 	return append([]string(nil), s.confirmed...)
 }
+
+func TestHarnessAuthCommandsAndQueriesUseRemoteSource(t *testing.T) {
+	service := controltest.NewMockService(t)
+	cmd := control.Command{CommandID: "auth-submit", Type: control.CommandHarnessAuthLogin, HarnessAuthLogin: &control.HarnessAuthLoginCommand{Harness: "claude", Operation: "submit", SessionID: "login-session", Code: "one-time-code"}}
+	ack := control.CommandAck{CommandID: cmd.CommandID, OK: true, Status: control.CommandStatusApplied, Result: &control.CommandResult{HarnessAuth: &control.HarnessAuthView{Harness: "claude", SessionID: "login-session", State: "exchanging"}}}
+	query := control.Query{Type: control.QueryHarnessAuthStatus, HarnessAuthStatus: &control.HarnessAuthStatusQuery{Harness: "claude", SessionID: "login-session"}}
+	result := control.QueryResult{Type: query.Type, HarnessAuth: &control.HarnessAuthView{Harness: "claude", SessionID: "login-session", State: "succeeded"}}
+	service.ExpectCommandFrom(remoteSource(), cmd).ReturnCommandAck(ack)
+	service.ExpectQueryFrom(remoteSource(), query).ReturnQueryResult(result)
+	conn := newFakeWebSocketConn(framePayload(t, IncomingFrame{Kind: KindCommand, CommandID: cmd.CommandID, Command: &cmd}), framePayload(t, IncomingFrame{Kind: KindQuery, RequestID: "status", Query: &query}))
+	Run(context.Background(), conn, remoteSource(), service)
+	require.Len(t, conn.writes(), 2)
+	var gotAck AckFrame
+	require.NoError(t, json.Unmarshal(conn.writes()[0].payload, &gotAck))
+	require.Equal(t, ack, gotAck.CommandAck)
+	var gotResult QueryResponseFrame
+	require.NoError(t, json.Unmarshal(conn.writes()[1].payload, &gotResult))
+	require.Equal(t, result, gotResult.QueryResult)
+}

@@ -119,3 +119,10 @@ type LocalSessions interface {
 ```
 
 These interfaces are intentionally business-shaped. Transport-specific request structs should not leak into them.
+
+## Harness authentication
+
+`harness_auth.login` and `harness_auth.status` expose short-lived Claude and Codex native CLI
+login sessions through the shared control layer. Login commands bypass the
+durable command journal so authorization codes are never persisted there.
+See [the login protocol and lifecycle](../harnessauth/README.md).

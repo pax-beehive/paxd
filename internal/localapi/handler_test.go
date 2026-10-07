@@ -526,6 +526,7 @@ func (s docsRouteService) HandleQuery(ctx context.Context, src control.Source, q
 
 func docsRouteRequestPath(endpoint apiEndpoint) string {
 	path := strings.ReplaceAll(endpoint.Path, "{id}", "docs_id")
+	path = strings.ReplaceAll(path, "{harness}", "claude")
 	switch endpoint.Path {
 	case "/v1/remotes":
 		if endpoint.Method == http.MethodGet {
@@ -563,6 +564,8 @@ func docsRouteBody(endpoint apiEndpoint) string {
 		return `{"remote_id":"default","name":"codex","instance_id":"default","agent_type":"codex","harness":"codex","command":["codex"]}`
 	case "UpdateAgentConnectionCommand":
 		return `{"enabled":true}`
+	case "HarnessAuthLoginCommand":
+		return `{"harness":"claude","operation":"start"}`
 	case "DiscoverHarnessesQuery":
 		return `{"probe":true}`
 	case "SyncLocalSessionsQuery":
