@@ -35,6 +35,8 @@ type HTTPDoer interface {
 }
 
 type Options struct {
+	Product              string
+	VerifyExecutable     func(context.Context, string, string) error
 	ResolverURL          string
 	ResolverURLForRemote ResolverURLForRemoteFunc
 	CurrentVersion       string
@@ -46,6 +48,8 @@ type Options struct {
 }
 
 type Updater struct {
+	product              string
+	verifyExecutable     func(context.Context, string, string) error
 	resolverURL          string
 	resolverURLForRemote ResolverURLForRemoteFunc
 	currentVersion       string
@@ -128,6 +132,7 @@ func New(opts Options) *Updater {
 		opts.Now = time.Now
 	}
 	return &Updater{
+		product: firstNonEmpty(opts.Product, "paxd"), verifyExecutable: opts.VerifyExecutable,
 		resolverURL:          strings.TrimSpace(opts.ResolverURL),
 		resolverURLForRemote: opts.ResolverURLForRemote,
 		currentVersion:       strings.TrimSpace(opts.CurrentVersion),
@@ -169,7 +174,7 @@ func (u *Updater) Stage(ctx context.Context, req Request) (Candidate, error) {
 	if err != nil {
 		return Candidate{}, fmt.Errorf("stat executable: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(executablePath), ".paxd.update-*")
+	tmp, err := os.CreateTemp(filepath.Dir(executablePath), "."+u.product+".update-*")
 	if err != nil {
 		return Candidate{}, fmt.Errorf("create staged executable: %w", err)
 	}
@@ -217,13 +222,13 @@ func (u *Updater) Activate(candidate Candidate, requestedBootID string) (Activat
 	}
 	stateDir := u.stateDir
 	if strings.TrimSpace(stateDir) == "" {
-		stateDir = filepath.Join(filepath.Dir(candidate.ExecutablePath), ".paxd-updates")
+		stateDir = filepath.Join(filepath.Dir(candidate.ExecutablePath), "."+u.product+"-updates")
 	}
 	previousDir := filepath.Join(stateDir, "previous")
 	if err := os.MkdirAll(previousDir, 0o700); err != nil {
 		return ActivationRecord{}, fmt.Errorf("create previous binary directory: %w", err)
 	}
-	previousPath := filepath.Join(previousDir, "paxd-"+safeVersion(candidate.OldVersion))
+	previousPath := filepath.Join(previousDir, u.product+"-"+safeVersion(candidate.OldVersion))
 	if err := copyFileAtomic(candidate.ExecutablePath, previousPath, candidate.OriginalFileMode); err != nil {
 		return ActivationRecord{}, fmt.Errorf("preserve previous executable: %w", err)
 	}
@@ -281,6 +286,7 @@ func (u *Updater) resolve(ctx context.Context, resolverURL string, tag string) (
 		return artifact{}, safehttp.RedactError("parse paxd update resolver URL", err)
 	}
 	query := endpoint.Query()
+	query.Set("product", u.product)
 	query.Set("platform", runtime.GOOS+"/"+runtime.GOARCH)
 	query.Set("tags", tag)
 	endpoint.RawQuery = query.Encode()
@@ -366,6 +372,9 @@ func (u *Updater) download(ctx context.Context, item artifact, target *os.File) 
 }
 
 func (u *Updater) smoke(parent context.Context, path, version string) error {
+	if u.verifyExecutable != nil {
+		return u.verifyExecutable(parent, path, version)
+	}
 	ctx, cancel := context.WithTimeout(parent, u.smokeTimeout)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, path, "--version").CombinedOutput() // #nosec G204 -- path is a verified staged executable in the installed executable directory.
@@ -531,4 +540,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// Restore atomically reinstalls the preserved executable after verification fails.
+func (u *Updater) Restore(record ActivationRecord) error {
+	info, err := os.Stat(record.PreviousPath)
+	if err != nil {
+		return fmt.Errorf("stat previous executable: %w", err)
+	}
+	if err := copyFileAtomic(record.PreviousPath, record.ExecutablePath, info.Mode()); err != nil {
+		return fmt.Errorf("restore executable: %w", err)
+	}
+	return syncDir(filepath.Dir(record.ExecutablePath))
 }

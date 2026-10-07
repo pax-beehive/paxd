@@ -3,8 +3,6 @@ package sessionreporter
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +10,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/acpclient"
 	"github.com/pax-beehive/paxd/internal/agentregistry"
 	"github.com/pax-beehive/paxd/internal/paxlclient"
+	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
@@ -156,26 +155,8 @@ func (s DefaultScanner) listPaxlSessions(
 }
 
 func resolvePaxlCommand(command []string) ([]string, bool) {
-	if len(command) == 0 {
-		if envCommand := strings.Fields(os.Getenv("PAXD_PAXL_COMMAND")); len(envCommand) > 0 {
-			return resolvePaxlCommand(envCommand)
-		}
-		if path, err := exec.LookPath("paxl"); err == nil {
-			return []string{path}, true
-		}
-		if executable, err := os.Executable(); err == nil {
-			candidate := filepath.Join(filepath.Dir(executable), "paxl")
-			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-				return []string{candidate}, true
-			}
-		}
-		return nil, false
-	}
-	if path, err := exec.LookPath(command[0]); err == nil {
-		out := append([]string{path}, command[1:]...)
-		return out, true
-	}
-	return nil, false
+	resolved, err := paxlinstall.ResolveCommand(command)
+	return resolved, err == nil
 }
 
 func isHermesSpec(spec SessionScannerSpec) bool {

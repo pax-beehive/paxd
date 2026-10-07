@@ -28,6 +28,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
+	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
 	"github.com/pax-beehive/paxd/internal/updater"
@@ -194,7 +195,15 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		},
 	}
 	harnessAuth := harnessauth.New(ctx, harnessauth.Options{})
+	paxlOptions := paxdUpdaterOptions(store, "", filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "paxl-updates"))
+	paxlOptions.ResolverURL = strings.TrimSpace(os.Getenv("PAXD_PAXL_UPDATE_RESOLVER_URL"))
+	resolvePaxd := paxlOptions.ResolverURLForRemote
+	paxlOptions.ResolverURLForRemote = func(ctx context.Context, remoteID string) (string, error) {
+		raw, err := resolvePaxd(ctx, remoteID)
+		return strings.TrimSuffix(raw, "/api/v1/public/paxd/download") + "/api/v1/public/artifacts/download", err
+	}
 	service := control.NewService(control.ServiceOptions{
+		PaxlInstaller:       &paxlinstall.Installer{Options: paxlOptions},
 		HarnessAuth:         harnessAuth,
 		Store:               store,
 		Supervisors:         supervisors,
