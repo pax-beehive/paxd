@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/secretchannel"
@@ -99,6 +101,7 @@ type SecretChannel interface {
 }
 
 type ServiceOptions struct {
+	PaxlInstaller       PaxlInstaller
 	HarnessAuth         HarnessAuth
 	Store               Store
 	Supervisors         Supervisors
@@ -116,6 +119,8 @@ type ServiceOptions struct {
 }
 
 type ControlService struct {
+	paxlInstaller       PaxlInstaller
+	paxlUpgradeActive   sync.Map
 	harnessAuth         HarnessAuth
 	store               Store
 	supervisors         Supervisors
@@ -134,6 +139,7 @@ type ControlService struct {
 
 func NewService(opts ServiceOptions) *ControlService {
 	return &ControlService{
+		paxlInstaller:       opts.PaxlInstaller,
 		harnessAuth:         opts.HarnessAuth,
 		store:               opts.Store,
 		supervisors:         opts.Supervisors,
@@ -181,6 +187,14 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	}
 	if cmd.Type == CommandSecretChannelPush {
 		return s.handleSecretChannelPush(ctx, src, cmd)
+	}
+	if cmd.Type == CommandUpgradePaxl {
+		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
+			return rejectedAck(cmd.CommandID, "paxl", "", ControlError{Code: ErrCodeInvalidArgument, Message: "paxl upgrade requires an authenticated remote"}), nil
+		}
+		if s.paxlInstaller == nil {
+			return failedAck(cmd.CommandID, "paxl", "", ControlError{Code: ErrCodeInternal, Message: "paxl installer is not configured"}), nil
+		}
 	}
 	if isPaxdMaintenanceCommand(cmd.Type) {
 		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
@@ -310,7 +324,7 @@ func sameCommandSource(left Source, right Source) bool {
 }
 
 func isSourceBoundCommand(commandType CommandType) bool {
-	return isDeferredPaxdMaintenance(commandType) || commandType == CommandAttachmentEnsureLocal
+	return commandType == CommandUpgradePaxl || isDeferredPaxdMaintenance(commandType) || commandType == CommandAttachmentEnsureLocal
 }
 
 func (s *ControlService) handleSessionRuntimeReset(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
@@ -545,6 +559,8 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, src Sourc
 		return receivedAgentConnectionAck(cmd.CommandID, view), false, true, err
 	case CommandRestartPaxd:
 		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
+	case CommandUpgradePaxl:
+		return receivedAck(cmd.CommandID, "paxl", ""), false, false, nil
 	case CommandUpgradePaxd:
 		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
 	case CommandCancelPaxdMaintenance:
@@ -571,7 +587,8 @@ func (s *ControlService) handleStatusQuery(ctx context.Context) (QueryResult, er
 	if err != nil {
 		return QueryResult{Type: QueryStatusGet, Error: ptr(errorToControlError(err))}, nil
 	}
-	status := DaemonStatus{Phase: "running"}
+	observation := paxlinstall.Probe(ctx)
+	status := DaemonStatus{Phase: "running", Paxl: &observation}
 	for _, remote := range remotes {
 		if remote.Status != nil {
 			status.Remotes = append(status.Remotes, *remote.Status)
@@ -790,6 +807,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.DeleteAgentConnection.ConnectionID
 	case CommandAgentConnectionRestart:
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
+	case CommandUpgradePaxl:
+		return "paxl", ""
 	case CommandRestartPaxd, CommandUpgradePaxd:
 		return "paxd", ""
 	case CommandCancelPaxdMaintenance:
@@ -847,13 +866,20 @@ func decorateRestartAck(ack CommandAck, resultJSON string) CommandAck {
 }
 
 func (s *ControlService) ConfirmCommandAckDelivered(commandID string) {
-	if s == nil || s.store == nil || s.paxdLifecycle == nil || strings.TrimSpace(commandID) == "" {
+	if s == nil || s.store == nil || strings.TrimSpace(commandID) == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	rec, err := s.store.GetCommandRecord(ctx, commandID)
-	if err != nil || !isDeferredPaxdMaintenance(rec.Type) || rec.Status != CommandStatusReceived {
+	if err != nil || rec.Status != CommandStatusReceived {
+		return
+	}
+	if rec.Type == CommandUpgradePaxl {
+		s.confirmPaxlUpgrade(*rec)
+		return
+	}
+	if s.paxdLifecycle == nil || !isDeferredPaxdMaintenance(rec.Type) {
 		return
 	}
 	s.paxdLifecycle.ConfirmAckDelivered(commandID)

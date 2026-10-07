@@ -20,6 +20,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/controlws"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/e2ee"
+	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	runtimes "github.com/pax-beehive/paxd/internal/runtime"
 	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/supervisor"
@@ -137,8 +138,9 @@ func (s *runtimeSupervisors) Configure(store *daemonstore.Store, service control
 		HeartbeatInterval:    10 * time.Second,
 		SendInitialHeartbeat: true,
 		Heartbeat: func() control.HeartbeatReport {
+			observation := paxlinstall.Probe(context.Background())
 			return control.HeartbeatReport{
-				BootID: s.bootID, PaxdVersion: s.paxdVersion, DaemonPhase: s.daemonPhase(),
+				Paxl: &observation, BootID: s.bootID, PaxdVersion: s.paxdVersion, DaemonPhase: s.daemonPhase(),
 			}
 		},
 		SnapshotInterval:                  30 * time.Second,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"time"
 )
 
@@ -91,6 +92,7 @@ const (
 	CommandAgentConnectionDelete  CommandType = "agent_connection.delete"
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
 	CommandRestartPaxd            CommandType = "paxd.restart"
+	CommandUpgradePaxl            CommandType = "paxl.upgrade"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
 	CommandCancelPaxdMaintenance  CommandType = "paxd.maintenance.cancel"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
@@ -110,8 +112,9 @@ const (
 )
 
 type Command struct {
-	CommandID string      `json:"command_id"`
-	Type      CommandType `json:"type"`
+	UpgradePaxl *UpgradePaxlCommand `json:"upgrade_paxl,omitempty"`
+	CommandID   string              `json:"command_id"`
+	Type        CommandType         `json:"type"`
 
 	CreateRemote  *CreateRemoteCommand  `json:"create_remote,omitempty"`
 	UpdateRemote  *UpdateRemoteCommand  `json:"update_remote,omitempty"`
@@ -452,9 +455,10 @@ type SessionActiveTurnReport struct {
 }
 
 type HeartbeatReport struct {
-	BootID      string `json:"boot_id,omitempty"`
-	PaxdVersion string `json:"paxd_version,omitempty"`
-	DaemonPhase string `json:"daemon_phase,omitempty"`
+	Paxl        *paxlinstall.Observation `json:"paxl,omitempty"`
+	BootID      string                   `json:"boot_id,omitempty"`
+	PaxdVersion string                   `json:"paxd_version,omitempty"`
+	DaemonPhase string                   `json:"daemon_phase,omitempty"`
 }
 
 type RuntimeSnapshotReport struct {
@@ -770,11 +774,12 @@ type ListLocalSessionsResult struct {
 }
 
 type DaemonStatus struct {
-	Phase               string              `json:"phase"`
-	Remotes             []RemoteStatusView  `json:"remotes,omitempty"`
-	AgentConnections    []AgentStatusView   `json:"agent_connections,omitempty"`
-	Harnesses           []HarnessView       `json:"harnesses,omitempty"`
-	LocalSessionSummary LocalSessionSummary `json:"local_session_summary,omitempty"`
+	Paxl                *paxlinstall.Observation `json:"paxl,omitempty"`
+	Phase               string                   `json:"phase"`
+	Remotes             []RemoteStatusView       `json:"remotes,omitempty"`
+	AgentConnections    []AgentStatusView        `json:"agent_connections,omitempty"`
+	Harnesses           []HarnessView            `json:"harnesses,omitempty"`
+	LocalSessionSummary LocalSessionSummary      `json:"local_session_summary,omitempty"`
 }
 
 type RemoteView struct {
