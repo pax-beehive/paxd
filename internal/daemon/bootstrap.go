@@ -23,6 +23,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/e2ee"
 	"github.com/pax-beehive/paxd/internal/e2eepairing"
+	"github.com/pax-beehive/paxd/internal/harnessauth"
 	"github.com/pax-beehive/paxd/internal/harnessregistry"
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
@@ -48,6 +49,7 @@ func DefaultControlSocketPath() string {
 }
 
 type Runtime struct {
+	harnessAuth      *harnessauth.Manager
 	Store            *daemonstore.Store
 	Control          control.Service
 	LocalHandler     http.Handler
@@ -191,7 +193,9 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 			Now:        time.Now,
 		},
 	}
+	harnessAuth := harnessauth.New(ctx, harnessauth.Options{})
 	service := control.NewService(control.ServiceOptions{
+		HarnessAuth:         harnessAuth,
 		Store:               store,
 		Supervisors:         supervisors,
 		Harnesses:           harnesses,
@@ -225,8 +229,9 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		Store: store, Headers: auth.NewProvider(store, nil), RootKeys: e2eeDistributionKeys,
 	})
 	return &Runtime{
-		Store:   store,
-		Control: service,
+		harnessAuth: harnessAuth,
+		Store:       store,
+		Control:     service,
 		LocalHandler: localapi.NewHandlerWithE2EE(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,

@@ -95,6 +95,7 @@ const (
 	CommandCancelPaxdMaintenance  CommandType = "paxd.maintenance.cancel"
 	CommandAttachmentEnsureLocal  CommandType = "attachment.ensure_local"
 	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
+	CommandHarnessAuthLogin       CommandType = "harness_auth.login"
 	CommandSecretChannelPush      CommandType = "secret_channel.push"
 )
 
@@ -130,6 +131,7 @@ type Command struct {
 	CancelPaxdMaintenance *CancelPaxdMaintenanceCommand `json:"cancel_paxd_maintenance,omitempty"`
 	EnsureAttachmentLocal *EnsureAttachmentLocalCommand `json:"ensure_attachment_local,omitempty"`
 	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
+	HarnessAuthLogin      *HarnessAuthLoginCommand      `json:"harness_auth_login,omitempty"`
 	PushSecretChannel     *PushSecretChannelCommand     `json:"push_secret_channel,omitempty"`
 }
 
@@ -385,6 +387,7 @@ type CommandAck struct {
 }
 
 type CommandResult struct {
+	HarnessAuth         *HarnessAuthView           `json:"harness_auth,omitempty"`
 	PaxdRestart         *PaxdRestartResult         `json:"paxd_restart,omitempty"`
 	PaxdUpgrade         *PaxdUpgradeResult         `json:"paxd_upgrade,omitempty"`
 	Remote              *RemoteView                `json:"remote,omitempty"`
@@ -545,6 +548,7 @@ const (
 	QueryCommandGet            QueryType = "command.get"
 	QueryAttachmentLocalStatus QueryType = "attachment.local_status"
 	QueryBrowserControl        QueryType = "browser.control"
+	QueryHarnessAuthStatus     QueryType = "harness_auth.status"
 	QuerySecretChannelOpen     QueryType = "secret_channel.open"
 )
 
@@ -566,6 +570,7 @@ type Query struct {
 	GetCommand               *GetCommandQuery               `json:"get_command,omitempty"`
 	GetAttachmentLocalStatus *GetAttachmentLocalStatusQuery `json:"get_attachment_local_status,omitempty"`
 	BrowserControl           *BrowserControlQuery           `json:"browser_control,omitempty"`
+	HarnessAuthStatus        *HarnessAuthStatusQuery        `json:"harness_auth_status,omitempty"`
 	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
 }
 
@@ -723,8 +728,9 @@ type GetCommandQuery struct {
 }
 
 type QueryResult struct {
-	Type  QueryType     `json:"type"`
-	Error *ControlError `json:"error,omitempty"`
+	HarnessAuth *HarnessAuthView `json:"harness_auth,omitempty"`
+	Type        QueryType        `json:"type"`
+	Error       *ControlError    `json:"error,omitempty"`
 
 	Status                *DaemonStatus                `json:"status,omitempty"`
 	Diagnostics           *DiagnosticsView             `json:"diagnostics,omitempty"`

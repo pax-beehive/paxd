@@ -80,6 +80,7 @@ func (cmd Command) Validate() error {
 		{CommandCancelPaxdMaintenance, cmd.CancelPaxdMaintenance != nil, validatePtr(cmd.CancelPaxdMaintenance)},
 		{CommandAttachmentEnsureLocal, cmd.EnsureAttachmentLocal != nil, validatePtr(cmd.EnsureAttachmentLocal)},
 		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
+		{CommandHarnessAuthLogin, cmd.HarnessAuthLogin != nil, validatePtr(cmd.HarnessAuthLogin)},
 		{CommandSecretChannelPush, cmd.PushSecretChannel != nil, validatePtr(cmd.PushSecretChannel)},
 	}
 
@@ -396,6 +397,7 @@ func (query Query) Validate() error {
 		{QueryCommandGet, query.GetCommand != nil, validatePtr(query.GetCommand)},
 		{QueryAttachmentLocalStatus, query.GetAttachmentLocalStatus != nil, validatePtr(query.GetAttachmentLocalStatus)},
 		{QueryBrowserControl, query.BrowserControl != nil, validatePtr(query.BrowserControl)},
+		{QueryHarnessAuthStatus, query.HarnessAuthStatus != nil, validatePtr(query.HarnessAuthStatus)},
 		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
 	}
 
@@ -557,7 +559,7 @@ func validateDesiredState(target string, state DesiredState) error {
 
 func knownCommandType(typ CommandType) bool {
 	switch typ {
-	case CommandRemoteCreate,
+	case CommandHarnessAuthLogin, CommandRemoteCreate,
 		CommandRemoteUpdate,
 		CommandRemoteDelete,
 		CommandRemoteRestart,
@@ -581,7 +583,7 @@ func knownCommandType(typ CommandType) bool {
 
 func knownQueryType(typ QueryType) bool {
 	switch typ {
-	case QueryStatusGet,
+	case QueryHarnessAuthStatus, QueryStatusGet,
 		QueryDiagnosticsGet,
 		QueryRemotesList,
 		QueryRemoteGet,
