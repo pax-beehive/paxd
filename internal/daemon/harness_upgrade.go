@@ -127,14 +127,11 @@ func affectedHarnessConnections(ctx context.Context, remoteID string, connection
 			continue
 		}
 		if req.Component == "cli" {
-			if req.Harness == "pi" {
-				continue
-			} // Pi ACP loads its own SDK in-process.
 			path, err := managedNativeConnectionPath(conn)
 			if err != nil {
 				return nil, err
 			}
-			if sameHarnessLauncher(path, before.Path) {
+			if path != "" && sameHarnessLauncher(path, before.Path) {
 				if conn.RemoteID != remoteID {
 					return nil, fmt.Errorf("selected harness installation is shared with another remote; upgrade it locally")
 				}
@@ -240,9 +237,16 @@ func managedNativeConnectionPath(conn control.AgentConnectionView) (string, erro
 	expected := "codex-acp"
 	if conn.Harness == "claude-code" {
 		expected = "claude-agent-acp"
+	} else if conn.Harness == "pi" {
+		expected = "pi-acp"
 	}
 	if len(conn.Command) != 1 || filepath.Base(conn.Command[0]) != expected {
 		return "", fmt.Errorf("cannot verify harness binding for custom ACP launcher on connection %s", conn.ID)
 	}
-	return runtimes.ResolveHarnessExecutable(runtimes.LocalACPProcessSpec{Command: conn.Command, Env: conn.Env, WorkingDir: conn.WorkingDir}, conn.Harness)
+	spec := runtimes.LocalACPProcessSpec{Command: conn.Command, Env: conn.Env, WorkingDir: conn.WorkingDir}
+	if conn.Harness == "pi" {
+		_, launcher, err := runtimes.ResolvePiSDKBinding(spec)
+		return launcher, err
+	}
+	return runtimes.ResolveHarnessExecutable(spec, conn.Harness)
 }

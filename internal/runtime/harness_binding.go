@@ -42,6 +42,8 @@ func directHarnessCommand(command []string) (string, string) {
 		return "codex", "CODEX_PATH"
 	case "claude-agent-acp":
 		return "claude-code", "CLAUDE_CODE_EXECUTABLE"
+	case "pi-acp":
+		return "pi", "PI_ACP_SDK_ROOT"
 	default:
 		return "", ""
 	}
@@ -52,7 +54,13 @@ func bindHarnessExecutable(spec LocalACPProcessSpec) (LocalACPProcessSpec, error
 	if harness == "" {
 		return spec, nil
 	}
-	path, err := ResolveHarnessExecutable(spec, harness)
+	var path string
+	var err error
+	if harness == "pi" {
+		path, _, err = ResolvePiSDKBinding(spec)
+	} else {
+		path, err = ResolveHarnessExecutable(spec, harness)
+	}
 	if err != nil {
 		return spec, err
 	}

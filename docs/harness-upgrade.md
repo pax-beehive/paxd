@@ -54,9 +54,24 @@ wrappers and npx commands are not managed by this binding policy.
 A native upgrade restarts all running managed connections using that launcher,
 then checks every new process's runtime version. Connections belonging to a
 different remote block the shared upgrade. Unknown custom launcher bindings
-also block native upgrades. Native Pi updates remain independent: current Pi
-ACP loads its own SDK, so only a Pi ACP update changes that SDK. External Pi SDK
-binding through PI_ACP_SDK_ROOT will be integrated after the adapter supports it.
+also block native upgrades.
+
+Managed direct `pi-acp` requires `@ccgv2/pi-acp` >=0.7.0 and Node >=24.
+At each start, paxd resolves `pi` from the connection PATH and cwd, follows its
+launcher into `@earendil-works/pi-coding-agent`, and passes that absolute package
+directory as `PI_ACP_SDK_ROOT`. The adapter loads the SDK and its dependencies
+from this installation. Missing packages and wrapper launchers fail explicitly.
+A Pi CLI upgrade restarts connections following that launcher and verifies
+`_meta.pax.runtime.version` on every new slot; failure restores the old launcher
+and SDK processes. Updating the adapter alone preserves the selected SDK.
+
+An explicit `PI_ACP_SDK_ROOT` (connection environment, then daemon environment)
+must be an absolute SDK package directory. Empty or invalid values fail without
+fallback. Such connections remain on their configured SDK and are not restarted
+by an independent global CLI upgrade. The connection configuration is not
+rewritten with a resolved version directory, so default bindings follow future
+launcher upgrades and rollbacks. Upgrade old adapters before relying on binding;
+older adapters may ignore the environment variable.
 
 Version probes use the same binding as process startup. Model visibility also
 depends on account/provider configuration and adapter compatibility. Upgrade
@@ -67,3 +82,10 @@ Tests use real command persistence, WebSocket transport, paxl execution, npm
 staging and ACP process supervision. The opt-in `TestHarnessBrowserE2ENode`
 fixture is launched by Manager's `TestHarnessBrowserUpgrade`; only packages
 and the npm download step are fixtures. No developer installation is upgraded.
+
+The optional `TestPiSDKPublishedAdapter` launches a real published Pi adapter
+through the process runner against two fixture SDK installations, switches the
+Pi launcher, then restores it. Set `PI_ACP_E2E_ENTRY` to the unpacked adapter's
+absolute `dist/index.mjs` path (with dependencies installed) and run
+`go test ./internal/runtime -run '^TestPiSDK' -count=1 -v` using Node 24 on PATH.
+It checks that the adapter's initialize metadata follows the SDK on every start.
