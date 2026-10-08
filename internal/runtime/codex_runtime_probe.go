@@ -29,7 +29,7 @@ type CodexRuntimeVersionProber interface {
 }
 
 // ExecCodexRuntimeVersionProber invokes the fixed, non-configurable
-// `codex --version` command. ACP command arguments and initialize metadata are
+// runtime version command bound to the managed CODEX_PATH. ACP command arguments and initialize metadata are
 // never interpolated into the probe command.
 type ExecCodexRuntimeVersionProber struct {
 	Timeout time.Duration
@@ -52,11 +52,11 @@ func (p ExecCodexRuntimeVersionProber) ProbeCodexRuntimeVersion(
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	executable, err := resolveCodexProbeExecutable(spec)
+	executable, args, err := resolveCodexProbeCommand(spec)
 	if err != nil {
 		return "", errCodexRuntimeProbeUnavailable
 	}
-	cmd := exec.CommandContext(probeCtx, executable, "--version") // #nosec G204 -- path is resolved from the ACP process PATH and arguments are fixed.
+	cmd := exec.CommandContext(probeCtx, executable, args...) // #nosec G204 -- path is resolved from the ACP process PATH and arguments are fixed.
 	prepareExecCommand(cmd)
 	cmd.Cancel = func() error { return killExecCommand(cmd) }
 	cmd.WaitDelay = codexRuntimeProbeWaitDelay
@@ -74,42 +74,23 @@ func (p ExecCodexRuntimeVersionProber) ProbeCodexRuntimeVersion(
 	return parseCodexCLIVersion(stdout.Bytes())
 }
 
-func resolveCodexProbeExecutable(spec LocalACPProcessSpec) (string, error) {
-	pathValue, overridden := environmentOverride(spec.Env, "PATH")
-	if !overridden {
-		pathValue = os.Getenv("PATH")
+// Use the same explicit binding as ExecLocalACPProcessRunner. Direct managed
+// adapters never silently select their bundled Codex dependency.
+func resolveCodexProbeCommand(spec LocalACPProcessSpec) (string, []string, error) {
+	if harness, _ := directHarnessCommand(spec.Command); harness == "codex" {
+		path, err := ResolveHarnessExecutable(spec, "codex")
+		return path, []string{"--version"}, err
 	}
-	if pathValue == "" {
-		return "", errCodexRuntimeProbeUnavailable
+	// Wrappers have no managed binding. Only an explicit override is probeable.
+	override, set := environmentOverride(spec.Env, "CODEX_PATH")
+	if !set {
+		override = os.Getenv("CODEX_PATH")
 	}
-	workingDir := strings.TrimSpace(spec.WorkingDir)
-	if workingDir == "" {
-		var err error
-		workingDir, err = os.Getwd()
-		if err != nil {
-			return "", errCodexRuntimeProbeUnavailable
-		}
+	if override == "" {
+		return "", nil, errCodexRuntimeProbeUnavailable
 	}
-	absWorkingDir, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", errCodexRuntimeProbeUnavailable
-	}
-	for _, directory := range filepath.SplitList(pathValue) {
-		if directory == "" {
-			directory = absWorkingDir
-		} else if !filepath.IsAbs(directory) {
-			directory = filepath.Join(absWorkingDir, directory)
-		}
-		for _, name := range codexProbeExecutableNames(spec.Env) {
-			candidate := filepath.Join(directory, name)
-			info, statErr := os.Stat(candidate)
-			if statErr != nil || !codexProbeFileIsExecutable(info) {
-				continue
-			}
-			return candidate, nil
-		}
-	}
-	return "", errCodexRuntimeProbeUnavailable
+	path, err := resolveACPExecutable(spec, override)
+	return path, []string{"--version"}, err
 }
 
 func fallbackCodexRuntimeIdentity(
@@ -118,6 +99,9 @@ func fallbackCodexRuntimeIdentity(
 	spec LocalACPProcessSpec,
 	prober CodexRuntimeVersionProber,
 ) *ACPRuntimeImplementation {
+	if harness, _ := directHarnessCommand(spec.Command); harness == "claude-code" {
+		return fallbackClaudeRuntimeIdentity(ctx, result, spec)
+	}
 	if prober == nil || !isTrustedCodexACPCommand(spec.Command) {
 		return nil
 	}
@@ -228,4 +212,12 @@ func (o *cappedProbeOutput) Write(payload []byte) (int, error) {
 
 func (o *cappedProbeOutput) Bytes() []byte {
 	return o.buf.Bytes()
+}
+
+func runtimeProbeExecutableNames(env map[string]string, executable string) []string {
+	names := codexProbeExecutableNames(env)
+	for i, name := range names {
+		names[i] = executable + strings.TrimPrefix(name, "codex")
+	}
+	return names
 }

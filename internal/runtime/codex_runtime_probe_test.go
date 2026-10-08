@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -146,6 +147,7 @@ func TestExecCodexRuntimeVersionProberUsesACPWorkingDirectoryAndEnvironment(t *t
 				Env: map[string]string{
 					"EXPECTED_CODEX_PROBE_DIR": resolvedWorkingDir,
 					"CODEX_PROBE_MARKER":       "present",
+					"CODEX_PATH":               script,
 					"PATH":                     binDir,
 				},
 			},
@@ -169,7 +171,7 @@ func TestExecCodexRuntimeVersionProberUsesACPWorkingDirectoryAndEnvironment(t *t
 			context.Background(),
 			LocalACPProcessSpec{
 				Command: []string{"codex-acp"},
-				Env:     map[string]string{"PATH": root},
+				Env:     map[string]string{"PATH": root, "CODEX_PATH": script},
 			},
 		)
 
@@ -214,3 +216,34 @@ func (p *recordingCodexRuntimeVersionProber) Calls() []LocalACPProcessSpec {
 }
 
 var _ CodexRuntimeVersionProber = (*recordingCodexRuntimeVersionProber)(nil)
+
+func TestCodexRuntimeProbeUsesManagedPATHBinding(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "codex"), []byte("#!/bin/sh\necho 'codex-cli 99.99.99'\n"), 0755))
+	version, err := (ExecCodexRuntimeVersionProber{}).ProbeCodexRuntimeVersion(t.Context(), LocalACPProcessSpec{
+		Command: []string{"codex-acp"}, Env: map[string]string{"PATH": root, "CODEX_PATH": ""},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "99.99.99", version)
+}
+
+func TestCodexRuntimeProbeDoesNotUseAdapterDependencyWhenManaged(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("Node is required for adapter dependency resolution")
+	}
+	root := t.TempDir()
+	adapter := filepath.Join(root, "node_modules", "@agentclientprotocol", "codex-acp")
+	dependency := filepath.Join(adapter, "node_modules", "@openai", "codex", "bin")
+	require.NoError(t, os.MkdirAll(dependency, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "bin"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(adapter, "entry.js"), []byte("#!/usr/bin/env node\n"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dependency, "codex.js"), []byte("console.log('codex-cli 0.160.1');\n"), 0644))
+	require.NoError(t, os.Symlink(filepath.Join(adapter, "entry.js"), filepath.Join(root, "bin", "codex-acp")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bin", "codex"), []byte("#!/bin/sh\necho 'codex-cli 99.99.99'\n"), 0755))
+	version, err := (ExecCodexRuntimeVersionProber{Timeout: 10 * time.Second}).ProbeCodexRuntimeVersion(t.Context(), LocalACPProcessSpec{
+		Command: []string{filepath.Join(root, "bin", "codex-acp")},
+		Env:     map[string]string{"PATH": filepath.Join(root, "bin") + string(os.PathListSeparator) + os.Getenv("PATH"), "CODEX_PATH": ""},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "99.99.99", version)
+}

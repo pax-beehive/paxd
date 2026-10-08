@@ -203,6 +203,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		return strings.TrimSuffix(raw, "/api/v1/public/paxd/download") + "/api/v1/public/artifacts/download", err
 	}
 	service := control.NewService(control.ServiceOptions{
+		HarnessInstaller:    &harnessUpgradeCoordinator{store: store, supervisors: supervisors, maintenance: maintenance},
 		PaxlInstaller:       &paxlinstall.Installer{Options: paxlOptions},
 		HarnessAuth:         harnessAuth,
 		Store:               store,

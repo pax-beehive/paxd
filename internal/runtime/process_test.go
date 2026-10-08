@@ -3,7 +3,9 @@ package runtime
 import (
 	"context"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +38,20 @@ func TestExecLocalACPProcessRunnerStartsProcessAndExposesPipes(t *testing.T) {
 func TestExecLocalACPProcessRunnerReportsMissingCommand(t *testing.T) {
 	_, err := ExecLocalACPProcessRunner{}.Start(context.Background(), LocalACPProcessSpec{})
 	require.ErrorContains(t, err, exec.ErrNotFound.Error())
+}
+
+func TestACPProcessUsesConfiguredPathForSelectedLauncher(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "selected-adapter"), []byte("#!/bin/sh\nprintf configured-path\n"), 0755))
+	proc, err := (ExecLocalACPProcessRunner{}).Start(t.Context(), LocalACPProcessSpec{
+		Command: []string{"selected-adapter"}, Env: map[string]string{"PATH": root},
+	})
+	require.NoError(t, err)
+	require.NoError(t, proc.Stdin().Close())
+	output, err := io.ReadAll(proc.Stdout())
+	require.NoError(t, err)
+	require.NoError(t, proc.Wait())
+	require.Equal(t, "configured-path", string(output))
 }
 
 func TestExecProcessTerminateStopsRunningProcess(t *testing.T) {
