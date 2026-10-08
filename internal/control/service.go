@@ -101,6 +101,7 @@ type SecretChannel interface {
 }
 
 type ServiceOptions struct {
+	HarnessInstaller    HarnessInstaller
 	PaxlInstaller       PaxlInstaller
 	HarnessAuth         HarnessAuth
 	Store               Store
@@ -119,27 +120,30 @@ type ServiceOptions struct {
 }
 
 type ControlService struct {
-	paxlInstaller       PaxlInstaller
-	paxlUpgradeActive   sync.Map
-	harnessAuth         HarnessAuth
-	store               Store
-	supervisors         Supervisors
-	harnesses           HarnessRegistry
-	localSessions       LocalSessions
-	hostMetrics         HostMetricsProvider
-	acpPoolCapabilities ACPPoolCapabilitySource
-	diagnostics         DiagnosticsProvider
-	attachments         AttachmentLocalizer
-	sessionRuntime      SessionRuntimeReportService
-	sessionRuntimeReset SessionRuntimeResetService
-	paxdLifecycle       PaxdLifecycle
-	browserControl      BrowserControl
-	secretChannel       SecretChannel
+	harnessInstaller     HarnessInstaller
+	harnessUpgradeActive sync.Map
+	paxlInstaller        PaxlInstaller
+	paxlUpgradeActive    sync.Map
+	harnessAuth          HarnessAuth
+	store                Store
+	supervisors          Supervisors
+	harnesses            HarnessRegistry
+	localSessions        LocalSessions
+	hostMetrics          HostMetricsProvider
+	acpPoolCapabilities  ACPPoolCapabilitySource
+	diagnostics          DiagnosticsProvider
+	attachments          AttachmentLocalizer
+	sessionRuntime       SessionRuntimeReportService
+	sessionRuntimeReset  SessionRuntimeResetService
+	paxdLifecycle        PaxdLifecycle
+	browserControl       BrowserControl
+	secretChannel        SecretChannel
 }
 
 func NewService(opts ServiceOptions) *ControlService {
 	return &ControlService{
 		paxlInstaller:       opts.PaxlInstaller,
+		harnessInstaller:    opts.HarnessInstaller,
 		harnessAuth:         opts.HarnessAuth,
 		store:               opts.Store,
 		supervisors:         opts.Supervisors,
@@ -187,6 +191,14 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	}
 	if cmd.Type == CommandSecretChannelPush {
 		return s.handleSecretChannelPush(ctx, src, cmd)
+	}
+	if cmd.Type == CommandUpgradeHarness {
+		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
+			return rejectedAck(cmd.CommandID, "harness", "", ControlError{Code: ErrCodeInvalidArgument, Message: "harness upgrade requires an authenticated remote"}), nil
+		}
+		if s.harnessInstaller == nil {
+			return failedAck(cmd.CommandID, "harness", "", ControlError{Code: ErrCodeInternal, Message: "harness installer is not configured"}), nil
+		}
 	}
 	if cmd.Type == CommandUpgradePaxl {
 		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
@@ -324,7 +336,7 @@ func sameCommandSource(left Source, right Source) bool {
 }
 
 func isSourceBoundCommand(commandType CommandType) bool {
-	return commandType == CommandUpgradePaxl || isDeferredPaxdMaintenance(commandType) || commandType == CommandAttachmentEnsureLocal
+	return commandType == CommandUpgradeHarness || commandType == CommandUpgradePaxl || isDeferredPaxdMaintenance(commandType) || commandType == CommandAttachmentEnsureLocal
 }
 
 func (s *ControlService) handleSessionRuntimeReset(ctx context.Context, src Source, cmd Command) (CommandAck, error) {
@@ -559,6 +571,8 @@ func (s *ControlService) applyCommand(ctx context.Context, tx TxStore, src Sourc
 		return receivedAgentConnectionAck(cmd.CommandID, view), false, true, err
 	case CommandRestartPaxd:
 		return receivedAck(cmd.CommandID, "paxd", ""), false, false, nil
+	case CommandUpgradeHarness:
+		return receivedAck(cmd.CommandID, "harness", cmd.UpgradeHarness.Harness), false, false, nil
 	case CommandUpgradePaxl:
 		return receivedAck(cmd.CommandID, "paxl", ""), false, false, nil
 	case CommandUpgradePaxd:
@@ -807,6 +821,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "agent_connection", cmd.DeleteAgentConnection.ConnectionID
 	case CommandAgentConnectionRestart:
 		return "agent_connection", cmd.RestartAgentConnection.ConnectionID
+	case CommandUpgradeHarness:
+		return "harness", cmd.UpgradeHarness.Harness
 	case CommandUpgradePaxl:
 		return "paxl", ""
 	case CommandRestartPaxd, CommandUpgradePaxd:
@@ -873,6 +889,10 @@ func (s *ControlService) ConfirmCommandAckDelivered(commandID string) {
 	defer cancel()
 	rec, err := s.store.GetCommandRecord(ctx, commandID)
 	if err != nil || rec.Status != CommandStatusReceived {
+		return
+	}
+	if rec.Type == CommandUpgradeHarness {
+		s.confirmHarnessUpgrade(*rec)
 		return
 	}
 	if rec.Type == CommandUpgradePaxl {

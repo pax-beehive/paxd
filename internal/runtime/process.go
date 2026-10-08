@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -27,7 +28,17 @@ func (r ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProce
 	}
 	// Terminate owns the process lifetime. CommandContext kills only the process
 	// leader on cancellation, which can orphan ACP server descendants.
-	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
+	// Resolve with the same PATH and cwd that installation inspection observes.
+	// exec.Command's implicit lookup happens before cmd.Env and cmd.Dir are set.
+	executable, err := resolveACPExecutable(spec, spec.Command[0])
+	if err != nil {
+		return nil, fmt.Errorf("resolve ACP executable %s: %w", spec.Command[0], err)
+	}
+	spec, err = bindHarnessExecutable(spec)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(executable, spec.Command[1:]...)
 	prepareExecCommand(cmd)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = os.Environ()

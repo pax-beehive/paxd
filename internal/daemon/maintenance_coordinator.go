@@ -53,15 +53,16 @@ type maintenanceIntent struct {
 }
 
 type lifecycleCoordinator struct {
-	mu        sync.Mutex
-	bootID    string
-	intents   map[string]*maintenanceIntent
-	activeID  string
-	committed bool
-	exit      chan ExitRequest
-	activity  maintenanceActivity
-	updater   maintenanceUpdater
-	commands  commandCompleter
+	mu         sync.Mutex
+	bootID     string
+	intents    map[string]*maintenanceIntent
+	activeID   string
+	externalID string
+	committed  bool
+	exit       chan ExitRequest
+	activity   maintenanceActivity
+	updater    maintenanceUpdater
+	commands   commandCompleter
 }
 
 func newLifecycleCoordinator(bootID string) *lifecycleCoordinator {
@@ -152,7 +153,7 @@ func (c *lifecycleCoordinator) schedule(intent *maintenanceIntent) error {
 	if existing := c.intents[intent.commandID]; existing != nil {
 		return nil
 	}
-	if c.committed || c.activeID != "" {
+	if c.committed || c.activeID != "" || c.externalID != "" {
 		return control.ControlError{
 			Code: control.ErrCodeConflict, Message: "another paxd maintenance operation is in progress",
 			Target: "command_id",

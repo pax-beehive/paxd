@@ -92,6 +92,7 @@ const (
 	CommandAgentConnectionDelete  CommandType = "agent_connection.delete"
 	CommandAgentConnectionRestart CommandType = "agent_connection.restart"
 	CommandRestartPaxd            CommandType = "paxd.restart"
+	CommandUpgradeHarness         CommandType = "harness.upgrade"
 	CommandUpgradePaxl            CommandType = "paxl.upgrade"
 	CommandUpgradePaxd            CommandType = "paxd.upgrade"
 	CommandCancelPaxdMaintenance  CommandType = "paxd.maintenance.cancel"
@@ -112,9 +113,10 @@ const (
 )
 
 type Command struct {
-	UpgradePaxl *UpgradePaxlCommand `json:"upgrade_paxl,omitempty"`
-	CommandID   string              `json:"command_id"`
-	Type        CommandType         `json:"type"`
+	UpgradeHarness *UpgradeHarnessCommand `json:"upgrade_harness,omitempty"`
+	UpgradePaxl    *UpgradePaxlCommand    `json:"upgrade_paxl,omitempty"`
+	CommandID      string                 `json:"command_id"`
+	Type           CommandType            `json:"type"`
 
 	CreateRemote  *CreateRemoteCommand  `json:"create_remote,omitempty"`
 	UpdateRemote  *UpdateRemoteCommand  `json:"update_remote,omitempty"`
