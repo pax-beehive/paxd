@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -25,8 +26,9 @@ func (c UpgradeHarnessCommand) Validate() error {
 	if c.Component != "acp" && c.Component != "cli" {
 		return invalid("upgrade_harness.component", "component must be cli or acp")
 	}
-	if !harnessTargetVersion.MatchString(c.Version) {
-		return invalid("upgrade_harness.version", "an exact semantic target version is required")
+	version := strings.TrimSpace(c.Version)
+	if version != "" && version != "latest" && !harnessTargetVersion.MatchString(version) {
+		return invalid("upgrade_harness.version", "version must be latest or an exact semantic version; omit it for latest")
 	}
 	if (c.Component == "acp") != (c.ConnectionID != "") {
 		return invalid("upgrade_harness.connection_id", "connection_id is required only for ACP adapter upgrades")

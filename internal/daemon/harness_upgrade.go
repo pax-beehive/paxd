@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/control"
@@ -62,6 +63,20 @@ func (u *harnessUpgradeCoordinator) UpgradeHarness(ctx context.Context, id, remo
 	if err != nil {
 		return nil, err
 	}
+	target := strings.TrimSpace(req.Version)
+	if target == "" || target == "latest" {
+		phase("resolving_version")
+		var planned harnessInstallResult
+		if err := client.run(ctx, "upgrade", &planned, "--version", "latest", "--dry-run"); err != nil {
+			return nil, err
+		}
+		exact := *req
+		exact.Version = planned.TargetVersion
+		if planned.Phase != "planned" || exact.Version == "" || exact.Version == "latest" || exact.Validate() != nil {
+			return nil, fmt.Errorf("paxl did not resolve latest to an exact target version; upgrade paxl before retrying")
+		}
+		target = exact.Version
+	}
 	registry := u.supervisors.acpPoolRegistry
 	if registry == nil {
 		return nil, fmt.Errorf("ACP runtime is not configured")
@@ -74,21 +89,21 @@ func (u *harnessUpgradeCoordinator) UpgradeHarness(ctx context.Context, id, remo
 	}
 	phase("installing")
 	var installed harnessInstallResult
-	if err := client.run(ctx, "upgrade", &installed, "--version", req.Version); err != nil {
+	if err := client.run(ctx, "upgrade", &installed, "--version", target); err != nil {
 		return nil, err
 	}
-	if installed.Installation == nil || installed.Installation.Version != req.Version || installed.Phase != "installed" {
+	if installed.Installation == nil || installed.Installation.Version != target || installed.Phase != "installed" {
 		return nil, fmt.Errorf("paxl did not verify the target installation")
 	}
 	if len(affected) > 0 {
 		phase("restarting")
-		if err := u.restartAndVerifyHarness(ctx, affected, req.Version, req.Component, phase); err != nil {
+		if err := u.restartAndVerifyHarness(ctx, affected, target, req.Component, phase); err != nil {
 			return u.restoreHarness(client, &installed, affected, before.Version, err, phase)
 		}
 	}
 	phase("verifying")
 	observed, err := client.inspect(ctx)
-	if err != nil || observed.Version != req.Version {
+	if err != nil || observed.Version != target {
 		return u.restoreHarness(client, &installed, affected, before.Version, fmt.Errorf("selected installation changed during runtime verification"), phase)
 	}
 	for _, conn := range affected {

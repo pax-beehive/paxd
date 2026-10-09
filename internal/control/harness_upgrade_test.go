@@ -85,3 +85,12 @@ func TestHarnessUpgradeAcceptsBothComponents(t *testing.T) {
 		require.NoError(t, cmd.Validate())
 	}
 }
+
+func TestHarnessUpgradeVersionDefaults(t *testing.T) {
+	for _, version := range []string{"", " ", "latest", "1.2.3", "1.2.3-beta.1"} {
+		require.NoError(t, (control.UpgradeHarnessCommand{Harness: "codex", Component: "cli", Version: version}).Validate())
+	}
+	for _, version := range []string{"next", "^1.2.3", "1", "https://example.com/package"} {
+		require.Error(t, (control.UpgradeHarnessCommand{Harness: "codex", Component: "cli", Version: version}).Validate())
+	}
+}

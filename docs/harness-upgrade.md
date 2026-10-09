@@ -16,14 +16,18 @@ Authenticated node-control clients send the existing durable command envelope:
 ```
 
 Supported harness values are `claude-code`, `codex` and `pi`; component is
-`cli` or `acp`. CLI upgrades omit connection_id and select the native launcher
+`cli` or `acp`. Version is optional: omitted, blank or `latest` resolves the
+npm latest version once through paxl dry-run, before draining active work.
+Installation, runtime verification and the final result use that exact version.
+Explicit versions remain supported; ranges and arbitrary tags are rejected.
+CLI upgrades omit connection_id and select the native launcher
 on the daemon PATH. ACP upgrades require a running connection belonging to the requesting
 remote. Its command, environment and working directory select the installation.
 Remote input cannot supply executable paths, shell commands or package URLs.
 
 Execution starts after the received ACK is delivered. Duplicate command IDs
 reuse the durable result and are bound to their original remote and payload.
-Progress stays in `received` with `result.phase`: inspecting, waiting_idle,
+Progress stays in `received` with `result.phase`: inspecting, resolving_version, waiting_idle,
 installing, restarting, verifying_runtime, verifying, or rolling_back. `applied`
 means installation and all affected new process epochs are verified. Adapter
 upgrades verify ACPAgent.Version; native upgrades verify Runtime.Version.
