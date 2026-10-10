@@ -53,13 +53,13 @@ func (s DefaultScanner) ListSessions(
 			Timeout:    timeout,
 		}.List(ctx)
 		if err == nil {
-			if strings.EqualFold(firstNonEmpty(spec.Harness, spec.AgentType), "dsh") {
+			if harness := strings.ToLower(firstNonEmpty(spec.Harness, spec.AgentType)); harness == "dsh" || harness == "dscode" {
 				for i := range sessions {
-					sessions[i].AgentType = "dsh"
+					sessions[i].AgentType = harness
 					if sessions[i].NativeID == "" {
-						sessions[i].NativeID = strings.TrimPrefix(sessions[i].SessionID, "dsh:")
+						sessions[i].NativeID = strings.TrimPrefix(sessions[i].SessionID, harness+":")
 					}
-					sessions[i].SessionID = agentregistry.CanonicalSessionID("dsh", sessions[i].NativeID)
+					sessions[i].SessionID = agentregistry.CanonicalSessionID(harness, sessions[i].NativeID)
 				}
 				return limitSessions(sessions, spec.Limit), nil
 			}
@@ -130,11 +130,15 @@ func (s DefaultScanner) listPaxlSessions(
 	}
 	client := paxlclient.Client{Command: command}
 	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
-	if agent == "dsh" {
+	if agent == "dsh" || agent == "dscode" {
 		client.WorkingDir = spec.WorkingDir
 		client.Env = map[string]string{}
 		// Forward only storage location overrides, never model credentials.
-		for _, key := range []string{"DSH_HOME", "PAXL_DSH_SESSIONS_DIR"} {
+		keys := []string{"DSH_HOME", "PAXL_DSH_SESSIONS_DIR"}
+		if agent == "dscode" {
+			keys = []string{"DSCODE_HOME", "PAXL_DSCODE_SESSIONS_DIR"}
+		}
+		for _, key := range keys {
 			if value, ok := spec.Env[key]; ok {
 				client.Env[key] = value
 			}

@@ -551,3 +551,42 @@ exit 2
 	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
 	return scriptPath
 }
+
+func TestDefaultScannerNormalizesDSCodeSessionIdentity(t *testing.T) {
+	command := fakeACPCommand(t, `[{"sessionId":"native-dscode-id","cwd":"/work"}]`)
+	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(t.Context(), SessionScannerSpec{
+		Harness: "dscode", Command: command,
+	})
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "dscode:native-dscode-id", sessions[0].SessionID)
+	assert.Equal(t, "native-dscode-id", sessions[0].NativeID)
+	assert.Equal(t, "dscode", sessions[0].AgentType)
+	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
+}
+
+func TestDefaultScannerReadsDSCodeTitleAndHistoryUsingConnectionHome(t *testing.T) {
+	root := t.TempDir()
+	command := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+test "$DSCODE_HOME" = "$PWD" || exit 9
+test "$PAXL_DSCODE_SESSIONS_DIR" = "$PWD/sessions" || exit 10
+if [ "$2" = "list" ]; then
+  printf '{"id":"dscode:local","agent":"dscode","nativeId":"local","title":"DSCode durable title","workspaceRoots":["/work"]}\n'
+else
+  printf '{"sessionId":"dscode:local","seq":1,"type":"message","role":"assistant","contentText":"DSCode history"}\n'
+fi
+`
+	require.NoError(t, os.WriteFile(command, []byte(script), 0o755))
+	sessions, err := (DefaultScanner{PaxlCommand: []string{command}}).ListSessions(t.Context(), SessionScannerSpec{
+		Harness: "dscode", WorkingDir: root,
+		Env: map[string]string{"DSCODE_HOME": root, "PAXL_DSCODE_SESSIONS_DIR": filepath.Join(root, "sessions")},
+	})
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "DSCode durable title", sessions[0].Name)
+	assert.Equal(t, "dscode:local", sessions[0].SessionID)
+	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
+	require.Len(t, sessions[0].Messages, 1)
+	assert.Equal(t, "DSCode history", sessions[0].Messages[0].Text)
+}

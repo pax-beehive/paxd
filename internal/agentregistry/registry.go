@@ -128,6 +128,14 @@ func Default() Registry {
 			Source:          "native",
 			InstallHint:     "requires Node 22.19+ on 22.x or Node 24+; configure DEEPSEEK_API_KEY in the paxd service environment, then run paxl daemon harness discover dsh",
 		},
+		{
+			Name:            "dscode",
+			Kind:            "acp",
+			Command:         []string{"dscode", "acp"},
+			InstallCommands: [][]string{{"npm", "install", "-g", "@toddzheng024/dscode@latest"}},
+			Source:          "native",
+			InstallHint:     "Install a DSCODE build with native dscode acp support and configure credentials in the TUI.",
+		},
 	}}
 }
 
