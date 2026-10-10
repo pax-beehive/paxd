@@ -134,7 +134,7 @@ func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {
 		names = append(names, detector.Name())
 	}
 
-	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi", "dsh"}, names)
+	assert.ElementsMatch(t, []string{"hermes", "codex", "claude-code", "gemini", "kimi", "opencode", "openclaw", "pi", "dsh", "dscode"}, names)
 	assertDefaultDetectorCommand(t, detectors, "dsh", []string{"dsh", "--profile", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "kimi", []string{"kimi", "acp"}, nil)
 	assertDefaultDetectorCommand(t, detectors, "opencode", []string{"opencode", "acp"}, nil)
@@ -229,4 +229,32 @@ func (l fakeLookup) LookPath(file string) (string, error) {
 		return "", errors.New("not found")
 	}
 	return path, nil
+}
+
+func TestDSCodeDiscoveryRequiresInstalledCLI(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		t.Run(fmt.Sprint(installed), func(t *testing.T) {
+			var detector CommandDetector
+			for _, candidate := range DefaultDetectors() {
+				if candidate.Name() == "dscode" {
+					detector = candidate.(CommandDetector)
+				}
+			}
+			require.Equal(t, "dscode", detector.Harness)
+			paths := map[string]string{"paxd": "/bin/paxd", "npx": "/bin/npx"}
+			if installed {
+				paths["dscode"] = "/bin/dscode"
+			}
+			detector.Lookup = fakeLookup{paths: paths}
+			view, err := detector.Detect(t.Context(), control.DiscoverHarnessesQuery{})
+			require.NoError(t, err)
+			require.Len(t, view.Command, 2)
+			assert.Equal(t, []string{"dscode", "acp"}, view.Command)
+			if installed {
+				assert.Equal(t, StateAvailable, view.State)
+			} else {
+				assert.Equal(t, StateMissing, view.State)
+			}
+		})
+	}
 }

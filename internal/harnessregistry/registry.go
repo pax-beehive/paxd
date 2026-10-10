@@ -136,6 +136,13 @@ func (d CommandDetector) Detect(ctx context.Context, req control.DiscoverHarness
 func DefaultDetectors() []Detector {
 	return []Detector{
 		CommandDetector{
+			Harness:     "dscode",
+			DisplayName: "DSCODE",
+			Command:     []string{"dscode", "acp"},
+			Source:      "native",
+			InstallHint: "Install a DSCODE build with native dscode acp support and configure credentials in the TUI.",
+		},
+		CommandDetector{
 			Harness:     "dsh",
 			DisplayName: "DeepSeek Harness",
 			Command:     []string{"dsh", "--profile", "acp"},
