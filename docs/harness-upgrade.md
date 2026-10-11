@@ -17,7 +17,8 @@ Authenticated node-control clients send the existing durable command envelope:
 
 Supported harness values are `claude-code`, `codex` and `pi`; component is
 `cli` or `acp`. Version is optional: omitted, blank or `latest` resolves the
-npm latest version once through paxl dry-run, before draining active work.
+latest version from the installation source once through paxl dry-run, before
+draining active work.
 Installation, runtime verification and the final result use that exact version.
 Explicit versions remain supported; ranges and arbitrary tags are rejected.
 CLI upgrades omit connection_id and select the native launcher
@@ -38,8 +39,12 @@ The coordinator excludes concurrent daemon restart/upgrade maintenance, blocks
 new ACP work and waits up to two minutes for active work to finish. It invokes
 paxl's machine-readable local upgrade interface; outdated paxl or unsupported
 installation layouts fail with an actionable error. paxl currently supports
-Unix npm global installations with direct symlink launchers. Native installers,
-Homebrew, npx and custom launch wrappers remain unsupported.
+Unix npm global installations and official native Claude CLI installations with
+direct symlink launchers. Native Claude uses official versioned downloads with
+size/SHA-256 verification and an independent old-binary copy for rollback.
+Upgrade paxl to a build supporting `source: native` before using this path; no
+new daemon command or ACP binding configuration is needed. Homebrew, npx and
+custom launch wrappers remain unsupported.
 
 All running connections using the selected launcher are restarted. Every
 desired slot must complete initialization in a new process epoch and report
@@ -86,6 +91,9 @@ Tests use real command persistence, WebSocket transport, paxl execution, npm
 staging and ACP process supervision. The opt-in `TestHarnessBrowserE2ENode`
 fixture is launched by Manager's `TestHarnessBrowserUpgrade`; only packages
 and the npm download step are fixtures. No developer installation is upgraded.
+Run browser fixtures with `CODEX_PATH`, `CLAUDE_CODE_EXECUTABLE` and
+`PI_ACP_SDK_ROOT` unset in the test process so inherited developer overrides do
+not bind adapters outside the temporary fixture installations.
 
 The optional `TestPiSDKPublishedAdapter` launches a real published Pi adapter
 through the process runner against two fixture SDK installations, switches the
