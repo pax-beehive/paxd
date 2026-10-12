@@ -637,3 +637,19 @@ Running setup without this flag retains browser pairing.
 Release the updated installer and paxd binary before enabling Console Quick
 connect. The command requires macOS or Linux; token expiry is controlled by the
 server and Console offers regeneration when needed.
+
+### Token setup diagnostics
+
+Installer downloads and machine registration use different public origins:
+`https://api.paxworkspace.net` serves installers; `https://wsapi.paxworkspace.net`
+accepts node registration and Node Key requests. Hong Kong uses `hk-api` and
+`hk-wsapi` respectively. Register against the same region that issued the token.
+An explicit `--cloud-url` wins over saved configuration even when it equals the
+built-in default.
+
+Token setup reports HTTP status and locally generated guidance for redirects,
+HTML responses, rejected tokens, rate limits and server failures. It never
+prints response bodies, redirect URLs or registration tokens, and never retries
+a registration mutation automatically. Download success alone does not verify
+registration; a browser API returning an Access login redirect cannot register
+a headless device.

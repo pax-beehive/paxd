@@ -234,7 +234,7 @@ func cloudURLFromCommand(cmd *cli.Command, cfg *config.Config) string {
 	if cfg != nil {
 		cfgURL = strings.TrimSpace(cfg.Cloud.APIURL)
 	}
-	if flagURL == "" || flagURL == config.DefaultCloudAPIURL {
+	if flagURL == "" || !cmd.IsSet("cloud-url") {
 		return strings.TrimRight(firstNonEmpty(cfgURL, flagURL, config.DefaultCloudAPIURL), "/")
 	}
 	return strings.TrimRight(flagURL, "/")
