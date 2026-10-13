@@ -120,10 +120,10 @@ https://api.paxworkspace.net/api/v1/public/paxd/download?platform=windows/amd64&
 
 ## Release artifacts
 
-Apple Silicon 构建必须保留 `go-m1cpu >= v0.2.2`：旧版由 `gopsutil/cpu`
-间接引入，在 package init 阶段读取 IOKit CPU 频率属性；属性缺失时可直接
-SIGSEGV，连 installer 调用的 `paxd --version` 都无法执行。v0.2.2 包含
-空值保护及延迟初始化，且兼容现有 Go module 版本要求。paxd 的利用率采样
+Apple Silicon 构建必须使用 `gopsutil/v4`，不要退回 `gopsutil/v3`：v3 通过
+`go-m1cpu` 在 package init 阶段读取 IOKit CPU 频率属性；属性缺失时（如 M5）
+可直接 SIGSEGV，连 installer 调用的 `paxd --version` 都无法执行。v4 不再依赖
+`go-m1cpu`，因此构建需要 Go 1.26+。paxd 的利用率采样
 使用 `cpu.Percent`，不需要启动时探测核心频率。发布前在 arm64 Mac 运行
 `bash scripts/apple_silicon_startup_test.sh`，验证实际 CGO binary 的版本/帮助
 命令不触发该库的 eager init。不要用 `CGO_ENABLED=0` 绕过崩溃：SQLite
