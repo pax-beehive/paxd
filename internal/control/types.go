@@ -539,6 +539,7 @@ type ACPRuntimeImplementation struct {
 type QueryType string
 
 const (
+	QueryDirectoriesList       QueryType = "directories.list"
 	QueryStatusGet             QueryType = "status.get"
 	QueryDiagnosticsGet        QueryType = "diagnostics.get"
 	QueryRemotesList           QueryType = "remotes.list"
@@ -559,7 +560,8 @@ const (
 )
 
 type Query struct {
-	Type QueryType `json:"type"`
+	ListDirectories *ListDirectoriesQuery `json:"list_directories,omitempty"`
+	Type            QueryType             `json:"type"`
 
 	GetStatus                *GetStatusQuery                `json:"get_status,omitempty"`
 	GetDiagnostics           *GetDiagnosticsQuery           `json:"get_diagnostics,omitempty"`
@@ -734,6 +736,7 @@ type GetCommandQuery struct {
 }
 
 type QueryResult struct {
+	Directories *DirectoryPage   `json:"directories,omitempty"`
 	HarnessAuth *HarnessAuthView `json:"harness_auth,omitempty"`
 	Type        QueryType        `json:"type"`
 	Error       *ControlError    `json:"error,omitempty"`

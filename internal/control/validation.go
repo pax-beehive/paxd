@@ -384,6 +384,7 @@ func (query Query) Validate() error {
 		set bool
 		err error
 	}{
+		{QueryDirectoriesList, query.ListDirectories != nil, validatePtr(query.ListDirectories)},
 		{QueryStatusGet, query.GetStatus != nil, validatePtr(query.GetStatus)},
 		{QueryDiagnosticsGet, query.GetDiagnostics != nil, validatePtr(query.GetDiagnostics)},
 		{QueryRemotesList, query.ListRemotes != nil, validatePtr(query.ListRemotes)},
@@ -587,7 +588,7 @@ func knownCommandType(typ CommandType) bool {
 
 func knownQueryType(typ QueryType) bool {
 	switch typ {
-	case QueryHarnessAuthStatus, QueryStatusGet,
+	case QueryDirectoriesList, QueryHarnessAuthStatus, QueryStatusGet,
 		QueryDiagnosticsGet,
 		QueryRemotesList,
 		QueryRemoteGet,
