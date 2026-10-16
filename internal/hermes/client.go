@@ -251,7 +251,7 @@ func (c *Client) stream(ctx context.Context, prevRespID, sessionID, prompt strin
 		msg := fmt.Sprintf("http %d: %s", resp.StatusCode, string(body))
 		events <- model.NewAgentStatus(sessionID, "", "error", "Error", "❌", msg)
 		events <- model.NewTurnDone(sessionID, "", "", "error")
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%s", msg)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)

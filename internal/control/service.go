@@ -476,6 +476,9 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	if err := query.Validate(); err != nil {
 		return QueryResult{Type: query.Type, Error: ptr(controlErr(err))}, nil
 	}
+	if query.Type == QueryDirectoriesList {
+		return handleDirectoriesQuery(ctx, src, *query.ListDirectories), nil
+	}
 	if query.Type == QueryHarnessAuthStatus {
 		return s.handleHarnessAuthStatus(ctx, src, *query.HarnessAuthStatus)
 	}
