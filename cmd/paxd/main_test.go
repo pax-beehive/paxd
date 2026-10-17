@@ -693,3 +693,26 @@ func configWithDB(path string) *config.Config {
 	cfg.Daemon.DBPath = path
 	return &cfg
 }
+
+func TestExplicitDefaultCloudURLOverridesSavedConfiguration(t *testing.T) {
+	for _, explicit := range []bool{true, false} {
+		cfg := &config.Config{}
+		cfg.Cloud.APIURL = "https://old.example.test"
+		cmd := &cli.Command{
+			Flags: []cli.Flag{&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL}},
+			Action: func(_ context.Context, cmd *cli.Command) error {
+				want := cfg.Cloud.APIURL
+				if explicit {
+					want = config.DefaultCloudAPIURL
+				}
+				assert.Equal(t, want, cloudURLFromCommand(cmd, cfg))
+				return nil
+			},
+		}
+		args := []string{"test"}
+		if explicit {
+			args = append(args, "--cloud-url", config.DefaultCloudAPIURL)
+		}
+		require.NoError(t, cmd.Run(context.Background(), args))
+	}
+}

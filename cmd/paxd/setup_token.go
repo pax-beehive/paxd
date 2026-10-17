@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -49,6 +50,11 @@ func registerSetupToken(ctx context.Context, cfg *config.Config, spec remotelogi
 		APIEndpoint: spec.Node.APIEndpoint,
 	}, token)
 	if err != nil {
+		// Typed registration errors contain only status and locally generated guidance.
+		var registrationError *cloud.RegistrationError
+		if errors.As(err, &registrationError) {
+			return remotelogin.LoginResult{}, fmt.Errorf("device registration failed: %w", registrationError)
+		}
 		// The remote response is not printed: it could echo the credential.
 		return remotelogin.LoginResult{}, fmt.Errorf("device registration failed; check the server connection and generate a fresh command in Console")
 	}
