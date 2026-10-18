@@ -27,15 +27,14 @@ func (s DefaultScanner) ListSessions(
 	if timeout <= 0 {
 		timeout = defaultScanTimeout
 	}
-	if sessions, err := s.listPaxlSessions(ctx, spec); err == nil {
+	sessions, paxlErr := s.listPaxlSessions(ctx, spec)
+	if paxlErr == nil {
 		return sessions, nil
 	}
-	var errs []error
 	if isCodexSpec(spec) {
-		// Codex sessions are local rollout logs. Starting codex-acp from the
-		// daemon can trigger browser OAuth with a short-lived localhost callback.
-		return listCodexLocalSessions(ctx, timeout)
+		return nil, fmt.Errorf("list codex sessions through paxl: %w", paxlErr)
 	}
+	var errs []error
 	if isGeminiSpec(spec) {
 		sessions, err := agentregistry.ListGeminiLocalSessions(ctx, spec.Limit)
 		if err == nil && len(sessions) > 0 {
@@ -89,7 +88,7 @@ func (s DefaultScanner) ListSessions(
 		errs = append(errs, err)
 		return nil, joinErrors(errs)
 	}
-	sessions, err := agentregistry.ListSessions(ctx, status, timeout)
+	sessions, err = agentregistry.ListSessions(ctx, status, timeout)
 	if err == nil {
 		return limitSessions(sessions, spec.Limit), nil
 	}
@@ -112,14 +111,6 @@ func isCodexSpec(spec SessionScannerSpec) bool {
 	return strings.Contains(strings.Join(spec.Command, " "), "@agentclientprotocol/codex-acp")
 }
 
-func listCodexLocalSessions(ctx context.Context, timeout time.Duration) ([]model.SessionInfo, error) {
-	status, err := fallbackStatus(SessionScannerSpec{Harness: "codex"})
-	if err != nil {
-		return nil, err
-	}
-	return agentregistry.ListSessions(ctx, status, timeout)
-}
-
 func (s DefaultScanner) listPaxlSessions(
 	ctx context.Context,
 	spec SessionScannerSpec,
@@ -130,6 +121,13 @@ func (s DefaultScanner) listPaxlSessions(
 	}
 	client := paxlclient.Client{Command: command}
 	agent := strings.ToLower(strings.TrimSpace(firstNonEmpty(spec.Harness, spec.AgentType)))
+	if isCodexSpec(spec) {
+		agent = "codex"
+		if home, ok := spec.Env["CODEX_HOME"]; ok {
+			client.Env = map[string]string{"CODEX_HOME": home}
+		}
+	}
+
 	if agent == "dsh" || agent == "dscode" {
 		client.WorkingDir = spec.WorkingDir
 		client.Env = map[string]string{}

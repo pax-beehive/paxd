@@ -1367,7 +1367,7 @@ func syncSession(ctx context.Context, store *sessionstore.Store, session session
 	}
 	var elements []sessionstore.Element
 	if session.Agent == "codex" {
-		elements, err = agentregistry.CodexLocalElements(session.NativeID)
+		elements, err = agentregistry.CodexElements(ctx, session.NativeID)
 		if err != nil {
 			_ = store.FailSync(ctx, version, err)
 			return err
