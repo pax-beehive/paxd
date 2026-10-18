@@ -102,3 +102,17 @@ func TestTokenSetupRejectsMissingExpiredAndIncompleteCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenSetupPreservesSafeRegistrationDiagnostics(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PAX_REGISTRATION_TOKEN", "secret")
+	require.NoError(t, ensurePaxdHome())
+	cfg, err := loadRuntimeConfig()
+	require.NoError(t, err)
+	_, err = registerSetupToken(context.Background(), cfg, remotelogin.LoginSpec{RemoteID: "default"}, tokenClientFunc(func(_ *cloud.RegisterNodeRequest, _ string) (*cloud.RegisterNodeResponse, error) {
+		return nil, &cloud.RegistrationError{StatusCode: 302, Reason: "use the machine API address (wsapi)"}
+	}))
+	require.ErrorContains(t, err, "HTTP 302")
+	assert.Contains(t, err.Error(), "wsapi")
+	assert.NotContains(t, err.Error(), "secret")
+}

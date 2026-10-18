@@ -389,15 +389,19 @@ func (c *Client) RegisterNode(
 		map[string]string{"X-Registration-Token": registrationToken},
 	)
 	if err != nil {
-		return nil, err
+		return nil, &RegistrationError{Reason: "connection failed; check the machine API address and network"}
 	}
 	defer resp.Body.Close()
 
-	if err := checkStatus(resp, "register node"); err != nil {
+	if err := registrationStatus(resp); err != nil {
 		return nil, err
 	}
 
-	return decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
+	result, err := decodeEnvelope[RegisterNodeResponse](resp.Body, "register node")
+	if err != nil {
+		return nil, &RegistrationError{StatusCode: resp.StatusCode, Reason: "invalid registration response; check the machine API address"}
+	}
+	return result, nil
 }
 
 // StartNodeRegistration begins interactive device-code style onboarding.
