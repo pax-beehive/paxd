@@ -785,8 +785,8 @@ func (s *confirmingService) confirmedIDs() []string {
 
 func TestHarnessAuthCommandsAndQueriesUseRemoteSource(t *testing.T) {
 	service := controltest.NewMockService(t)
-	cmd := control.Command{CommandID: "auth-submit", Type: control.CommandHarnessAuthLogin, HarnessAuthLogin: &control.HarnessAuthLoginCommand{Harness: "claude", Operation: "submit", SessionID: "login-session", Code: "one-time-code"}}
-	ack := control.CommandAck{CommandID: cmd.CommandID, OK: true, Status: control.CommandStatusApplied, Result: &control.CommandResult{HarnessAuth: &control.HarnessAuthView{Harness: "claude", SessionID: "login-session", State: "exchanging"}}}
+	cmd := control.Command{CommandID: "auth-submit", Type: control.CommandHarnessAuthLogin, HarnessAuthLogin: &control.HarnessAuthLoginCommand{Harness: "claude", Operation: "submit", SessionID: "login-session", PromptID: "native", Code: "one-time-code"}}
+	ack := control.CommandAck{CommandID: cmd.CommandID, OK: true, Status: control.CommandStatusApplied, Result: &control.CommandResult{HarnessAuth: &control.HarnessAuthView{Harness: "claude", SessionID: "login-session", State: "running"}}}
 	query := control.Query{Type: control.QueryHarnessAuthStatus, HarnessAuthStatus: &control.HarnessAuthStatusQuery{Harness: "claude", SessionID: "login-session"}}
 	result := control.QueryResult{Type: query.Type, HarnessAuth: &control.HarnessAuthView{Harness: "claude", SessionID: "login-session", State: "succeeded"}}
 	service.ExpectCommandFrom(remoteSource(), cmd).ReturnCommandAck(ack)
