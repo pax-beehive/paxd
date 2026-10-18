@@ -1,6 +1,8 @@
 package agentregistry
 
 import (
+	"fmt"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,5 +199,29 @@ func TestCodexLocalElementsReadsSubagentRolloutItself(t *testing.T) {
 	}
 	if len(elements) != 1 || elements[0].ContentText != "guardian review" {
 		t.Fatalf("elements = %+v, want the subagent rollout itself", elements)
+	}
+}
+
+func TestGuardianIndexEntriesCannotRenameUserConversations(t *testing.T) {
+	for _, source := range []string{"subagent", "guardian_review"} {
+		t.Run(source, func(t *testing.T) {
+			home := writeCodexLineageFixture(t)
+			path := filepath.Join(home, "session_index.jsonl")
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			require.NoError(t, err)
+			_, err = file.WriteString(`{"id":"ddd","thread_name":"Guardian review","updated_at":"2026-07-19T04:00:00Z"}` + "\n")
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+			meta := fmt.Sprintf(`{"type":"session_meta","payload":{"id":"ddd","session_id":"aaa","parent_thread_id":"aaa","thread_source":%q}}`, source)
+			require.NoError(t, os.WriteFile(filepath.Join(home, "sessions", "2026", "07", "19", "rollout-2026-07-19T02-00-00-ddd.jsonl"), []byte(meta+"\n"), 0o600))
+
+			sessions, err := listCodexLocalSessions()
+
+			require.NoError(t, err)
+			require.Len(t, sessions, 1)
+			require.Equal(t, "codex:aaa", sessions[0].SessionID)
+			require.Equal(t, "forked thread", sessions[0].Name)
+			require.Equal(t, "2026-07-19T03:00:00Z", sessions[0].UpdatedAt)
+		})
 	}
 }

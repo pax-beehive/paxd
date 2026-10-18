@@ -41,7 +41,7 @@ type codexSessionMetaLine struct {
 // isSubagent reports whether the rollout belongs to an internal subagent
 // (guardian reviewers, thread spawns) rather than a user conversation.
 func (m codexSessionMetaLine) isSubagent() bool {
-	if m.Payload.ThreadSource == "subagent" {
+	if m.Payload.ThreadSource == "subagent" || m.Payload.ThreadSource == "guardian_review" {
 		return true
 	}
 	var source struct {
@@ -72,6 +72,9 @@ type codexLineage struct {
 func newCodexLineage(metas []codexRolloutMeta) codexLineage {
 	parentOf := make(map[string]string, len(metas))
 	for _, rollout := range metas {
+		if rollout.meta.isSubagent() {
+			continue
+		}
 		id := rollout.meta.Payload.ID
 		parent := firstNonEmpty(rollout.meta.Payload.ForkedFromID, rollout.meta.Payload.ParentThreadID)
 		if id == "" || parent == "" || id == parent {
@@ -137,6 +140,12 @@ func listCodexLocalSessions() ([]model.SessionInfo, error) {
 
 func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []model.SessionInfo {
 	lineage := newCodexLineage(metas)
+	internalIDs := make(map[string]bool)
+	for _, rollout := range metas {
+		if rollout.meta.isSubagent() {
+			internalIDs[rollout.meta.Payload.ID] = true
+		}
+	}
 	byRoot := make(map[string]model.SessionInfo)
 	nameUpdatedAt := make(map[string]string)
 	sessionFor := func(key string) model.SessionInfo {
@@ -157,7 +166,9 @@ func mergeCodexSessions(entries []codexIndexEntry, metas []codexRolloutMeta) []m
 	// collapse into one session. Use the latest real thread name across the
 	// lineage; the root index entry may be absent after a fork or compact.
 	for _, entry := range entries {
-		if entry.ID == "" {
+		// Exclude internal index entries before names or activity can be merged
+		// into a user conversation; filtering rollout metadata alone is too late.
+		if entry.ID == "" || internalIDs[entry.ID] {
 			continue
 		}
 		key := lineage.rootOf(entry.ID)
