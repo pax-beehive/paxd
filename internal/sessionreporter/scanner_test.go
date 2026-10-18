@@ -85,35 +85,18 @@ func TestDefaultScannerPassesLimitToPaxl(t *testing.T) {
 	assert.Equal(t, "codex:sess_limited", sessions[0].SessionID)
 }
 
-func TestDefaultScannerUsesCodexLocalIndexBeforeACP(t *testing.T) {
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(codexHome, "session_index.jsonl"),
-		[]byte(`{"id":"sess-local","thread_name":"Correct Codex thread","updated_at":"2026-07-08T23:01:50Z"}`+"\n"),
-		0o644,
-	))
-	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "08")
-	require.NoError(t, os.MkdirAll(rolloutDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(rolloutDir, "rollout-2026-07-08T23-01-50-sess-local.jsonl"),
-		[]byte(`{"type":"session_meta","payload":{"id":"sess-local","timestamp":"2026-07-08T23:01:50Z","cwd":"/tmp/project"}}`+"\n"),
-		0o644,
-	))
-	command := fakeACPCommand(
-		t,
-		`[{"sessionId":"codex:sess-local","nativeId":"sess-local","title":"# AGENTS.md instructions <INSTRUCTIONS> system prompt"}]`,
-	)
-
-	sessions, err := legacyDefaultScanner(5*time.Second).ListSessions(context.Background(), SessionScannerSpec{
-		Harness: "codex",
-		Command: command,
-	})
-
-	require.NoError(t, err)
-	require.Len(t, sessions, 1)
-	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
-	assert.Equal(t, "Correct Codex thread", sessions[0].Name)
+func TestCodexPaxlFailureDoesNotReadLocalLogsOrStartACP(t *testing.T) {
+	for _, command := range [][]string{{"missing-paxl-test-binary"}, {"/usr/bin/false"}} {
+		t.Run(command[0], func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CODEX_HOME", home)
+			require.NoError(t, os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(`{"id":"review","thread_name":"Guardian review"}`+"\n"), 0o600))
+			sessions, err := (DefaultScanner{PaxlCommand: command}).ListSessions(t.Context(), SessionScannerSpec{Harness: "codex", Command: []string{"must-not-start-codex-acp"}})
+			require.Error(t, err)
+			assert.Empty(t, sessions)
+			assert.Contains(t, err.Error(), "paxl")
+		})
+	}
 }
 
 func TestResolvePaxlCommandReadsEnvironmentOverride(t *testing.T) {
@@ -173,38 +156,6 @@ func TestDefaultScannerFallsBackToGeminiACPWhenLocalSessionsAreMissing(t *testin
 	require.Len(t, sessions, 1)
 	assert.Equal(t, "gemini-acp", sessions[0].SessionID)
 	assert.Equal(t, "ACP Gemini", sessions[0].Name)
-}
-
-func TestDefaultScannerUsesCodexLocalSessionsWithoutStartingACP(t *testing.T) {
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(codexHome, "session_index.jsonl"),
-		[]byte(`{"id":"sess-local","thread_name":"Local Codex","updated_at":"2026-06-20T05:32:20Z"}`+"\n"),
-		0o644,
-	))
-	markerPath := filepath.Join(t.TempDir(), "started")
-	scriptPath := filepath.Join(t.TempDir(), "fake-codex-acp.sh")
-	script := `#!/bin/sh
-printf started > "$1"
-read line
-printf '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}\n'
-read line
-printf '{"jsonrpc":"2.0","id":2,"result":{"sessions":[]}}\n'
-`
-	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
-
-	sessions, err := legacyDefaultScanner(time.Second).ListSessions(context.Background(), SessionScannerSpec{
-		Harness: "codex",
-		Command: []string{scriptPath, markerPath},
-	})
-
-	require.NoError(t, err)
-	require.Len(t, sessions, 1)
-	assert.Equal(t, "codex:sess-local", sessions[0].SessionID)
-	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-		t.Fatalf("codex ACP command was started; marker stat error = %v", err)
-	}
 }
 
 func TestDefaultScannerMergesHermesSQLiteSessionsWhenACPSucceeds(t *testing.T) {
@@ -589,4 +540,21 @@ fi
 	assert.Equal(t, []string{"/work"}, sessions[0].WorkspaceRoots)
 	require.Len(t, sessions[0].Messages, 1)
 	assert.Equal(t, "DSCode history", sessions[0].Messages[0].Text)
+}
+
+func TestCodexScannerPassesOnlyStorageOverrideToPaxl(t *testing.T) {
+	command := filepath.Join(t.TempDir(), "paxl")
+	script := `#!/bin/sh
+test "$CODEX_HOME" = /test/codex || exit 3
+test -z "$UNRELATED_MODEL_KEY" || exit 4
+if [ "$2" = list ]; then
+ test "$6" = codex || exit 5
+ printf '{"id":"codex:main","agent":"codex","nativeId":"main","title":"Main"}\n'
+fi
+`
+	require.NoError(t, os.WriteFile(command, []byte(script), 0o755))
+	sessions, err := (DefaultScanner{PaxlCommand: []string{command}}).ListSessions(t.Context(), SessionScannerSpec{Command: []string{"codex-acp"}, Env: map[string]string{"CODEX_HOME": "/test/codex", "UNRELATED_MODEL_KEY": "must-not-be-forwarded"}})
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "Main", sessions[0].Name)
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pax-beehive/paxd/internal/sessionstore"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
@@ -34,7 +35,7 @@ func (c Client) ListSessions(ctx context.Context, agent string, limit int) ([]mo
 	return DecodeSessionList(out)
 }
 
-func (c Client) GetSessionMessages(ctx context.Context, sessionID string, agent string) ([]model.SessionMessage, error) {
+func (c Client) GetSessionElements(ctx context.Context, sessionID, agent string) ([]sessionstore.Element, error) {
 	args := []string{"session", "get", "--format", "jsonl"}
 	if strings.TrimSpace(agent) != "" {
 		args = append(args, "--agent", strings.TrimSpace(agent))
@@ -44,7 +45,60 @@ func (c Client) GetSessionMessages(ctx context.Context, sessionID string, agent 
 	if err != nil {
 		return nil, fmt.Errorf("run paxl session get: %w", err)
 	}
-	return DecodeSessionMessages(out)
+	return DecodeSessionElements(out)
+}
+
+func (c Client) GetSessionMessages(ctx context.Context, sessionID, agent string) ([]model.SessionMessage, error) {
+	elements, err := c.GetSessionElements(ctx, sessionID, agent)
+	if err != nil {
+		return nil, err
+	}
+	return sessionMessages(elements), nil
+}
+
+func DecodeSessionElements(data []byte) ([]sessionstore.Element, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	var elements []sessionstore.Element
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var element sessionstore.Element
+		if err := json.Unmarshal(line, &element); err != nil {
+			return nil, fmt.Errorf("decode paxl session element: %w", err)
+		}
+		if element.Type == "" {
+			continue
+		}
+		var usage struct {
+			Usage     json.RawMessage `json:"usage"`
+			UsageJSON string          `json:"usageJson"`
+		}
+		if err := json.Unmarshal(line, &usage); err != nil {
+			return nil, err
+		}
+		element.UsageJSON = usage.UsageJSON
+		if len(usage.Usage) > 0 && string(usage.Usage) != "null" {
+			element.UsageJSON = string(usage.Usage)
+		}
+		elements = append(elements, element)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan paxl session elements: %w", err)
+	}
+	return elements, nil
+}
+
+func sessionMessages(elements []sessionstore.Element) []model.SessionMessage {
+	var messages []model.SessionMessage
+	for _, e := range elements {
+		if e.SessionID != "" && e.ContentText != "" {
+			messages = append(messages, model.SessionMessage{SessionID: e.SessionID, Seq: e.Seq, Kind: e.Type, Role: e.Role, Text: e.ContentText, StartedAt: e.StartedAt, CompletedAt: e.CompletedAt})
+		}
+	}
+	return messages
 }
 
 func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -96,27 +150,11 @@ func DecodeSessionList(data []byte) ([]model.SessionInfo, error) {
 }
 
 func DecodeSessionMessages(data []byte) ([]model.SessionMessage, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	var messages []model.SessionMessage
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var item paxlElement
-		if err := json.Unmarshal(line, &item); err != nil {
-			return nil, fmt.Errorf("decode paxl session element: %w", err)
-		}
-		message := item.toSessionMessage()
-		if message.SessionID != "" && message.Text != "" {
-			messages = append(messages, message)
-		}
+	elements, err := DecodeSessionElements(data)
+	if err != nil {
+		return nil, err
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan paxl session elements: %w", err)
-	}
-	return messages, nil
+	return sessionMessages(elements), nil
 }
 
 type paxlSession struct {
@@ -158,27 +196,5 @@ func (s paxlSession) toSessionInfo() model.SessionInfo {
 		Status:         s.Status,
 		UpdatedAt:      s.UpdatedAt,
 		CurrentTask:    "",
-	}
-}
-
-type paxlElement struct {
-	SessionID   string `json:"sessionId"`
-	Seq         int64  `json:"seq"`
-	Type        string `json:"type"`
-	Role        string `json:"role"`
-	StartedAt   string `json:"startedAt"`
-	CompletedAt string `json:"completedAt"`
-	ContentText string `json:"contentText"`
-}
-
-func (e paxlElement) toSessionMessage() model.SessionMessage {
-	return model.SessionMessage{
-		SessionID:   e.SessionID,
-		Seq:         e.Seq,
-		Kind:        e.Type,
-		Role:        e.Role,
-		Text:        e.ContentText,
-		StartedAt:   e.StartedAt,
-		CompletedAt: e.CompletedAt,
 	}
 }

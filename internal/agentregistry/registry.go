@@ -286,7 +286,7 @@ func ListSessions(ctx context.Context, status Status, timeout time.Duration) ([]
 		return nil, errors.New(status.Reason)
 	}
 	if status.Agent.Kind == "local" && status.Agent.Name == "codex" {
-		return listCodexLocalSessions()
+		return listCodexSessionsViaPaxl(ctx, timeout)
 	}
 	if status.Agent.Kind == "local" && status.Agent.Name == "qwen" {
 		return listQwenLocalSessions()

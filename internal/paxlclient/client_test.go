@@ -63,3 +63,38 @@ func fakePaxlCommand(t *testing.T, script string) string {
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 	return path
 }
+
+func TestClientReadsFullHistoryAndMessagesThroughPaxl(t *testing.T) {
+	command := fakePaxlCommand(t, `#!/bin/sh
+cat <<'JSON'
+{"schemaVersion":"paxl.session.snapshot.v1","sessionId":"codex:main"}
+{"sessionId":"codex:main","seq":1,"type":"tool_result","contentText":"result","durationMs":123,"usageJson":"{\"tokens\":4}","normalized":{"callId":"c1"}}
+JSON
+`)
+
+	client := Client{Command: []string{command}, Env: map[string]string{"CODEX_HOME": t.TempDir()}}
+	elements, err := client.GetSessionElements(t.Context(), "codex:main", "codex")
+	require.NoError(t, err)
+	require.Len(t, elements, 1)
+	assert.Equal(t, int64(123), elements[0].DurationMS)
+	assert.JSONEq(t, `{"tokens":4}`, elements[0].UsageJSON)
+	messages, err := client.GetSessionMessages(t.Context(), "codex:main", "")
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "result", messages[0].Text)
+}
+
+func TestPaxlHistoryFailuresRemainErrors(t *testing.T) {
+	for _, script := range []string{"#!/bin/sh\nexit 2\n", "#!/bin/sh\necho private-error >&2\nexit 2\n", "#!/bin/sh\necho invalid-json\n"} {
+		client := Client{Command: []string{fakePaxlCommand(t, script)}}
+		elements, err := client.GetSessionElements(t.Context(), "codex:main", "codex")
+		require.Error(t, err)
+		assert.Empty(t, elements)
+		_, err = client.GetSessionMessages(t.Context(), "codex:main", "codex")
+		require.Error(t, err)
+	}
+	_, err := DecodeSessionMessages([]byte("bad json"))
+	require.Error(t, err)
+	_, err = DecodeSessionElements([]byte("\n{\"type\":\"usage\",\"usage\":{\"tokens\":4}}"))
+	require.NoError(t, err)
+}
