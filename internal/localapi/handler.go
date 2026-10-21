@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/cronjob"
 )
 
 const commandIDHeader = "X-Pax-Command-Id"
@@ -19,6 +20,7 @@ type Handler struct {
 	service     control.Service
 	e2eePairing E2EEPairingService
 	mux         *http.ServeMux
+	cron        *cronjob.Service
 }
 
 type completeE2EEPairingRequest struct {

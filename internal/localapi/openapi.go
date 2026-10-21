@@ -158,7 +158,7 @@ func localAPIEndpoints() []apiEndpoint {
 	includeDisabled := apiParameter{Name: "include_disabled", In: "query", Type: "boolean"}
 	includeMissing := apiParameter{Name: "include_missing", In: "query", Type: "boolean"}
 
-	return []apiEndpoint{
+	return append(cronAPIEndpoints(), []apiEndpoint{
 		{Method: "GET", Path: "/v1/status", Summary: "Get daemon, remote, agent, harness, and local session status.", OperationID: "getStatus", Response: "QueryResult", Tags: []string{"status"}},
 		{Method: "GET", Path: "/v1/diagnostics", Summary: "Get runtime diagnostics: transport queue stats, reconnects, slot phases, log file info.", OperationID: "getDiagnostics", Response: "QueryResult", Tags: []string{"status"}},
 
@@ -191,7 +191,7 @@ func localAPIEndpoints() []apiEndpoint {
 		{Method: "POST", Path: "/v1/e2ee/pairings/{pairing_id}/complete", Summary: "Wrap an agent root key for a browser pairing request.", OperationID: "completeE2EEPairing", Parameters: []apiParameter{{Name: "pairing_id", In: "path", Type: "string", Required: true}}, RequestBody: "CompleteE2EEPairingRequest", Response: "E2EEPairingResult", Tags: []string{"e2ee"}},
 
 		{Method: "GET", Path: "/v1/commands/{id}", Summary: "Get one command audit record.", OperationID: "getCommand", Parameters: []apiParameter{pathID}, Response: "QueryResult", Tags: []string{"commands"}},
-	}
+	}...)
 }
 
 func openAPISpec() map[string]any {
@@ -214,7 +214,7 @@ func openAPISpec() map[string]any {
 		"servers": []map[string]any{{"url": "/"}},
 		"paths":   paths,
 		"components": map[string]any{
-			"schemas": openAPISchemas(),
+			"schemas": allAPISchemas(),
 		},
 	}
 }

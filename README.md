@@ -1,5 +1,7 @@
 # paxd — Pax Fleet Daemon
 
+[Pax scheduled tasks](docs/cron-jobs.md) — manage native agent tasks with `paxl cron`.
+
 > Agent 时代的 kubelet。跑在每台 Agent 机器上，连接 Pax Cloud，接收消息，驱动本地 Hermes 执行。
 
 ## 什么是 paxd

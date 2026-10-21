@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/cronjob"
 	"github.com/pax-beehive/paxd/internal/e2eepairing"
 )
 
@@ -22,7 +23,11 @@ func NewHandler(service control.Service) http.Handler {
 }
 
 func NewHandlerWithE2EE(service control.Service, pairing E2EEPairingService) http.Handler {
-	handler := &Handler{service: service, e2eePairing: pairing, mux: http.NewServeMux()}
+	return NewHandlerWithCron(service, pairing, nil)
+}
+
+func NewHandlerWithCron(service control.Service, pairing E2EEPairingService, cron *cronjob.Service) http.Handler {
+	handler := &Handler{service: service, e2eePairing: pairing, cron: cron, mux: http.NewServeMux()}
 	handler.routes()
 	return handler
 }
@@ -36,6 +41,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) routes() {
+	h.cronRoutes()
 	h.mux.HandleFunc("GET /docs", h.routeDocsGet)
 	h.mux.HandleFunc("GET /openapi.json", h.routeOpenAPIGet)
 

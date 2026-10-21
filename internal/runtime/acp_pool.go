@@ -149,6 +149,8 @@ type ACPPool struct {
 	outputSink      ACPRouterOutputSink
 	outputSinkToken uint64
 	e2eeBridge      *e2eeTransportBridge
+	localCalls      map[string]chan localCallResult
+	localObservers  map[string]func(context.Context, []byte) error
 }
 
 func NewACPPool(connectionID string, routeStore ACPRouteStore) *ACPPool {
@@ -160,6 +162,9 @@ func NewACPPool(connectionID string, routeStore ACPRouteStore) *ACPPool {
 		pool.mu.Lock()
 		sink := pool.outputSink
 		pool.mu.Unlock()
+		if handled, err := pool.deliverLocalFrame(ctx, nativeSessionID, payload); handled || err != nil {
+			return err
+		}
 		if sink == nil {
 			return fmt.Errorf("acp pool output sink is not attached")
 		}
@@ -203,6 +208,7 @@ func (p *ACPPool) RemoveSlot(ctx context.Context, slotID string, processEpoch st
 	if p == nil {
 		return
 	}
+	p.failLocalSlot(ctx, slotID, processEpoch)
 	p.router.RemoveSlot(slotID, processEpoch)
 	if p.routeStore != nil && processEpoch != "" {
 		cleared, err := p.routeStore.ClearACPSessionRoutesForProcess(ctx, p.connectionID, slotID, processEpoch)
