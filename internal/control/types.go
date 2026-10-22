@@ -100,6 +100,7 @@ const (
 	CommandSessionRuntimeReset    CommandType = "session_runtime.reset"
 	CommandHarnessAuthLogin       CommandType = "harness_auth.login"
 	CommandSecretChannelPush      CommandType = "secret_channel.push"
+	CommandArtifactFetch          CommandType = "artifact.fetch"
 )
 
 type CommandStatus string
@@ -138,6 +139,7 @@ type Command struct {
 	ResetSessionRuntime   *ResetSessionRuntimeCommand   `json:"reset_session_runtime,omitempty"`
 	HarnessAuthLogin      *HarnessAuthLoginCommand      `json:"harness_auth_login,omitempty"`
 	PushSecretChannel     *PushSecretChannelCommand     `json:"push_secret_channel,omitempty"`
+	FetchArtifact         *FetchArtifactCommand         `json:"fetch_artifact,omitempty"`
 }
 
 // PushSecretChannelCommand redeems a short-lived secret channel (see
@@ -400,6 +402,7 @@ type CommandResult struct {
 	Command             *CommandView               `json:"command,omitempty"`
 	SessionRuntimeReset *SessionRuntimeResetResult `json:"session_runtime_reset,omitempty"`
 	SecretChannelPush   *SecretChannelPushResult   `json:"secret_channel_push,omitempty"`
+	ArtifactFetch       *ArtifactFetchResult       `json:"artifact_fetch,omitempty"`
 }
 
 type PaxdRestartResult struct {
@@ -557,6 +560,7 @@ const (
 	QueryBrowserControl        QueryType = "browser.control"
 	QueryHarnessAuthStatus     QueryType = "harness_auth.status"
 	QuerySecretChannelOpen     QueryType = "secret_channel.open"
+	QueryArtifactFetchCheck    QueryType = "artifact_fetch.check"
 )
 
 type Query struct {
@@ -580,6 +584,7 @@ type Query struct {
 	BrowserControl           *BrowserControlQuery           `json:"browser_control,omitempty"`
 	HarnessAuthStatus        *HarnessAuthStatusQuery        `json:"harness_auth_status,omitempty"`
 	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
+	CheckArtifactFetch       *CheckArtifactFetchQuery       `json:"check_artifact_fetch,omitempty"`
 }
 
 // OpenSecretChannelQuery has no fields: the channel is bound to whatever
@@ -756,6 +761,7 @@ type QueryResult struct {
 	AttachmentLocalStatus *AttachmentLocalStatusResult `json:"attachment_local_status,omitempty"`
 	BrowserControl        json.RawMessage              `json:"browser_control,omitempty"`
 	SecretChannelOpen     *SecretChannelOpenResult     `json:"secret_channel_open,omitempty"`
+	ArtifactFetchCheck    *ArtifactFetchCheckResult    `json:"artifact_fetch_check,omitempty"`
 }
 
 type AttachmentLocalStatusResult struct {

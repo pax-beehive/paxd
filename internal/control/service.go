@@ -117,6 +117,7 @@ type ServiceOptions struct {
 	PaxdLifecycle       PaxdLifecycle
 	BrowserControl      BrowserControl
 	SecretChannel       SecretChannel
+	ArtifactFetch       ArtifactFetchService
 }
 
 type ControlService struct {
@@ -138,6 +139,7 @@ type ControlService struct {
 	paxdLifecycle        PaxdLifecycle
 	browserControl       BrowserControl
 	secretChannel        SecretChannel
+	artifactFetch        ArtifactFetchService
 }
 
 func NewService(opts ServiceOptions) *ControlService {
@@ -158,6 +160,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		paxdLifecycle:       opts.PaxdLifecycle,
 		secretChannel:       opts.SecretChannel,
 		browserControl:      opts.BrowserControl,
+		artifactFetch:       opts.ArtifactFetch,
 	}
 }
 
@@ -191,6 +194,9 @@ func (s *ControlService) HandleCommand(ctx context.Context, src Source, cmd Comm
 	}
 	if cmd.Type == CommandSecretChannelPush {
 		return s.handleSecretChannelPush(ctx, src, cmd)
+	}
+	if cmd.Type == CommandArtifactFetch {
+		return s.handleArtifactFetch(ctx, src, cmd)
 	}
 	if cmd.Type == CommandUpgradeHarness {
 		if src.Kind != SourceRemote || strings.TrimSpace(src.RemoteID) == "" {
@@ -494,6 +500,9 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	}
 	if query.Type == QuerySecretChannelOpen {
 		return s.handleSecretChannelOpen(src)
+	}
+	if query.Type == QueryArtifactFetchCheck {
+		return s.handleArtifactFetchCheck(ctx, src, *query.CheckArtifactFetch), nil
 	}
 	if s.store == nil {
 		return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "control store is not configured"})}, nil
@@ -838,6 +847,8 @@ func commandTarget(cmd Command) (string, string) {
 		return "session", cmd.ResetSessionRuntime.NativeSessionID
 	case CommandSecretChannelPush:
 		return "secret_channel", cmd.PushSecretChannel.ChannelID
+	case CommandArtifactFetch:
+		return artifactFetchTargetType, cmd.FetchArtifact.PublicationID
 	default:
 		return "", ""
 	}

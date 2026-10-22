@@ -165,7 +165,7 @@ func (s *Service) Accept(ctx context.Context, req Request) (Publication, error) 
 	}, nil
 }
 
-func copySnapshot(path string, source *os.File) error {
+func copySnapshot(path string, source io.Reader) error {
 	target, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create artifact snapshot: %w", err)

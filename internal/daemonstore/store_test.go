@@ -226,6 +226,61 @@ func TestMigrateAddsArtifactPublicationRemoteWithoutGuessingLegacyRows(t *testin
 	assert.Empty(t, job.RemoteID, "legacy rows must be resolved uniquely by the worker")
 }
 
+func TestMigrateAddsArtifactFetchOriginWithAgentPublishDefault(t *testing.T) {
+	ctx := context.Background()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "legacy-origin.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&ArtifactPublishJob{}))
+	require.NoError(t, db.Migrator().DropColumn(&ArtifactPublishJob{}, "Origin"))
+	require.NoError(t, db.Migrator().DropColumn(&ArtifactPublishJob{}, "SourcePath"))
+	require.NoError(t, db.Exec(`
+		INSERT INTO artifact_publish_jobs (
+			publication_id, agent_id, session_id, source_filename, spool_path, status,
+			created_at, updated_at
+		) VALUES (
+			'apub_agent', 'agent_1', 'session_1', 'report.txt', '/tmp/report.txt',
+			'accepted', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'
+		);
+	`).Error)
+	store := New(db)
+
+	require.NoError(t, store.Migrate(ctx))
+
+	require.True(t, store.DB().Migrator().HasColumn(&ArtifactPublishJob{}, "origin"))
+	require.True(t, store.DB().Migrator().HasColumn(&ArtifactPublishJob{}, "source_path"))
+	job, err := store.GetArtifactPublishJob(ctx, "apub_agent")
+	require.NoError(t, err)
+	assert.Empty(t, job.Origin, "existing rows stay agent publications")
+	assert.Empty(t, job.SourcePath)
+}
+
+func TestArtifactPublishJobGivenUserFetchWhenSavedThenOriginAndSourcePathPersist(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	require.NoError(t, store.Migrate(ctx))
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, store.CreateArtifactPublishJob(ctx, ArtifactPublishJob{
+		PublicationID: "apub_fetch", AgentID: "agent_1", SessionID: "session_1",
+		SourceFilename: "x.md", SpoolPath: "/spool/apub_fetch/content", SizeBytes: 3,
+		Status: "snapshotting", Origin: "user_fetch", SourcePath: "/home/me/x.md",
+		RemoteID: "remote_1", CreatedAt: now, UpdatedAt: now,
+	}))
+	job, err := store.GetArtifactPublishJob(ctx, "apub_fetch")
+	require.NoError(t, err)
+	job.Status = "accepted"
+	require.NoError(t, store.SaveArtifactPublishJob(ctx, job))
+
+	stored, err := store.GetArtifactPublishJob(ctx, "apub_fetch")
+
+	require.NoError(t, err)
+	assert.Equal(t, "user_fetch", stored.Origin)
+	assert.Equal(t, "/home/me/x.md", stored.SourcePath)
+	assert.Equal(t, "accepted", stored.Status)
+	unfinished, err := store.ListUnfinishedArtifactPublishJobs(ctx)
+	require.NoError(t, err)
+	require.Len(t, unfinished, 1)
+}
+
 func TestOpenSQLiteCreatesMissingParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "nested", "daemonstore.db")
 

@@ -23,6 +23,12 @@ type ArtifactPublishJob struct {
 	CreatedAt       time.Time `gorm:"column:created_at;not null;index:idx_artifact_publish_jobs_status_created,priority:2"`
 	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
 	RemoteID        string    `gorm:"type:text;not null;default:''"`
+	// Origin is "" for agent publish_artifact jobs (all pre-existing rows) and
+	// "user_fetch" for console-initiated local file fetches.
+	Origin string `gorm:"type:text;not null;default:''"`
+	// SourcePath is the cleaned absolute source path of a user_fetch job,
+	// snapshotted by the worker. It is empty for agent jobs.
+	SourcePath string `gorm:"type:text;not null;default:''"`
 }
 
 func (ArtifactPublishJob) TableName() string { return "artifact_publish_jobs" }

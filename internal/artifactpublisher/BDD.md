@@ -188,6 +188,75 @@ And paxd reports `local_snapshot_hash_mismatch`
 
 And retains the spool for diagnosis.
 
+## User-initiated local file fetch
+
+These scenarios apply only to jobs with origin `user_fetch`. Agent jobs
+(empty origin, including every pre-existing row) keep the behavior above.
+
+### Scenario: the fetch command is acknowledged before any copy
+
+Given an authenticated remote whose ID equals the remote the agent resolves to
+And a path that passes every `artifactfetch` rule
+When `artifact.fetch` arrives with a manager-generated publication ID
+Then paxd persists a job with origin `user_fetch`, the cleaned source path,
+status `snapshotting`, the planned spool path and the stat size
+And wakes the worker
+And returns an `applied` ack with status `snapshotting` without copying bytes.
+
+Local sources, missing remote IDs and agents resolving to a different remote
+are rejected with `unauthorized`. Policy denials are rejected with the denial
+code as `error.code` and the rule ID as `error.target`; no job is created.
+
+### Scenario: a repeated fetch command is idempotent
+
+Given a job already exists for the publication ID
+When the same remote repeats the command with the same agent, session and path
+Then paxd returns an `applied` ack with the job's current status, without
+re-evaluating the rules
+And any differing field (or an existing agent job with that ID) is rejected
+with `conflict`.
+
+### Scenario: the worker snapshots a fetch job
+
+Given a `user_fetch` job whose spool file does not exist yet
+When the worker processes it
+Then it registers the publication with pax-manager first
+And re-opens the source through the home root and re-runs the stat rules
+on the opened handle
+And copies it (0600, fsync, staging directory, rename) into the spool
+And continues with hashing.
+
+If the file is gone, became owner-only, irregular or too large, the job fails
+permanently with the matching denial code reported through the manager `Fail`
+endpoint. Register always precedes that `Fail`, because pax-manager rejects
+`Fail` for a publication row it has never seen, and the manager-side row from
+the fetch request may not exist yet when a fast snapshot failure happens.
+
+### Scenario: a fetch job retries after a transient register failure
+
+Given a `user_fetch` job whose first register attempt fails transiently
+When the job moves to `retry_wait` and the worker runs again
+Then the missing spool file, not the job status, tells the worker that the
+snapshot is still needed
+And the retry snapshots, scans and uploads the file.
+
+### Scenario: fetched content is scanned before prepare
+
+Given a `user_fetch` job whose snapshot was hashed
+When the worker reaches the `scanning` state
+Then it scans the spool copy that would be uploaded
+And on a hit fails permanently with `secret_detected` and a message naming
+only the rule and line, before `prepare` is called.
+
+### Scenario: failed fetch jobs remove their spool
+
+Given a `user_fetch` job fails permanently
+When the failure is recorded
+Then its spool directory is removed.
+
+Agent jobs keep their spool for diagnosis, and agent content is never scanned:
+an agent job containing a secret-like token still uploads.
+
 ## Security
 
 - Resumable session URLs are bearer credentials stored only in protected local
@@ -199,4 +268,5 @@ And retains the spool for diagnosis.
   input.
 - The worker uses the cloud agent and session identities injected into the MCP
   process by paxd.
-- No automatic cleanup deletes snapshots or job rows in this version.
+- No automatic cleanup deletes agent snapshots or job rows in this version;
+  only permanently failed `user_fetch` snapshots are removed.

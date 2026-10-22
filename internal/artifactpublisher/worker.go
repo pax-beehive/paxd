@@ -15,12 +15,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/artifactfetch"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 )
 
 const (
 	StatusRegistering = "registering"
 	StatusHashing     = "hashing"
+	StatusScanning    = "scanning"
 	StatusPreparing   = "preparing"
 	StatusUploading   = "uploading"
 	StatusCompleting  = "completing"
@@ -33,8 +35,8 @@ const (
 	UploadProtocolGCSResumable   = "gcs_resumable"
 	UploadProtocolS3PresignedPut = "s3_presigned_put"
 
-	defaultWorkerInterval               = 5 * time.Second
-	maxSinglePutArtifactSizeBytes int64 = 5 * 1024 * 1024 * 1024
+	defaultWorkerInterval         = 5 * time.Second
+	maxSinglePutArtifactSizeBytes = artifactfetch.MaxSizeBytes
 )
 
 var ErrResumableSessionExpired = errors.New("artifact resumable upload session expired")
@@ -108,6 +110,8 @@ type WorkerOptions struct {
 	Uploaders map[string]Uploader
 	Interval  time.Duration
 	Now       func() time.Time
+	// HomeDir confines user_fetch snapshots; empty means the daemon user's home.
+	HomeDir string
 }
 
 type Worker struct {
@@ -117,6 +121,7 @@ type Worker struct {
 	uploaders map[string]Uploader
 	interval  time.Duration
 	now       func() time.Time
+	homeDir   string
 	wake      chan struct{}
 	runMu     sync.Mutex
 }
@@ -149,6 +154,7 @@ func NewWorker(opts WorkerOptions) *Worker {
 		uploaders: uploaders,
 		interval:  interval,
 		now:       now,
+		homeDir:   opts.HomeDir,
 		wake:      make(chan struct{}, 1),
 	}
 }
@@ -210,6 +216,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 }
 
 func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJob) error {
+	// The spool file, not the status, marks snapshot completion: a transient
+	// failure moves the job to retry_wait, and the snapshot rename is atomic.
+	needsSnapshot := job.Origin == OriginUserFetch && !regularFileExists(job.SpoolPath)
 	boundRemoteID := strings.TrimSpace(job.RemoteID)
 	target, err := w.targets.Resolve(ctx, boundRemoteID, job.AgentID)
 	if err != nil {
@@ -234,6 +243,13 @@ func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJo
 	if err := w.manager.Register(ctx, target, *job); err != nil {
 		return fmt.Errorf("register artifact publication: %w", err)
 	}
+	// Register before snapshotting so a snapshot failure can always be
+	// reported: Fail requires the manager-side publication row to exist.
+	if needsSnapshot {
+		if err := w.snapshotUserFetch(ctx, job); err != nil {
+			return err
+		}
+	}
 	expectedSHA256 := job.SHA256
 	job.Status = StatusHashing
 	if err := w.save(ctx, job); err != nil {
@@ -257,6 +273,17 @@ func (w *Worker) process(ctx context.Context, job *daemonstore.ArtifactPublishJo
 	}
 	if err := w.save(ctx, job); err != nil {
 		return err
+	}
+	if job.Origin == OriginUserFetch {
+		// Scan the exact spool bytes that would be uploaded, before prepare,
+		// so no byte of a user-fetched file leaves the node unscanned.
+		job.Status = StatusScanning
+		if err := w.save(ctx, job); err != nil {
+			return err
+		}
+		if err := scanUserFetchSnapshot(job); err != nil {
+			return err
+		}
 	}
 	job.Status = StatusPreparing
 	if err := w.save(ctx, job); err != nil {
@@ -350,6 +377,9 @@ func (w *Worker) recordFailure(
 		job.Status = StatusFailed
 		job.ErrorCode = permanent.code
 		job.ErrorMessage = err.Error()
+		if job.Origin == OriginUserFetch {
+			removeUserFetchSpool(job)
+		}
 		target, targetErr := w.targets.Resolve(ctx, job.RemoteID, job.AgentID)
 		if targetErr != nil {
 			job.ErrorMessage = errors.Join(err, targetErr).Error()
