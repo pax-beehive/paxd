@@ -21,7 +21,9 @@ This package must not:
 - wake supervisors directly
 - implement business validation independently from `internal/control`
 
-All behavior should be delegated to `control.Service`.
+Control behavior is delegated to `control.Service`. Optional E2EE pairing and
+Pax cron endpoints delegate to their dedicated services; `cronjob.Service` owns
+schedule validation, persistence, and execution. See [cron jobs](../../docs/cron-jobs.md).
 
 ## Primary Interfaces
 

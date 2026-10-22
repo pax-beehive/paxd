@@ -20,6 +20,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/browsercontrol"
 	"github.com/pax-beehive/paxd/internal/config"
 	"github.com/pax-beehive/paxd/internal/control"
+	"github.com/pax-beehive/paxd/internal/cronjob"
 	"github.com/pax-beehive/paxd/internal/daemonstore"
 	"github.com/pax-beehive/paxd/internal/e2ee"
 	"github.com/pax-beehive/paxd/internal/e2eepairing"
@@ -59,6 +60,7 @@ type Runtime struct {
 	hostMetrics      interface{ Start(context.Context) }
 	sessionReports   interface{ Start(context.Context) }
 	artifactJobs     interface{ Start(context.Context) }
+	cronJobs         *cronjob.Service
 	secretChannel    *secretchannel.Registry
 	secretDrop       secretchannel.FileDrop
 	lifecycleMu      sync.Mutex
@@ -238,19 +240,27 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	pairingService := e2eepairing.New(e2eepairing.ServiceOptions{
 		Store: store, Headers: auth.NewProvider(store, nil), RootKeys: e2eeDistributionKeys,
 	})
+	cronExecutor := &cronjob.ACPExecutor{Store: store, Pools: supervisors.acpPoolRegistry, Headers: auth.NewProvider(store, nil), RootKeys: e2eeDistributionKeys}
+	cronJobs, err := cronjob.New(store.DB(), cronjob.Options{
+		Executor: cronExecutor, ValidateTarget: cronExecutor.ValidateTarget, LockPath: cfg.Daemon.DBPath + ".cron.lock",
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &Runtime{
 		harnessAuth: harnessAuth,
 		Store:       store,
 		Control:     service,
-		LocalHandler: localapi.NewHandlerWithE2EE(artifactControlService{
+		LocalHandler: localapi.NewHandlerWithCron(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,
-		}, pairingService),
+		}, pairingService, cronJobs),
 		supervisors:    supervisors,
 		harnesses:      harnesses,
 		hostMetrics:    metricsStarter,
 		sessionReports: reports,
 		artifactJobs:   artifactJobs,
+		cronJobs:       cronJobs,
 		secretChannel:  secretChannelRegistry,
 		secretDrop:     secretDrop,
 		maintenance:    maintenance,

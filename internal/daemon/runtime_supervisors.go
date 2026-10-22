@@ -449,6 +449,11 @@ func (r *Runtime) StartSupervisors(ctx context.Context) {
 	if r.artifactJobs != nil {
 		r.artifactJobs.Start(runCtx)
 	}
+	if r.cronJobs != nil {
+		if err := r.cronJobs.Start(runCtx); err != nil {
+			log.Printf("[paxd] Start cron scheduler: %v.", err)
+		}
+	}
 	if r.supervisors == nil {
 		log.Printf("[paxd] runtime supervisors are not configured")
 		return
@@ -508,10 +513,14 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	if cancel != nil {
 		cancel()
 	}
-	if supervisors == nil {
-		return nil
+	var cronErr error
+	if r.cronJobs != nil {
+		cronErr = r.cronJobs.Shutdown(ctx)
 	}
-	return supervisors.Shutdown(ctx)
+	if supervisors == nil {
+		return cronErr
+	}
+	return errors.Join(cronErr, supervisors.Shutdown(ctx))
 }
 
 func startHarnessRefresh(ctx context.Context, harnesses control.HarnessRegistry) {
