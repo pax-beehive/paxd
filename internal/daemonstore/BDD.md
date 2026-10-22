@@ -51,6 +51,13 @@ When daemonstore migrations run
 Then a non-null `remote_id` column is added with an empty compatibility default
 And existing jobs retain an empty remote ID until the worker can resolve exactly one matching remote
 
+### Scenario: adds user fetch origin without changing existing jobs
+
+Given an existing `artifact_publish_jobs` table without `origin` and `source_path`
+When daemonstore migrations run
+Then both non-null text columns are added with empty defaults
+And existing rows remain agent publications (empty origin)
+
 ### Scenario: migrations are idempotent
 
 Given migrations have already run successfully  

@@ -84,6 +84,7 @@ func (cmd Command) Validate() error {
 		{CommandSessionRuntimeReset, cmd.ResetSessionRuntime != nil, validatePtr(cmd.ResetSessionRuntime)},
 		{CommandHarnessAuthLogin, cmd.HarnessAuthLogin != nil, validatePtr(cmd.HarnessAuthLogin)},
 		{CommandSecretChannelPush, cmd.PushSecretChannel != nil, validatePtr(cmd.PushSecretChannel)},
+		{CommandArtifactFetch, cmd.FetchArtifact != nil, validatePtr(cmd.FetchArtifact)},
 	}
 
 	count := 0
@@ -402,6 +403,7 @@ func (query Query) Validate() error {
 		{QueryBrowserControl, query.BrowserControl != nil, validatePtr(query.BrowserControl)},
 		{QueryHarnessAuthStatus, query.HarnessAuthStatus != nil, validatePtr(query.HarnessAuthStatus)},
 		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
+		{QueryArtifactFetchCheck, query.CheckArtifactFetch != nil, validatePtr(query.CheckArtifactFetch)},
 	}
 
 	count := 0
@@ -579,7 +581,8 @@ func knownCommandType(typ CommandType) bool {
 		CommandCancelPaxdMaintenance,
 		CommandAttachmentEnsureLocal,
 		CommandSessionRuntimeReset,
-		CommandSecretChannelPush:
+		CommandSecretChannelPush,
+		CommandArtifactFetch:
 		return true
 	default:
 		return false
@@ -602,7 +605,8 @@ func knownQueryType(typ QueryType) bool {
 		QueryLocalSessionGet,
 		QueryCommandGet,
 		QueryAttachmentLocalStatus,
-		QuerySecretChannelOpen, QueryBrowserControl:
+		QuerySecretChannelOpen, QueryBrowserControl,
+		QueryArtifactFetchCheck:
 		return true
 	default:
 		return false

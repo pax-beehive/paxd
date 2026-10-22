@@ -483,6 +483,8 @@ type fakeArtifactManager struct {
 	calls      []string
 	onRegister func(artifactpublisher.ManagerTarget, daemonstore.ArtifactPublishJob) error
 	failErr    error
+	failCode   string
+	failMsg    string
 }
 
 func (m *fakeArtifactManager) Register(
@@ -507,13 +509,15 @@ func (m *fakeArtifactManager) Prepare(
 }
 
 func (m *fakeArtifactManager) Fail(
-	context.Context,
-	artifactpublisher.ManagerTarget,
-	daemonstore.ArtifactPublishJob,
-	string,
-	string,
+	_ context.Context,
+	_ artifactpublisher.ManagerTarget,
+	_ daemonstore.ArtifactPublishJob,
+	code string,
+	message string,
 ) error {
 	m.calls = append(m.calls, "failed")
+	m.failCode = code
+	m.failMsg = message
 	return m.failErr
 }
 

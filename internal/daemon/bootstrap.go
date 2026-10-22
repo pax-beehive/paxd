@@ -177,6 +177,14 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		RootDir:    cfg.Daemon.ArtifactSpoolDir,
 		OnAccepted: artifactJobs.Wake,
 	})
+	// Console-initiated local file fetches share the artifact spool and worker;
+	// the worker snapshots and scans them after the node-control ack.
+	artifactFetches := artifactpublisher.NewFetchService(artifactpublisher.FetchOptions{
+		Store:      store,
+		Targets:    artifactTargets,
+		RootDir:    cfg.Daemon.ArtifactSpoolDir,
+		OnAccepted: artifactJobs.Wake,
+	})
 	supervisors := &runtimeSupervisors{
 		statusHub:            newStatusHub(),
 		attachmentStates:     attachmentStates,
@@ -221,6 +229,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		PaxdLifecycle:       maintenance,
 		SecretChannel:       secretChannelRegistry,
 		BrowserControl:      &browsercontrol.Client{},
+		ArtifactFetch:       artifactFetches,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
 		return nil, fmt.Errorf("configure runtime supervisors: %w", err)
