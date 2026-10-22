@@ -96,6 +96,9 @@ type ACPRouter struct {
 	pendingWorkerReqs   map[string]pendingWorkerRequest
 	activeSlotPrompts   map[string]string
 	activeSessionTurns  map[string]string
+	backgroundTurns     map[string]backgroundTurn
+	toolCallTurns       map[string]string
+	toolCallTurnKeys    []string
 	waiters             map[string]chan acpRPCWaitResult
 	resumeTranscripts   map[resumeTranscriptScope]struct{}
 	slotReservations    map[string]int
@@ -179,6 +182,8 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		pendingWorkerReqs:  make(map[string]pendingWorkerRequest),
 		activeSlotPrompts:  make(map[string]string),
 		activeSessionTurns: make(map[string]string),
+		backgroundTurns:    make(map[string]backgroundTurn),
+		toolCallTurns:      make(map[string]string),
 		waiters:            make(map[string]chan acpRPCWaitResult),
 		slotReservations:   make(map[string]int),
 		lastPrompt:         make(map[string]uint64),
@@ -262,6 +267,7 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 			r.projector.CompleteTurn(prompt.nativeSessionID, prompt.turnID)
 		}
 	}
+	r.completeBackgroundTurnsForSlotLocked(slotID, processEpoch)
 	for id, pending := range r.pendingNew {
 		if pending.slotID == slotID && (processEpoch == "" || pending.processEpoch == processEpoch) {
 			delete(r.pendingNew, id)
@@ -410,7 +416,12 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 	if r.suppressResumeTranscript(nativeSessionID, slotID, processEpoch, msg) {
 		return nil
 	}
-	ctx = r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch)
+	afterEmit := func() {}
+	if msg.Method == "session/update" && len(bytes.TrimSpace(msg.ID)) == 0 {
+		ctx, afterEmit = r.sessionUpdateTurnContext(ctx, nativeSessionID, slotID, processEpoch, msg.Params)
+	} else {
+		ctx = r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch)
+	}
 	if len(bytes.TrimSpace(msg.ID)) > 0 {
 		if nativeSessionID != "" {
 			key := workerRequestKey(nativeSessionID, msg.ID)
@@ -430,7 +441,9 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 			r.mu.Unlock()
 		}
 	}
-	return r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
+	err := r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
+	afterEmit()
+	return err
 }
 
 func (r *ACPRouter) handleSessionNew(ctx context.Context, msg acpRPCMessage, payload []byte) error {
@@ -917,6 +930,9 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	if key == "" {
 		return ACPRouterError{Code: "request_id_required", Message: "session/prompt requires an id"}
 	}
+	// Claude Code queues the prompt behind an autonomous cycle, so the prompt's
+	// turn takes over from the background turn.
+	r.completeBackgroundTurnLocked(nativeSessionID)
 	turn, err := r.projector.StartTurn(nativeSessionID, requestID, slot.SlotID(), slot.ProcessEpoch(), turnIDs...)
 	if err != nil {
 		return ACPRouterError{Code: "runtime_projection_failed", Message: err.Error()}
