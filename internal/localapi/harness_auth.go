@@ -24,5 +24,5 @@ func (h *Handler) routeHarnessAuthLogin(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) routeHarnessAuthStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	h.handleQuery(w, r, control.Query{Type: control.QueryHarnessAuthStatus, HarnessAuthStatus: &control.HarnessAuthStatusQuery{Harness: r.PathValue("harness"), SessionID: r.URL.Query().Get("session_id")}})
+	h.handleQuery(w, r, control.Query{Type: control.QueryHarnessAuthStatus, HarnessAuthStatus: &control.HarnessAuthStatusQuery{CommandID: r.URL.Query().Get("command_id"), Harness: r.PathValue("harness"), SessionID: r.URL.Query().Get("session_id"), Provider: r.URL.Query().Get("provider"), Operation: r.URL.Query().Get("operation")}})
 }
