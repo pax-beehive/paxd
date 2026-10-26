@@ -183,6 +183,22 @@ When `controlws` is running
 Then it stops reading and writing  
 And returns a terminal or canceled exit according to runtime policy
 
+### Scenario: background write failure remains retryable
+
+Given the owning runtime slot has not canceled the session context
+When writing a heartbeat, runtime snapshot, session runtime snapshot, attachment
+state, or command result fails
+Then `controlws` closes the WebSocket to unblock the reader
+And returns a transient `node_control_write_failed` exit
+And preserves the original write error in the exit message
+And retry/backoff is left to the runtime slot
+
+### Scenario: read failure preserves its cause
+
+Given the owning runtime slot has not canceled the session context
+When reading from the WebSocket fails
+Then the transient exit includes the original read error
+
 ## Secret handling
 
 ### Scenario: does not log resolved secrets from frames

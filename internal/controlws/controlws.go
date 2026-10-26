@@ -111,8 +111,8 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 	if service == nil {
 		return runtimes.ConfigExit("missing_control_service", "control service is required")
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	go closeOnContextDone(runCtx, conn)
 
 	writer := &frameWriter{conn: conn}
@@ -124,10 +124,15 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
-			if runCtx.Err() != nil {
-				return runtimes.CanceledExit(runCtx.Err())
+			// Only the owning runtime slot can stop the session permanently.
+			// Background write failures cancel runCtx to unblock this reader.
+			if ctx.Err() != nil {
+				return runtimes.CanceledExit(ctx.Err())
 			}
-			return runtimes.TransientExit("node_control_read_failed", "node-control websocket read failed")
+			if cause := context.Cause(runCtx); cause != nil {
+				return writeExit(cause)
+			}
+			return runtimes.TransientExit("node_control_read_failed", fmt.Sprintf("node-control websocket read failed: %v", err))
 		}
 		if messageType != websocket.TextMessage {
 			if err := writer.write(ErrorFrame{Kind: KindError, Error: invalidFrame("message_type", "node-control frames must be text messages")}); err != nil {
@@ -141,7 +146,7 @@ func run(ctx context.Context, conn WebSocketConn, src control.Source, service co
 	}
 }
 
-func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
+func startReportPumps(ctx context.Context, cancel context.CancelCauseFunc, writer *frameWriter, remoteID string, nodeID string, service control.Service, opts ReportOptions) {
 	if opts.HeartbeatInterval <= 0 && !opts.SendInitialHeartbeat && opts.SnapshotInterval <= 0 && !opts.SendInitialSnapshot && opts.StatusSubscribe == nil && opts.AttachmentSubscribe == nil &&
 		opts.SessionRuntimeSnapshotInterval <= 0 && !opts.SendInitialSessionRuntimeSnapshot {
 		return
@@ -171,7 +176,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 					Heartbeat: &heartbeat,
 				})
 				if err := writer.write(frame); err != nil {
-					cancel()
+					cancel(err)
 					return false
 				}
 				return true
@@ -220,7 +225,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 							AttachmentLocalState: &stateCopy,
 						})
 						if err := writer.write(frame); err != nil {
-							cancel()
+							cancel(err)
 							return
 						}
 					}
@@ -246,7 +251,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 			RuntimeSnapshot: &snapshot,
 		})
 		if err := writer.write(frame); err != nil {
-			cancel()
+			cancel(err)
 		}
 	}
 	if opts.SendInitialSnapshot {
@@ -310,7 +315,7 @@ func startReportPumps(ctx context.Context, cancel context.CancelFunc, writer *fr
 
 func startSessionRuntimeReportPump(
 	ctx context.Context,
-	cancel context.CancelFunc,
+	cancel context.CancelCauseFunc,
 	writer *frameWriter,
 	remoteID string,
 	nodeID string,
@@ -355,7 +360,7 @@ func startSessionRuntimeReportPump(
 					SessionRuntimeSnapshot: &snapshot,
 				})
 				if err := writer.write(frame); err != nil {
-					cancel()
+					cancel(err)
 					return false
 				}
 			}
@@ -393,7 +398,7 @@ func reportFrame(reportID string, report control.Report) ReportFrame {
 	}
 }
 
-func startCommandResultPump(ctx context.Context, cancel context.CancelFunc, writer *frameWriter, src control.Source, watcher CommandResultWatcher) {
+func startCommandResultPump(ctx context.Context, cancel context.CancelCauseFunc, writer *frameWriter, src control.Source, watcher CommandResultWatcher) {
 	results, err := watcher.WatchCommandResults(ctx, src)
 	if err != nil || results == nil {
 		return
@@ -408,7 +413,7 @@ func startCommandResultPump(ctx context.Context, cancel context.CancelFunc, writ
 					return
 				}
 				if err := writer.write(CommandResultFrame{Kind: KindCommandResult, CommandID: ack.CommandID, CommandAck: ack}); err != nil {
-					cancel()
+					cancel(err)
 					return
 				}
 			}
