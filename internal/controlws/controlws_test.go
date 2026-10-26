@@ -240,6 +240,89 @@ func TestRunRejectsNonTextMessagesAndWriteFailuresEndSession(t *testing.T) {
 	assert.Equal(t, "node_control_write_failed", exit.Code)
 }
 
+func TestBackgroundWriteFailuresReturnTransientExit(t *testing.T) {
+	results := make(chan control.CommandAck, 1)
+	results <- control.CommandAck{CommandID: "cmd_1", OK: true, Status: control.CommandStatusApplied}
+	states := make(chan control.AttachmentLocalState, 1)
+	states <- control.AttachmentLocalState{AttachmentID: "att_1", State: control.AttachmentLocalDownloading}
+
+	tests := []struct {
+		name    string
+		service control.Service
+		reports ReportOptions
+	}{
+		{
+			name:    "heartbeat",
+			service: &reportingService{},
+			reports: ReportOptions{SendInitialHeartbeat: true},
+		},
+		{
+			name:    "runtime snapshot",
+			service: &reportingService{},
+			reports: ReportOptions{SendInitialSnapshot: true},
+		},
+		{
+			name: "session runtime snapshot",
+			service: &reportingService{
+				sessionRuntimeSnapshots: []control.SessionRuntimeSnapshotReport{{AgentID: "agent_1"}},
+			},
+			reports: ReportOptions{SendInitialSessionRuntimeSnapshot: true},
+		},
+		{
+			name:    "attachment state",
+			service: &reportingService{},
+			reports: ReportOptions{
+				AttachmentSubscribe: func(string) (<-chan control.AttachmentLocalState, func()) {
+					return states, func() {}
+				},
+			},
+		},
+		{
+			name:    "command result",
+			service: &resultWatchingService{results: results},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			conn := newBlockingFakeWebSocketConn()
+			conn.writeErr = errors.New("write tcp: connection reset by peer")
+			runner := Runner{Service: tt.service, Reports: tt.reports}
+			done := make(chan runtimes.Exit, 1)
+			go func() {
+				done <- runner.RunNodeControl(ctx, conn, runtimes.RemoteSpec{RemoteID: "remote_prod", NodeID: "node_123"})
+			}()
+
+			select {
+			case exit := <-done:
+				assert.NoError(t, ctx.Err(), "a failed background write must not cancel the owning runtime slot")
+				assert.Equal(t, runtimes.ExitTransient, exit.Class)
+				assert.Equal(t, "node_control_write_failed", exit.Code)
+				assert.Contains(t, exit.Message, conn.writeErr.Error())
+			case <-time.After(2 * time.Second):
+				t.Fatal("background write failure did not end the control session")
+			}
+			select {
+			case <-conn.closed:
+			default:
+				t.Fatal("background write failure did not close the WebSocket")
+			}
+		})
+	}
+}
+
+func TestReadFailurePreservesOriginalError(t *testing.T) {
+	readErr := errors.New("read tcp: connection reset by peer")
+	conn := newFakeWebSocketConnWithReads(fakeRead{err: readErr})
+
+	exit := Run(context.Background(), conn, remoteSource(), &reportingService{})
+
+	assert.Equal(t, runtimes.ExitTransient, exit.Class)
+	assert.Equal(t, "node_control_read_failed", exit.Code)
+	assert.Contains(t, exit.Message, readErr.Error())
+}
+
 func TestRunRequiresConnectionAndService(t *testing.T) {
 	exit := Run(context.Background(), nil, remoteSource(), controltest.NewMockService(t))
 	assert.Equal(t, runtimes.ExitConfig, exit.Class)
