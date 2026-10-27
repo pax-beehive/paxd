@@ -29,6 +29,7 @@ func TestHTTPManagerGivenArtifactJobWhenPublishingThenUsesNodeScopedContracts(
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			assert.Equal(t, "report.pdf", body["filename"])
+			assert.Equal(t, "turn_original", body["source"].(map[string]any)["turn_id"])
 			writeArtifactManagerData(t, w, map[string]any{"publication": map[string]any{}})
 		case "/api/v1/node/artifact-publications/apub_http/prepare":
 			writeArtifactManagerData(t, w, map[string]any{
@@ -61,6 +62,7 @@ func TestHTTPManagerGivenArtifactJobWhenPublishingThenUsesNodeScopedContracts(
 	}
 	job := daemonstore.ArtifactPublishJob{
 		PublicationID:  "apub_http",
+		TurnID:         "turn_original",
 		AgentID:        "agent_1",
 		SessionID:      "sess_1",
 		SourceFilename: "report.pdf",

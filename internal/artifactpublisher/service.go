@@ -143,6 +143,7 @@ func (s *Service) Accept(ctx context.Context, req Request) (Publication, error) 
 		RemoteID:       remoteID,
 		AgentID:        req.AgentID,
 		SessionID:      req.SessionID,
+		TurnID:         req.TurnID,
 		SourceFilename: filename,
 		DisplayTitle:   req.Title,
 		SpoolPath:      spoolPath,

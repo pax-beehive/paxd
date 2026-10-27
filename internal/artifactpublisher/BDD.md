@@ -6,6 +6,22 @@ session URLs, offsets, retries, or completion state.
 
 ## Durable acceptance
 
+### Scenario: upload outlives the source turn
+
+Given a publication request arrives during an active session turn
+
+When the local control service accepts it
+
+Then it captures that turn before snapshotting the file
+
+And persists the turn ID with the publication job
+
+And every background registration and retry uses that saved turn ID,
+even after another turn starts or the daemon restarts.
+
+If no active source turn can be resolved, the request is not accepted.
+The agent does not supply the turn ID and no upload-success chat message is added.
+
 ### Scenario: a regular file is accepted
 
 Given an agent selects a readable regular file

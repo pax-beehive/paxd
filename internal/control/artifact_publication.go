@@ -5,6 +5,7 @@ import "context"
 type PublishArtifactRequest struct {
 	AgentID    string `json:"agent_id"`
 	SessionID  string `json:"session_id"`
+	TurnID     string `json:"turn_id,omitempty"`
 	SourcePath string `json:"path"`
 	Title      string `json:"title,omitempty"`
 }

@@ -30,6 +30,7 @@ func TestPublisherGivenRegularFileWhenAcceptedThenSnapshotAndJobAreDurable(t *te
 	publication, err := publisher.Accept(ctx, artifactpublisher.Request{
 		AgentID:    "agent_1",
 		SessionID:  "session_1",
+		TurnID:     "turn_original",
 		SourcePath: source,
 		Title:      "Report",
 	})
@@ -42,6 +43,7 @@ func TestPublisherGivenRegularFileWhenAcceptedThenSnapshotAndJobAreDurable(t *te
 	assert.Equal(t, "agent_1", job.AgentID)
 	assert.Equal(t, "remote_home", job.RemoteID)
 	assert.Equal(t, "session_1", job.SessionID)
+	assert.Equal(t, "turn_original", job.TurnID)
 	assert.Equal(t, "report.txt", job.SourceFilename)
 	assert.Equal(t, "Report", job.DisplayTitle)
 	assert.Equal(t, artifactpublisher.StatusAccepted, job.Status)
@@ -138,6 +140,7 @@ func TestArtifactPublishJobGivenDaemonRestartWhenLoadedThenAcceptedJobRemains(t 
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	require.NoError(t, store.CreateArtifactPublishJob(ctx, daemonstore.ArtifactPublishJob{
 		PublicationID:  "apub_restart",
+		TurnID:         "turn_original",
 		AgentID:        "agent_1",
 		SessionID:      "session_1",
 		SourceFilename: "report.txt",
@@ -154,6 +157,7 @@ func TestArtifactPublishJobGivenDaemonRestartWhenLoadedThenAcceptedJobRemains(t 
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
 	assert.Equal(t, "apub_restart", jobs[0].PublicationID)
+	assert.Equal(t, "turn_original", jobs[0].TurnID)
 	assert.Equal(t, artifactpublisher.StatusAccepted, jobs[0].Status)
 }
 
