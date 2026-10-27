@@ -40,6 +40,7 @@ func TestWorkerGivenAcceptedSnapshotWhenRunThenPublishesArtifactInBackground(t *
 		assert.Equal(t, "remote_1", stored.RemoteID)
 		assert.Equal(t, stored.RemoteID, target.RemoteID)
 		assert.Equal(t, stored.RemoteID, registered.RemoteID)
+		assert.Equal(t, "turn_original", registered.TurnID)
 		return nil
 	}
 	uploader := &fakeArtifactUploader{}
@@ -57,6 +58,7 @@ func TestWorkerGivenAcceptedSnapshotWhenRunThenPublishesArtifactInBackground(t *
 	stored, err := store.GetArtifactPublishJob(context.Background(), job.PublicationID)
 	require.NoError(t, err)
 	assert.Equal(t, artifactpublisher.StatusAvailable, stored.Status)
+	assert.Equal(t, "turn_original", stored.TurnID)
 	assert.Equal(t, "remote_1", stored.RemoteID)
 	assert.Equal(t, "art_1", stored.ArtifactID)
 	assert.Equal(t, "artup_1", stored.UploadID)
@@ -117,6 +119,7 @@ func TestWorkerGivenRestartedUploadingJobWhenRunThenResumesPersistedSession(t *t
 
 	require.Len(t, uploader.jobs, 1)
 	assert.Equal(t, "https://upload.example/session", uploader.jobs[0].ResumableURL)
+	assert.Equal(t, "turn_original", uploader.jobs[0].TurnID)
 	assert.Equal(t, int64(4), uploader.jobs[0].UploadedBytes)
 	stored, err := store.GetArtifactPublishJob(context.Background(), job.PublicationID)
 	require.NoError(t, err)
@@ -432,6 +435,7 @@ func workerFixture(
 	now := fixedArtifactTime()
 	job := daemonstore.ArtifactPublishJob{
 		PublicationID:  "apub_worker",
+		TurnID:         "turn_original",
 		AgentID:        "agent_1",
 		SessionID:      "session_1",
 		SourceFilename: "report.bin",

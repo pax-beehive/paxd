@@ -6,6 +6,7 @@ type ArtifactPublishJob struct {
 	PublicationID   string    `gorm:"primaryKey;type:text"`
 	AgentID         string    `gorm:"type:text;not null"`
 	SessionID       string    `gorm:"type:text;not null"`
+	TurnID          string    `gorm:"type:text;not null;default:''"`
 	SourceFilename  string    `gorm:"type:text;not null"`
 	DisplayTitle    string    `gorm:"type:text;not null;default:''"`
 	ContentType     string    `gorm:"type:text;not null;default:''"`

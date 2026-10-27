@@ -263,6 +263,8 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		LocalHandler: localapi.NewHandlerWithCron(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,
+			store:        store,
+			runtimes:     supervisors.acpPoolRegistry,
 		}, pairingService, cronJobs),
 		supervisors:    supervisors,
 		harnesses:      harnesses,

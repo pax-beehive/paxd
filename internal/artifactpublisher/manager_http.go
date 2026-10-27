@@ -46,6 +46,7 @@ func (m *HTTPManager) Register(
 			"source": map[string]string{
 				"agent_id":   job.AgentID,
 				"session_id": job.SessionID,
+				"turn_id":    job.TurnID,
 			},
 			"filename": job.SourceFilename,
 			"title":    job.DisplayTitle,
