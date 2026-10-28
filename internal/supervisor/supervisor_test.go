@@ -509,6 +509,45 @@ func TestTransientExitEntersInterruptibleBackoffAndTimerRestarts(t *testing.T) {
 	}
 }
 
+func TestRemoteBackoffResetsAfterConnectedTransientExit(t *testing.T) {
+	clock := newFakeClock()
+	store := newFakeRemoteStore()
+	store.setDesired([]runtimes.RemoteSpec{remoteSpec("remote_1", 1, 0)})
+	factory := &fakeRemoteFactory{
+		makeSession: func(_ runtimes.RemoteSpec, index int) *scriptedSession {
+			exit := runtimes.TransientExit("dial_failed", "temporary network failure")
+			if index == 6 {
+				exit = runtimes.TransientExit("node_control_read_failed", "connection reset").WithBackoffReset()
+			}
+			return instantSession(exit)
+		},
+	}
+	sup := NewRemoteSupervisor(RemoteSupervisorOptions{
+		Store: store, Factory: factory, Clock: clock,
+		Backoff: BackoffPolicy{Initial: time.Second, Max: 30 * time.Second},
+	})
+
+	require.NoError(t, sup.Reconcile(t.Context()))
+
+	for index, seconds := range []int{1, 2, 4, 8, 16, 30, 1, 2} {
+		factory.waitSession(t, index).waitStarted(t)
+		wantAttempt := index + 1
+		if index >= 6 {
+			wantAttempt = index - 5
+		}
+		require.Eventually(t, func() bool {
+			status := store.latestStatus("remote_1")
+			return status.Phase == PhaseBackoff && status.ReconnectAttempt == wantAttempt
+		}, 2*time.Second, time.Millisecond)
+		status := store.latestStatus("remote_1")
+		require.NotNil(t, status.NextRetryAt)
+		assert.Equal(t, time.Duration(seconds)*time.Second, status.NextRetryAt.Sub(clock.Now()))
+		if index < 7 {
+			clock.fireAll()
+		}
+	}
+}
+
 func TestAgentConnectionBackoffResetsAfterConnectedTransientExit(t *testing.T) {
 	clock := newFakeClock()
 	store := newFakeAgentStore()

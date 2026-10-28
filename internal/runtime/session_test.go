@@ -45,6 +45,7 @@ func TestRemoteControlSessionDialsWithAuthHeadersAndDelegates(t *testing.T) {
 
 	exit := session.Run(context.Background())
 	assert.Equal(t, ExitTransient, exit.Class)
+	assert.True(t, exit.ResetBackoff)
 	assert.Equal(t, "wss://fleet.example.com/base/api/v1/node/control?node_id=node_1", dialer.url)
 	assert.Equal(t, "pax_key", dialer.header.Get("X-Pax-Key"))
 	assert.Equal(t, "remote_prod", runnerSpec.RemoteID)
@@ -69,6 +70,44 @@ func TestRemoteControlSessionUnauthorizedHandshakeIsAuthExit(t *testing.T) {
 	exit := session.Run(context.Background())
 	assert.Equal(t, ExitAuth, exit.Class)
 	assert.Equal(t, "unauthorized", exit.Code)
+	assert.False(t, exit.ResetBackoff)
+}
+
+func TestRemoteControlSessionResetsBackoffOnlyAfterConnectedTransientExit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		exit    Exit
+		want    Exit
+		dialErr error
+		cancel  bool
+	}{
+		{name: "read failure", exit: TransientExit("read_failed", "connection reset"), want: TransientExit("read_failed", "connection reset").WithBackoffReset()},
+		{name: "normal runner return", want: TransientExit("node_control_closed", "node-control websocket session ended").WithBackoffReset()},
+		{name: "auth failure", exit: AuthExit("unauthorized", "authentication failed"), want: AuthExit("unauthorized", "authentication failed")},
+		{name: "config failure", exit: ConfigExit("invalid_config", "invalid config"), want: ConfigExit("invalid_config", "invalid config")},
+		{name: "terminal exit", exit: TerminalExit("stopped", "stopped"), want: TerminalExit("stopped", "stopped")},
+		{name: "dial failure", dialErr: errors.New("network failure"), want: TransientExit("dial_failed", "websocket dial failed: network failure")},
+		{name: "slot cancellation", cancel: true, exit: TransientExit("read_failed", "connection closed"), want: CanceledExit(context.Canceled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			session := NewRemoteControlSession(RemoteControlSessionConfig{
+				Spec:      RemoteSpec{RemoteID: "remote_prod", CloudAPIURL: "https://fleet.example.com"},
+				Headers:   fakeHeaderProvider{header: http.Header{}},
+				Dialer:    &fakeDialer{conn: newFakeWebSocketConn(), err: tc.dialErr},
+				Heartbeat: HeartbeatConfig{PingInterval: time.Hour, ReadTimeout: time.Hour},
+				Runner: NodeControlRunnerFunc(func(context.Context, WebSocketConn, RemoteSpec) Exit {
+					if tc.cancel {
+						cancel()
+					}
+					return tc.exit
+				}),
+			})
+
+			assert.Equal(t, tc.want, session.Run(ctx))
+		})
+	}
 }
 
 func TestRemoteControlSessionDialClassification(t *testing.T) {
@@ -105,6 +144,7 @@ func TestRemoteControlSessionHeartbeatTimeoutReturnsTransient(t *testing.T) {
 	exit := session.Run(context.Background())
 	assert.Equal(t, ExitTransient, exit.Class)
 	assert.Equal(t, "heartbeat_timeout", exit.Code)
+	assert.True(t, exit.ResetBackoff)
 }
 
 func TestHeartbeatReadMessageMarksActivity(t *testing.T) {
