@@ -383,7 +383,6 @@ func (s *Service) sessionStatuses(
 			TokenUsage:        cloud.TokenUsage{TotalTokens: session.TokenUsage},
 			LastMessageAt:     firstNonEmpty(session.UpdatedAt, session.LastActive),
 			LastUserMessageAt: latestUserMessageAt(session.Messages),
-			Messages:          sessionMessages(session.Messages),
 		})
 	}
 	return out, nil
@@ -410,7 +409,6 @@ func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cl
 			TokenUsage:        cloud.TokenUsage{TotalTokens: session.TokenUsage},
 			LastMessageAt:     firstNonEmpty(session.UpdatedAt, session.LastActive),
 			LastUserMessageAt: latestUserMessageAt(session.Messages),
-			Messages:          sessionMessages(session.Messages),
 		})
 	}
 	return out
@@ -489,28 +487,6 @@ func sessionDisplayName(session model.SessionInfo) string {
 		return session.NativeID
 	}
 	return session.SessionID
-}
-
-func sessionMessages(messages []model.SessionMessage) []cloud.SessionMessage {
-	if len(messages) == 0 {
-		return nil
-	}
-	out := make([]cloud.SessionMessage, 0, len(messages))
-	for _, message := range messages {
-		if message.Text == "" {
-			continue
-		}
-		out = append(out, cloud.SessionMessage{
-			SessionID:   message.SessionID,
-			Seq:         message.Seq,
-			Kind:        message.Kind,
-			Role:        message.Role,
-			Text:        message.Text,
-			StartedAt:   message.StartedAt,
-			CompletedAt: message.CompletedAt,
-		})
-	}
-	return out
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

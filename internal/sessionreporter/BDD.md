@@ -127,6 +127,14 @@ Then each session is reported as `pi:<nativeId>` with the bare native id
 
 ## Reporting
 
+### Scenario: session reports omit message bodies
+
+Given a scanned session contains a long message history
+When a report pass runs with or without an ACP route resolver
+Then the report contains session metadata and activity timestamps
+And the serialized payload omits the `messages` field and message bodies
+And the last user message timestamp is still derived from local history
+
 ### Scenario: report sessions per remote and agent
 
 Given observed runtimes belong to different remotes
