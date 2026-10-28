@@ -101,13 +101,16 @@ func (s *RemoteControlSession) Run(ctx context.Context) Exit {
 	exit := s.cfg.Runner.RunNodeControl(runCtx, hbConn, s.cfg.Spec)
 	if hbConn.TimedOut() {
 		log.Printf("[paxd] remote session id=%s heartbeat timed out", s.cfg.Spec.RemoteID)
-		return TransientExit("heartbeat_timeout", "websocket heartbeat timed out")
+		return TransientExit("heartbeat_timeout", "websocket heartbeat timed out").WithBackoffReset()
 	}
 	if ctx.Err() != nil {
 		return CanceledExit(ctx.Err())
 	}
 	if exit.Class == "" {
-		return TransientExit("node_control_closed", "node-control websocket session ended")
+		exit = TransientExit("node_control_closed", "node-control websocket session ended")
+	}
+	if exit.Class == ExitTransient {
+		return exit.WithBackoffReset()
 	}
 	return exit
 }

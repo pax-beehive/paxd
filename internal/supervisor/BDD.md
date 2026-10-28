@@ -174,6 +174,13 @@ And later desired updates can still be recorded as pending desired spec
 
 ## Interruptible backoff
 
+### Scenario: connected remote session resets accumulated backoff
+
+Given repeated node-control dial failures reached the 30-second backoff cap
+When a connected session exits with a backoff-reset request
+Then the remote retries after the initial 1-second delay
+And a subsequent failed handshake increases that delay to 2 seconds
+
 ### Scenario: transient exit enters backoff
 
 Given a running session exits with failure class `transient`  

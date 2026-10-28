@@ -138,6 +138,13 @@ When the context is canceled by the slot
 Then it closes the WebSocket  
 And returns exit class `terminal` or canceled according to runtime policy
 
+### Scenario: transient exit after connection resets backoff
+
+Given the node-control WebSocket connected successfully
+When the peer disconnects, the runner returns normally, or the heartbeat times out
+Then the transient exit requests a supervisor backoff reset
+And failed handshakes and non-transient exits do not request that reset
+
 ## AgentTunnelSession
 
 ### Scenario: dials ACP tunnel WebSocket with remote auth headers

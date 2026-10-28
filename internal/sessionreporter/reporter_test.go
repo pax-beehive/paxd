@@ -2,7 +2,9 @@ package sessionreporter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,8 +95,60 @@ func TestRunOnceScansObservedRuntimeAndReportsSessions(t *testing.T) {
 	assert.Equal(t, "cli", reporter.calls[0].sessions[0].Source)
 	assert.Equal(t, int64(42), reporter.calls[0].sessions[0].TokenUsage.TotalTokens)
 	assert.Equal(t, "2026-06-28T11:59:58Z", reporter.calls[0].sessions[0].LastUserMessageAt)
-	require.Len(t, reporter.calls[0].sessions[0].Messages, 2)
-	assert.Equal(t, "done", reporter.calls[0].sessions[0].Messages[1].Text)
+	assert.Empty(t, reporter.calls[0].sessions[0].Messages)
+}
+
+func TestRunOnceReportsMetadataWithoutMessageBodies(t *testing.T) {
+	for _, resolveRoutes := range []bool{false, true} {
+		name := "without route resolver"
+		if resolveRoutes {
+			name = "with route resolver"
+		}
+		t.Run(name, func(t *testing.T) {
+			source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{
+				Spec: runtimes.AgentConnectionSpec{
+					ConnectionID: "conn_1", RemoteID: "remote_1", CloudAgentID: "agent_1",
+				},
+			}}}
+			scanner := &fakeScanner{sessions: []model.SessionInfo{{
+				SessionID: "sess_1", NativeID: "native_1", Name: "Long conversation",
+				Preview: "Session preview", Status: "idle", TokenUsage: 42,
+				UpdatedAt: "2026-10-28T17:00:00Z",
+				Messages: []model.SessionMessage{{
+					Role: "user", Text: strings.Repeat("message body", 200000),
+					StartedAt: "2026-10-28T16:59:00Z",
+				}},
+			}}}
+			reporter := &fakeCloudReporter{}
+			opts := Options{RuntimeSource: source, Scanner: scanner, Reporter: reporter}
+			if resolveRoutes {
+				opts.RouteResolver = &fakeRouteResolver{routes: map[string]routeResolution{
+					"conn_1/native_1": {managerSessionID: "sess_1", found: true},
+				}}
+			}
+
+			require.NoError(t, New(opts).RunOnce(t.Context()))
+
+			require.Len(t, reporter.calls, 1)
+			require.Len(t, reporter.calls[0].sessions, 1)
+			status := reporter.calls[0].sessions[0]
+			assert.Equal(t, "sess_1", status.SessionID)
+			assert.Equal(t, "native_1", status.NativeID)
+			assert.Equal(t, "Long conversation", status.Name)
+			assert.Equal(t, "Session preview", status.Preview)
+			assert.Equal(t, "idle", status.Status)
+			assert.Equal(t, int64(42), status.TokenUsage.TotalTokens)
+			assert.Equal(t, "2026-10-28T17:00:00Z", status.LastMessageAt)
+			assert.Equal(t, "2026-10-28T16:59:00Z", status.LastUserMessageAt)
+			assert.Zero(t, len(status.Messages))
+
+			payload, err := json.Marshal(cloud.AgentSessionsReport{Sessions: reporter.calls[0].sessions})
+			require.NoError(t, err)
+			assert.False(t, strings.Contains(string(payload), `"messages"`))
+			assert.False(t, strings.Contains(string(payload), "message body"))
+			assert.Less(t, len(payload), 1024)
+		})
+	}
 }
 
 func TestLatestUserMessageAtIgnoresAssistantAndUsesCompletedAtFallback(t *testing.T) {
