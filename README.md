@@ -386,14 +386,16 @@ ACP harness 预设：
 | harness | 默认命令 |
 |---------|----------|
 | `hermes` | `hermes acp` |
-| `codex` | `codex-acp`，若未安装则 `npx -y @agentclientprotocol/codex-acp` |
-| `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp` |
+| `codex` | `codex-acp`，若未安装则 `npx -y @agentclientprotocol/codex-acp@*` |
+| `claude` / `claude-code` | `claude-agent-acp`，若未安装则 `npx -y @agentclientprotocol/claude-agent-acp@*` |
 | `gemini` | `gemini --acp` |
 | `kimi` | `kimi acp`（需先在本机 `kimi login`） |
 | `dscode` | `dscode acp`（需安装包含原生 ACP 支持的 DSCODE 构建） |
 | `dsh` | `dsh --profile acp`（DeepSeek Harness，需先安装并配置 `DEEPSEEK_API_KEY`） |
-| `pi` | `pi-acp`，若未安装则 `npx -y pi-acp` |
+| `pi` | `pi-acp`，若未安装则 `npx -y pi-acp@*` |
 | `custom` | 必须显式配置 `command` |
+
+npm fallback 使用显式 `@*`：首次安装成功后复用 npx 缓存中的版本，不会因为发布新版本而重新下载。旧配置中未指定版本的内置 ACP `npx -y` / `npm exec --yes` 命令也会在启动时应用此策略；显式版本和 `@latest` 保持原意。切换到 `@*` 使用不同的 npx 缓存键，首次可能需要重新安装一次。缓存被清除或安装未完成时仍需要下载；此改动不清理历史遗留的 npm 临时文件。
 
 `agents[].acp_forwarder.command` 或顶层 `acp_forwarder.command` 会覆盖 harness 预设。`paxd harnesses` 会检查本机实际可用的 adapter。Codex 使用 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp)，Claude 使用 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)。传统 mailbox polling/executor 路径仍使用 Hermes HTTP API；Codex/Claude/Gemini ACP agent 不会调用 Hermes HTTP session list。
 

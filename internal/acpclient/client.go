@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/acpcommand"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
@@ -76,7 +77,8 @@ func (l SessionLister) List(ctx context.Context) ([]model.SessionInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, l.Command[0], l.Command[1:]...)
+	command := acpcommand.PreferCached(l.Command)
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = l.WorkingDir
 	cmd.Env = mergedEnv(l.Env)
 	prepareCommandGroup(cmd)
@@ -180,7 +182,8 @@ func (p SessionPrompter) Prompt(ctx context.Context, sessionID string, prompt st
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, p.Command[0], p.Command[1:]...)
+	command := acpcommand.PreferCached(p.Command)
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = p.WorkingDir
 	prepareCommandGroup(cmd)
 

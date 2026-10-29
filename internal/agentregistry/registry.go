@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pax-beehive/paxd/internal/acpclient"
+	"github.com/pax-beehive/paxd/internal/acpcommand"
 	"github.com/pax-beehive/paxd/pkg/model"
 )
 
@@ -216,7 +217,7 @@ func DetectWithProbe(agent Agent, probe bool) Status {
 	if len(agent.FallbackCommand) > 0 && commandAvailable(agent.FallbackCommand) {
 		return Status{
 			Agent:      agent,
-			Command:    agent.FallbackCommand,
+			Command:    acpcommand.PreferCached(agent.FallbackCommand),
 			State:      "installable",
 			Capability: "acp",
 			Reason:     firstNonEmpty(agent.InstallHint, "adapter command unavailable"),

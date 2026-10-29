@@ -152,7 +152,7 @@ func isTrustedCodexACPCommand(command []string) bool {
 	for len(args) > 0 && (args[0] == "-y" || args[0] == "--yes") {
 		args = args[1:]
 	}
-	return len(args) > 0 && args[0] == "@agentclientprotocol/codex-acp"
+	return len(args) > 0 && (args[0] == "@agentclientprotocol/codex-acp" || args[0] == "@agentclientprotocol/codex-acp@*")
 }
 
 func parseCodexCLIVersion(output []byte) (string, error) {

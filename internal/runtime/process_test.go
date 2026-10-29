@@ -105,3 +105,27 @@ func TestExecLocalACPProcessRunnerRejectsCanceledContext(t *testing.T) {
 	})
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestACPProcessReusesUnversionedNPMFallback(t *testing.T) {
+	for _, launcher := range []string{"npx", "npm"} {
+		t.Run(launcher, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, launcher)
+			require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0755))
+			command := []string{path, "-y", "@agentclientprotocol/claude-agent-acp"}
+			want := "-y\n@agentclientprotocol/claude-agent-acp@*\n"
+			if launcher == "npm" {
+				command = []string{path, "exec", "--yes", "@agentclientprotocol/claude-agent-acp"}
+				want = "exec\n--yes\n@agentclientprotocol/claude-agent-acp@*\n"
+			}
+			proc, err := (ExecLocalACPProcessRunner{}).Start(t.Context(), LocalACPProcessSpec{Command: command})
+			require.NoError(t, err)
+			require.NoError(t, proc.Stdin().Close())
+			output, err := io.ReadAll(proc.Stdout())
+			require.NoError(t, err)
+			require.NoError(t, proc.Wait())
+			assert.Equal(t, want, string(output))
+			assert.Equal(t, "@agentclientprotocol/claude-agent-acp", command[len(command)-1], "stored configuration stays unchanged")
+		})
+	}
+}

@@ -124,7 +124,7 @@ func TestCommandDetectorReportsAvailableAndMissingCommands(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, StateAvailable, got.State)
-	assert.Equal(t, []string{"npx", "-y", "@agentclientprotocol/claude-agent-acp"}, got.Command)
+	assert.Equal(t, []string{"npx", "-y", "@agentclientprotocol/claude-agent-acp@*"}, got.Command)
 }
 
 func TestDefaultDetectorsIncludeBuiltInHarnesses(t *testing.T) {

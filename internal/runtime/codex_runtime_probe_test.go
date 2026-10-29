@@ -19,6 +19,7 @@ func TestCodexRuntimeProbeTrustBoundary(t *testing.T) {
 		assert.True(t, isTrustedCodexACPCommand([]string{"codex-acp"}))
 		assert.True(t, isTrustedCodexACPCommand([]string{"/usr/local/bin/codex-acp", "--stdio"}))
 		assert.True(t, isTrustedCodexACPCommand([]string{"npx", "-y", "@agentclientprotocol/codex-acp"}))
+		assert.True(t, isTrustedCodexACPCommand([]string{"npx", "-y", "@agentclientprotocol/codex-acp@*"}))
 		assert.True(t, isTrustedCodexACPCommand([]string{"npx", "--yes", "@agentclientprotocol/codex-acp", "--stdio"}))
 	})
 
