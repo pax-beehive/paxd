@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/pax-beehive/paxd/internal/acpcommand"
 )
 
 const (
@@ -38,7 +40,8 @@ func (r ExecLocalACPProcessRunner) Start(ctx context.Context, spec LocalACPProce
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(executable, spec.Command[1:]...)
+	command := acpcommand.PreferCached(spec.Command)
+	cmd := exec.Command(executable, command[1:]...)
 	prepareExecCommand(cmd)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = os.Environ()

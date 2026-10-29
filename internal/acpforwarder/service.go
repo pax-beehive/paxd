@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pax-beehive/paxd/internal/acpcommand"
 	"github.com/pax-beehive/paxd/internal/noderouting"
 
 	"github.com/gorilla/websocket"
@@ -189,7 +190,8 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, s.cfg.Command[0], s.cfg.Command[1:]...)
+	command := acpcommand.PreferCached(s.cfg.Command)
+	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
 	cmd.Dir = s.cfg.WorkingDir
 
 	stdin, err := cmd.StdinPipe()

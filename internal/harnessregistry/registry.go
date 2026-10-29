@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/pax-beehive/paxd/internal/acpcommand"
 	"github.com/pax-beehive/paxd/internal/control"
 )
 
@@ -120,7 +121,7 @@ func (d CommandDetector) Detect(ctx context.Context, req control.DiscoverHarness
 		if len(d.FallbackCommand) > 0 && strings.TrimSpace(d.FallbackCommand[0]) != "" {
 			if _, fallbackErr := lookup.LookPath(d.FallbackCommand[0]); fallbackErr == nil {
 				view.State = StateAvailable
-				view.Command = append([]string(nil), d.FallbackCommand...)
+				view.Command = acpcommand.PreferCached(append([]string(nil), d.FallbackCommand...))
 				return view, nil
 			}
 		}
