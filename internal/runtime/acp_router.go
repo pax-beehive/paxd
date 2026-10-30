@@ -99,6 +99,8 @@ type ACPRouter struct {
 	backgroundTurns     map[string]backgroundTurn
 	toolCallTurns       map[string]string
 	toolCallTurnKeys    []string
+	subagentTurns       map[string]subagentTurn
+	subagentTurnKeys    []string
 	waiters             map[string]chan acpRPCWaitResult
 	resumeTranscripts   map[resumeTranscriptScope]struct{}
 	slotReservations    map[string]int
@@ -184,6 +186,7 @@ func NewACPRouter(connectionID string, store ACPRouteStore, opts ...ACPRouterOpt
 		activeSessionTurns: make(map[string]string),
 		backgroundTurns:    make(map[string]backgroundTurn),
 		toolCallTurns:      make(map[string]string),
+		subagentTurns:      make(map[string]subagentTurn),
 		waiters:            make(map[string]chan acpRPCWaitResult),
 		slotReservations:   make(map[string]int),
 		lastPrompt:         make(map[string]uint64),
