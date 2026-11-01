@@ -249,3 +249,16 @@ paxd mcp conversation reply "wozhidaodaan"
 
 However, the target ACP integration should use `paxd mcp conversation serve` as a
 stdio MCP server registered once at `session/new`.
+
+## Optional Secretary workspace lookups
+
+Manager-created Secretary executions expose only read-only
+`workspace_search`, `workspace_read`, `workspace_expand` and `workspace_history`
+through this same stdio server when `PAX_SECRETARY_CAPABILITY` is injected.
+Ordinary discovery remains unchanged; the four ordinary discovery/messaging/
+artifact tools are unavailable inside the Secretary context, including direct
+calls. The helper uses existing local node
+credentials; Manager validates the execution grant and current owner on every
+call. No user API key or local MCP configuration is needed. See
+[Secretary workspace tools](secretary_workspace_mcp.md) for schemas, bounds,
+version references, authentication and compatibility.

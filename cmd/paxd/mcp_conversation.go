@@ -254,12 +254,14 @@ type mcpToolContent struct {
 }
 
 type mcpToolCallResult struct {
-	Content []mcpToolContent `json:"content"`
-	IsError bool             `json:"isError,omitempty"`
+	Content           []mcpToolContent `json:"content"`
+	IsError           bool             `json:"isError,omitempty"`
+	StructuredContent any              `json:"structuredContent,omitempty"`
 }
 
 func serveConversationMCP(ctx context.Context, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024+64*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -330,7 +332,10 @@ func writeMCPResponse(out io.Writer, resp mcpRPCResponse) error {
 }
 
 func conversationMCPTools() []map[string]any {
-	return []map[string]any{
+	if strings.TrimSpace(os.Getenv(envPaxSecretaryCapability)) != "" {
+		return workspaceMCPTools()
+	}
+	tools := []map[string]any{
 		{
 			"name": "list_agents",
 			"description": "List the agents you own so you can pick one to message. " +
@@ -392,12 +397,19 @@ func conversationMCPTools() []map[string]any {
 			},
 		},
 	}
+	return tools
 }
 
 func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mcpToolCallResult, error) {
 	var params mcpToolCallParams
 	if err := json.Unmarshal(rawParams, &params); err != nil {
 		return mcpToolCallResult{}, fmt.Errorf("invalid tools/call params")
+	}
+	if strings.TrimSpace(os.Getenv(envPaxSecretaryCapability)) != "" {
+		if isWorkspaceMCPTool(params.Name) {
+			return callWorkspaceMCPTool(ctx, params.Name, params.Arguments)
+		}
+		return mcpToolCallResult{}, fmt.Errorf("tool unavailable in Secretary execution")
 	}
 	args := map[string]any{}
 	if len(params.Arguments) > 0 {
