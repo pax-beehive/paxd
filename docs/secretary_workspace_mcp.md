@@ -75,6 +75,32 @@ context supplied in its prompt. Actual tool availability also depends on the ACP
 adapter; OpenClaw's existing per-session MCP limitation remains unchanged. The
 standalone user-key Python adapter continues to work independently.
 
+## Session reporting
+
+Manager reserves `sess_secretary_` session IDs for internal execution work. The
+daemon's periodic session reporter resolves native harness IDs through its
+durable ACP route bindings before classifying them. It excludes these internal
+Manager IDs both before `paxl session get` history reads and before metadata
+uploads. A native ID, title or prompt containing the word Secretary is not a
+classification signal. Internal routes remain available for the live execution
+transport and its scoped tools.
+
+The route-aware scanner lists native metadata without the report limit, removes
+registered internal executions, then applies the configured report batch limit
+before reading histories. This keeps a page of recent execution sessions from
+hiding older user sessions while bounding history reads to the ordinary batch
+size. Native metadata discovery retains the existing scan timeout; listing may
+still read harness logs to derive metadata. The final upload guard also covers
+alternate scanner implementations and ACP listing fallbacks.
+
+This reporter uploads metadata only, not message bodies. Its existing route
+mapping preserves the Manager execution ID rather than creating an ordinary
+session alias. Manager's source/registry exclusions remain responsible for
+keeping execution transcripts out of search and Secretary input. The daemon
+filter supplements those exclusions and the normal session-list filter; it does
+not remove local logs or historical Manager records. Deploy an updated paxd on
+the selected agent's host to apply the reporting filter.
+
 ## Verification
 
 BDD tests in `cmd/paxd/mcp_workspace_test.go` and
@@ -83,6 +109,12 @@ closed-schema rejection, exact expansion, history/caller separation, large
 integer preservation, bounded responses, old-Manager behavior, credential-safe
 failures and HTTP cancellation. One stdio test exercises the real SQLite remote
 and node-key resolver against a local HTTP server without a user API key.
+
+`internal/sessionreporter/internal_sessions_test.go` covers internal metadata
+suppression, classification through durable route IDs, ordinary native ID
+preservation, unavailable route lookup and filtering before the history-read
+batch limit. The reporter package has 84.5% statement coverage; the new
+classification/filter helpers have 100% coverage.
 
 ```bash
 GOWORK=off go test ./cmd/paxd ./internal/cloud -run 'TestWorkspaceMCP|TestSecretaryTool' -count=1
