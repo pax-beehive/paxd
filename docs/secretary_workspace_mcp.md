@@ -16,15 +16,23 @@ when called directly:
 | `workspace_search` | `query`, optional `kinds`, `session_ids`, `cursor`, `limit` | `search` |
 | `workspace_read` | `ref`, optional `view`, `offset`, `limit`, `before`, `after` | `read` |
 | `workspace_expand` | `message_id`, `content_hash`, `canonicalization_version`, `view`, optional `offset`, `limit` | `read` with the exact message ref |
-| `workspace_history` | Target `session_id`, optional `before_seq`, `after_seq`, `limit` | `history` |
+| `workspace_history` | Target `session_id`, optional `turn_id`, `view`, `before_seq`, `after_seq`, `limit` | `history` |
 
 Search/read/expand use the existing Manager search MCP schemas. Search is literal
 text matching, with a maximum 256-character query, 50 results, 3 kinds and 50
 session filters. Read supports `first`, `last`, and `full`; expand requires an
 exact hash/canonicalization version and supports only `first` or `full`. Read
 pages contain at most 16,384 characters and context counts are at most 50 each.
-History accepts at most one nonzero pagination direction; its limit defaults to
-20 when omitted or zero and has a maximum of 50. It returns canonical visible
+History accepts an optional `turn_id` to restrict the page to one turn's visible
+messages, and `view` accepts `first`, `last` or `full`. With `view` omitted,
+read/history use the Manager's compact role-aware default (full user text and
+the assistant's `last` view), subject to response page limits. Use a turn filter
+with `view: "full"` to inspect the turn's full visible text and follow pagination
+as needed. Use `workspace_read` or `workspace_expand` with the returned exact
+message ref and offset when a message has more text. Tool output and
+reasoning remain excluded. History accepts at most one nonzero pagination
+direction; its limit defaults to 20 when omitted or zero and has a maximum of 50.
+It returns canonical visible
 messages and pagination, excluding tools, reasoning and internal executions.
 All advertised schemas reject unknown fields. Integer references and cursors are
 parsed without floating-point conversion, including values above 2^53.
@@ -74,6 +82,13 @@ not expose the new tools; lookup remains optional and a summary can still use th
 context supplied in its prompt. Actual tool availability also depends on the ACP
 adapter; OpenClaw's existing per-session MCP limitation remains unchanged. The
 standalone user-key Python adapter continues to work independently.
+
+The optional history `turn_id`/`view` arguments and role-aware compact defaults
+require the corresponding Manager update in
+[pax-manager PR 214](https://github.com/pax-beehive/pax-manager/pull/214).
+Older Managers may reject the new optional fields; omit them until that server
+update is deployed. The daemon reporting filter below can be deployed
+independently and does not require these history arguments.
 
 ## Session reporting
 

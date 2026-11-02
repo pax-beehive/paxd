@@ -44,14 +44,14 @@ func workspaceMCPTools() []map[string]any {
 		{"name": "workspace_search", "description": "Find literal title/content matches in your current Manager messages and summaries. Read hits before quoting them.", "inputSchema": workspaceObject(map[string]any{
 			"query": workspaceString(256), "kinds": workspaceArray(workspaceEnum("message", "session", "summary"), 3), "session_ids": workspaceArray(workspaceString(4096), 50), "cursor": workspaceString(16384), "limit": workspaceInteger(1, 50),
 		}, "query")},
-		{"name": "workspace_read", "description": "Read a source or exact summary revision. Preserve returned refs, versions, views and read receipts. An omitted summary revision reads the current version.", "inputSchema": workspaceObject(map[string]any{
+		{"name": "workspace_read", "description": "Read a source or exact summary revision. An omitted message view uses the Manager's compact role-aware default; request full for more visible text and page as needed. Preserve returned refs, versions, views and read receipts. An omitted summary revision reads the current version.", "inputSchema": workspaceObject(map[string]any{
 			"ref": ref, "view": workspaceEnum("last", "first", "full"), "offset": workspaceInteger(0, 1000000000), "limit": workspaceInteger(0, 16384), "before": workspaceInteger(0, 50), "after": workspaceInteger(0, 50),
 		}, "ref")},
 		{"name": "workspace_expand", "description": "Read first/full visible text of one message at its exact version, excluding tools and reasoning. Preserve returned refs and read receipts.", "inputSchema": workspaceObject(map[string]any{
 			"message_id": workspaceString(4096), "content_hash": workspaceString(256), "canonicalization_version": workspaceString(128), "view": workspaceEnum("first", "full"), "offset": workspaceInteger(0, 1000000000), "limit": workspaceInteger(0, 16384),
 		}, "message_id", "content_hash", "canonicalization_version", "view")},
-		{"name": "workspace_history", "description": "Read a bounded page of canonical visible messages from a workspace session. Use at most one nonzero before_seq or after_seq. Preserve each exact message ref; pagination is not a processing checkpoint.", "inputSchema": workspaceObject(map[string]any{
-			"session_id": workspaceString(4096), "before_seq": workspaceInteger(0, math.MaxInt64), "after_seq": workspaceInteger(0, math.MaxInt64), "limit": workspaceInteger(0, 50),
+		{"name": "workspace_history", "description": "Read a bounded page of visible messages from a session, optionally scoped to turn_id. An omitted view uses the Manager's compact role-aware default; set view=full to inspect a turn's full visible text and page as needed. Use read/expand for messages with more text. Tools and reasoning are excluded. Use at most one nonzero before_seq or after_seq. Preserve exact refs and read receipts; pagination is not a processing checkpoint.", "inputSchema": workspaceObject(map[string]any{
+			"session_id": workspaceString(4096), "turn_id": workspaceString(4096), "view": workspaceEnum("first", "last", "full"), "before_seq": workspaceInteger(0, math.MaxInt64), "after_seq": workspaceInteger(0, math.MaxInt64), "limit": workspaceInteger(0, 50),
 		}, "session_id")},
 	}
 	for _, tool := range tools {
