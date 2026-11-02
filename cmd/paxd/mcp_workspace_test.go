@@ -103,6 +103,11 @@ func TestWorkspaceMCPGivenUntrustedArgumentsWhenInvalidThenDoesNotCallManager(t 
 		{"negative history cursor", "history", `{"session_id":"source","before_seq":-1}`},
 		{"two history directions", "history", `{"session_id":"source","before_seq":1,"after_seq":2}`},
 		{"history limit", "history", `{"session_id":"source","limit":51}`},
+		{"empty history turn", "history", `{"session_id":"source","turn_id":""}`},
+		{"invalid history turn type", "history", `{"session_id":"source","turn_id":1}`},
+		{"history turn too long", "history", `{"session_id":"source","turn_id":"` + strings.Repeat("t", 4097) + `"}`},
+		{"hidden history view", "history", `{"session_id":"source","view":"reasoning"}`},
+		{"empty history view", "history", `{"session_id":"source","view":""}`},
 		{"array input", "search", `[]`},
 		{"null input", "search", `null`},
 	}
@@ -131,6 +136,57 @@ func TestWorkspaceMCPGivenHistoryWhenCalledThenTargetCannotReplaceCallerSession(
 	result, err := callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"workspace_history","arguments":{"session_id":"source-session","after_seq":9007199254740993,"limit":0}}`))
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
+}
+
+func TestWorkspaceMCPGivenTurnHistoryWhenCalledThenPreservesOptionalViewAndCaller(t *testing.T) {
+	t.Setenv("PAX_SECRETARY_CAPABILITY", "cap")
+	t.Setenv("PAX_AGENT_ID", "agent_runtime")
+	t.Setenv("PAX_SESSION_ID", "execution-session")
+	before := callSecretaryWorkspace
+	t.Cleanup(func() { callSecretaryWorkspace = before })
+	for name, arguments := range map[string]string{
+		"whole turn":   `{"session_id":"source-session","turn_id":"turn-1","view":"full","limit":50}`,
+		"first view":   `{"session_id":"source-session","turn_id":"turn-1","view":"first"}`,
+		"last view":    `{"session_id":"source-session","view":"last"}`,
+		"compact turn": `{"session_id":"source-session","turn_id":"turn-1"}`,
+		"defaults":     `{"session_id":"source-session"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			callSecretaryWorkspace = func(_ context.Context, agentID string, request cloud.SecretaryToolRequest) (json.RawMessage, error) {
+				calls++
+				assert.Equal(t, "agent_runtime", agentID)
+				assert.Equal(t, "execution-session", request.SessionID)
+				assert.Equal(t, "cap", request.Capability)
+				assert.Equal(t, "history", request.Tool)
+				assert.JSONEq(t, arguments, request.ArgumentsJSON)
+				return json.RawMessage(`{"messages":[],"pagination":{"has_more":false}}`), nil
+			}
+
+			result, err := callConversationMCPTool(t.Context(), json.RawMessage(`{"name":"workspace_history","arguments":`+arguments+`}`))
+
+			require.NoError(t, err)
+			assert.False(t, result.IsError)
+			assert.Equal(t, 1, calls)
+		})
+	}
+}
+
+func TestWorkspaceMCPGivenHistoryDiscoveryThenTurnAndViewAreOptional(t *testing.T) {
+	for _, tool := range workspaceMCPTools() {
+		if tool["name"] != "workspace_history" {
+			continue
+		}
+		schema := tool["inputSchema"].(workspaceSchema)
+		assert.Equal(t, []string{"session_id"}, schema["required"])
+		properties := schema["properties"].(map[string]any)
+		require.Contains(t, properties, "turn_id")
+		require.Contains(t, properties, "view")
+		assert.Equal(t, workspaceString(4096), properties["turn_id"])
+		assert.Equal(t, workspaceEnum("first", "last", "full"), properties["view"])
+		return
+	}
+	t.Fatal("workspace_history was not advertised")
 }
 
 func TestWorkspaceMCPGivenFailureWhenCalledThenReturnsOnlySafeErrors(t *testing.T) {

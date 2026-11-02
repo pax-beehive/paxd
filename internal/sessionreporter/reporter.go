@@ -365,7 +365,7 @@ func (s *Service) sessionStatuses(
 			return nil, fmt.Errorf("resolve native session %q: %w", nativeSessionID, err)
 		}
 		managerSessionID = strings.TrimSpace(managerSessionID)
-		if !found || managerSessionID == "" {
+		if !found || managerSessionID == "" || isSecretaryWorkSession(managerSessionID) {
 			continue
 		}
 		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
@@ -391,7 +391,7 @@ func (s *Service) sessionStatuses(
 func sessionStatuses(spec SessionScannerSpec, sessions []model.SessionInfo) []cloud.SessionStatus {
 	out := make([]cloud.SessionStatus, 0, len(sessions))
 	for _, session := range sessions {
-		if session.SessionID == "" {
+		if session.SessionID == "" || isSecretaryWorkSession(session.SessionID) {
 			continue
 		}
 		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)

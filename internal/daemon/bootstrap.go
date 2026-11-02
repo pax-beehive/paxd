@@ -237,11 +237,12 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	var reports interface{ Start(context.Context) }
 	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
+		routeResolver := sessionReportRouteResolver{store: store}
 		reports = sessionreporter.New(sessionreporter.Options{
 			RuntimeSource:   supervisors.agentRuntimeSource,
-			Scanner:         sessionreporter.DefaultScanner{},
+			Scanner:         sessionreporter.DefaultScanner{RouteResolver: routeResolver},
 			Reporter:        sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
-			RouteResolver:   sessionReportRouteResolver{store: store},
+			RouteResolver:   routeResolver,
 			ManagedSessions: store,
 			BatchSize:       cfg.Daemon.SessionBatchSize,
 		})
