@@ -16,16 +16,17 @@ when called directly:
 | `workspace_search` | `query`, optional `kinds`, `session_ids`, `cursor`, `limit` | `search` |
 | `workspace_read` | `ref`, optional `view`, `offset`, `limit`, `before`, `after` | `read` |
 | `workspace_expand` | `message_id`, `content_hash`, `canonicalization_version`, `view`, optional `offset`, `limit` | `read` with the exact message ref |
+| `workspace_summaries` | Current organizing source `session_id`, optional `cursor`, `limit` | `summaries` |
 | `workspace_history` | Target `session_id`, optional `turn_id`, `view`, `before_seq`, `after_seq`, `limit` | `history` |
 
 Search/read/expand use the existing Manager search MCP schemas. Search is literal
 text matching, with a maximum 256-character query, 50 results, 3 kinds and 50
 session filters. Read supports `first`, `last`, and `full`; expand requires an
-exact hash/canonicalization version and supports only `first` or `full`. Read
+exact hash/canonicalization version and supports only `first` or `full`. Message read
 pages contain at most 16,384 characters and context counts are at most 50 each.
 History accepts an optional `turn_id` to restrict the page to one turn's visible
 messages, and `view` accepts `first`, `last` or `full`. With `view` omitted,
-read/history use the Manager's compact role-aware default (full user text and
+message read/history use the Manager's compact role-aware default (full user text and
 the assistant's `last` view), subject to response page limits. Use a turn filter
 with `view: "full"` to inspect the turn's full visible text and follow pagination
 as needed. Use `workspace_read` or `workspace_expand` with the returned exact
@@ -56,7 +57,7 @@ POST /api/v1/node/agents/:agent_id/secretary/tools
 {
   "session_id": "<calling execution session from environment>",
   "capability": "<execution capability from environment>",
-  "tool": "search | read | history",
+  "tool": "search | read | history | summaries",
   "arguments_json": "<validated tool arguments encoded as a JSON string>"
 }
 ```
@@ -147,3 +148,34 @@ initialization, runtime, updater executable smoke). Those packages passed in
 isolation and both complete serial runs passed; no test deadline was changed.
 Cross-service Manager acceptance is tracked separately; local helper tests use a
 controlled HTTP server and do not call a live model.
+
+## 多摘要上下文分页
+
+第一版统一 Node、仅支持 summary。同一个来源 session 可以有多份独立摘要；
+Manager 在 prompt 中提供有界首批，剩余内容通过只读 `workspace_summaries` 按需读取。
+参数 `session_id` 是当前整理来源的真实 Manager session ID，不能用内部执行 session
+或摘要 subject ID 替代；外层执行身份仍取环境，Manager 继续核验 capability、owner、
+设置、批次及租约，不因为知道别的 session ID 就允许读取或修改其成果。
+
+`limit` 省略或为 0 时默认 20，最多 50。响应为
+`{items, next_cursor?}`。工具页最多 64 KiB，正常 item 是完整的当前 SummaryVersion，
+包含稳定 summary ID 和确切 revision。服务端字节预算可以让一页少于 limit，
+调用方应依赖 cursor，不能依据条数判断结束。prompt 的 `summaries_has_more:true`
+且 `summaries_cursor` 为空时，应从第一页调用此工具，不能认为已经读完。
+
+单份大摘要返回目录头 `{summary_id,revision,title,requires_read:true}`，不截断正文。
+目录头不记为已读正文或来源，不授予修订其当前版的资格。需要修改时调用
+`workspace_read({ref:{kind:"summary",id:"摘要ID",revision:N}})` 取得完整确切版本。
+摘要读取是整版，不使用消息 offset 分页；整版 JSON 和其他工具读取共享每执行累计 4 MiB
+预算，超限在响应之前明确拒绝且不记已读。不应通过反复列举目录头代替完整读取。
+新发布摘要的整批预算仍为 64 KiB，需显式精简或拆分独立问题，不能靠 header 放大预算。
+此分页不推进消息处理进度，不创建 topic、普通关联或 board，也不授予发布能力。
+
+该工具需要配套的 Manager `summaries` 分支，先部署 Manager 再升级所选 agent 的 paxd。
+旧 Manager 的拒绝继续按已有安全错误返回，不能把空结果冒充已读完。
+已有 read/history/expand 仍只暴露用户和 assistant 可见正文，`full` 不包含聊天工具或 thought 日志。
+
+本次增量验证：`cmd/paxd`、`internal/cloud` 两个修改包的完整串行测试通过；
+定向 MCP/bridge 测试覆盖修改文件 statement 91.4% / 96.6%，`go vet`、格式、
+binary build 与真实 stdio discovery 通过。只验证本机边界及合成 HTTP 服务，
+不宣称已连接 Manager 的多摘要生产任务或调用真实模型。

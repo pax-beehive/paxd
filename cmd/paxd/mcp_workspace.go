@@ -36,6 +36,8 @@ func workspaceArray(items workspaceSchema, maximum int) workspaceSchema {
 }
 
 func workspaceMCPTools() []map[string]any {
+	summaryLimit := workspaceInteger(0, 50)
+	summaryLimit["default"] = 20
 	ref := workspaceObject(map[string]any{
 		"kind": workspaceEnum("message", "session", "summary"), "id": workspaceString(4096),
 		"revision": workspaceInteger(1, math.MaxInt64), "content_hash": workspaceString(256), "canonicalization_version": workspaceString(128),
@@ -53,6 +55,9 @@ func workspaceMCPTools() []map[string]any {
 		{"name": "workspace_history", "description": "Read a bounded page of visible messages from a session, optionally scoped to turn_id. An omitted view uses the Manager's compact role-aware default; set view=full to inspect a turn's full visible text and page as needed. Use read/expand for messages with more text. Tools and reasoning are excluded. Use at most one nonzero before_seq or after_seq. Preserve exact refs and read receipts; pagination is not a processing checkpoint.", "inputSchema": workspaceObject(map[string]any{
 			"session_id": workspaceString(4096), "turn_id": workspaceString(4096), "view": workspaceEnum("first", "last", "full"), "before_seq": workspaceInteger(0, math.MaxInt64), "after_seq": workspaceInteger(0, math.MaxInt64), "limit": workspaceInteger(0, 50),
 		}, "session_id")},
+		{"name": "workspace_summaries", "description": "List a bounded page of existing summary Nodes organized in the current source session. Follow next_cursor when more remain; an empty prompt cursor with summaries_has_more means start at the first page. Items normally contain a complete summary revision. An oversized item is only a summary_id/revision/title header with requires_read:true, not a read of its body or sources. Before modifying it, call workspace_read with ref {kind:\"summary\",id:summary_id,revision:revision} for the complete exact version. Summary reads share the task read budget and fail explicitly before returning if it is exceeded. The Manager may return fewer than limit to fit the page byte budget. The limit defaults to 20 when omitted or zero, with a maximum of 50. This cursor is not a processing checkpoint.", "inputSchema": workspaceObject(map[string]any{
+			"session_id": workspaceString(4096), "cursor": workspaceString(16384), "limit": summaryLimit,
+		}, "session_id")},
 	}
 	for _, tool := range tools {
 		tool["annotations"] = map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
@@ -62,7 +67,7 @@ func workspaceMCPTools() []map[string]any {
 
 func isWorkspaceMCPTool(name string) bool {
 	switch name {
-	case "workspace_search", "workspace_read", "workspace_expand", "workspace_history":
+	case "workspace_search", "workspace_read", "workspace_expand", "workspace_history", "workspace_summaries":
 		return true
 	default:
 		return false

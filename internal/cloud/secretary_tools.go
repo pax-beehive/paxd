@@ -79,7 +79,7 @@ func (c *Client) SecretaryTool(ctx context.Context, agentID string, request Secr
 	}
 	if agentID == "" || agentID == "." || agentID == ".." || strings.ContainsAny(agentID, "/\\?#%\r\n\t ") ||
 		request.SessionID == "" || request.Capability == "" || len(request.Capability) > 16384 ||
-		(request.Tool != "search" && request.Tool != "read" && request.Tool != "history") {
+		(request.Tool != "search" && request.Tool != "read" && request.Tool != "history" && request.Tool != "summaries") {
 		return nil, secretaryFailure("invalid_request", nil)
 	}
 	var arguments map[string]json.RawMessage
