@@ -21,9 +21,11 @@ func TestWorkspaceMCPGivenCapabilityWhenListingThenAddsOnlyReadOnlyTools(t *test
 	require.Len(t, conversationMCPTools(), 4)
 	_, err := callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"workspace_search","arguments":{"query":"data"}}`))
 	require.Error(t, err)
+	_, err = callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"workspace_summaries","arguments":{"session_id":"source-session"}}`))
+	require.Error(t, err)
 	t.Setenv("PAX_SECRETARY_CAPABILITY", "cap")
 	tools := conversationMCPTools()
-	require.Len(t, tools, 4)
+	require.Len(t, tools, 5)
 	for _, tool := range tools {
 		schema := tool["inputSchema"].(map[string]any)
 		assert.Equal(t, false, schema["additionalProperties"])
@@ -31,6 +33,7 @@ func TestWorkspaceMCPGivenCapabilityWhenListingThenAddsOnlyReadOnlyTools(t *test
 		assert.Equal(t, true, annotations["readOnlyHint"])
 	}
 	assert.Equal(t, "workspace_history", tools[3]["name"])
+	assert.Equal(t, "workspace_summaries", tools[4]["name"])
 	for _, name := range []string{"list_agents", "ask", "reply", "publish_artifact"} {
 		_, err := callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"`+name+`","arguments":{}}`))
 		require.Error(t, err)
@@ -99,6 +102,14 @@ func TestWorkspaceMCPGivenUntrustedArgumentsWhenInvalidThenDoesNotCallManager(t 
 		{"hidden view", "read", `{"ref":{"kind":"message","id":"m1"},"view":"reasoning"}`},
 		{"unfrozen expand", "expand", `{"message_id":"m1","view":"full"}`},
 		{"last expand", "expand", `{"message_id":"m1","content_hash":"h","canonicalization_version":"v1","view":"last"}`},
+		{"missing summaries session", "summaries", `{}`},
+		{"empty summaries session", "summaries", `{"session_id":""}`},
+		{"summaries owner injection", "summaries", `{"session_id":"source","owner_user_id":"foreign"}`},
+		{"summaries unknown field", "summaries", `{"session_id":"source","write":true}`},
+		{"summaries empty cursor", "summaries", `{"session_id":"source","cursor":""}`},
+		{"summaries negative limit", "summaries", `{"session_id":"source","limit":-1}`},
+		{"summaries oversized limit", "summaries", `{"session_id":"source","limit":51}`},
+		{"summaries fractional limit", "summaries", `{"session_id":"source","limit":1.5}`},
 		{"missing history session", "history", `{}`},
 		{"negative history cursor", "history", `{"session_id":"source","before_seq":-1}`},
 		{"two history directions", "history", `{"session_id":"source","before_seq":1,"after_seq":2}`},
@@ -254,4 +265,51 @@ func TestWorkspaceMCPGivenStoredNodeCredentialsWhenStdioReadsThenNeedsNoUserKey(
 	assert.Contains(t, output.String(), "exact-receipt")
 	assert.NotContains(t, output.String(), "node-secret")
 	assert.NotContains(t, output.String(), "execution-capability")
+}
+
+func TestWorkspaceMCPGivenSummaryPaginationWhenCalledThenPreservesOriginAndExactRevisions(t *testing.T) {
+	t.Setenv("PAX_SECRETARY_CAPABILITY", "cap")
+	t.Setenv("PAX_AGENT_ID", "agent_runtime")
+	t.Setenv("PAX_SESSION_ID", "execution-session")
+	before := callSecretaryWorkspace
+	t.Cleanup(func() { callSecretaryWorkspace = before })
+	for name, arguments := range map[string]string{
+		"defaults":     `{"session_id":"origin-session"}`,
+		"continuation": `{"session_id":"origin-session","cursor":"opaque+next","limit":50}`,
+		"zero default": `{"session_id":"origin-session","limit":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			callSecretaryWorkspace = func(_ context.Context, agentID string, request cloud.SecretaryToolRequest) (json.RawMessage, error) {
+				assert.Equal(t, "agent_runtime", agentID)
+				assert.Equal(t, "execution-session", request.SessionID)
+				assert.Equal(t, "summaries", request.Tool)
+				assert.JSONEq(t, arguments, request.ArgumentsJSON)
+				return json.RawMessage(`{"items":[{"summary_id":"node-1","revision":9007199254740993,"title":"Search","body":"Use ES"},{"summary_id":"node-2","revision":1,"title":"Deployment","body":"Docker"}],"next_cursor":"opaque+next"}`), nil
+			}
+			result, err := callConversationMCPTool(t.Context(), json.RawMessage(`{"name":"workspace_summaries","arguments":`+arguments+`}`))
+			require.NoError(t, err)
+			assert.False(t, result.IsError)
+			assert.Contains(t, result.Content[0].Text, `"revision":9007199254740993`)
+			assert.Contains(t, result.Content[0].Text, `"next_cursor":"opaque+next"`)
+		})
+	}
+}
+
+func TestWorkspaceMCPGivenSummaryDiscoveryThenHasBoundedReadOnlyPagination(t *testing.T) {
+	for _, tool := range workspaceMCPTools() {
+		if tool["name"] != "workspace_summaries" {
+			continue
+		}
+		schema := tool["inputSchema"].(workspaceSchema)
+		assert.Equal(t, []string{"session_id"}, schema["required"])
+		properties := schema["properties"].(map[string]any)
+		assert.Equal(t, workspaceString(4096), properties["session_id"])
+		assert.Equal(t, workspaceString(16384), properties["cursor"])
+		limit := properties["limit"].(workspaceSchema)
+		assert.Equal(t, int64(0), limit["minimum"])
+		assert.Equal(t, int64(50), limit["maximum"])
+		assert.Equal(t, 20, limit["default"])
+		return
+	}
+	t.Fatal("workspace_summaries was not advertised")
 }

@@ -179,3 +179,22 @@ func TestSecretaryToolGivenTransportFailureWhenCalledThenMasksDetails(t *testing
 		assert.NotContains(t, message, "node-secret")
 	}
 }
+
+func TestSecretaryToolGivenSummaryListWhenCalledThenPreservesFullPage(t *testing.T) {
+	response := `{"items":[{"summary_id":"node-1","revision":2,"body":"Complete summary"}],"next_cursor":"next-page"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "node-key", r.Header.Get("X-Pax-Key"))
+		var request SecretaryToolRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		assert.Equal(t, "execution-session", request.SessionID)
+		assert.Equal(t, "summaries", request.Tool)
+		assert.JSONEq(t, `{"session_id":"origin-session","limit":20}`, request.ArgumentsJSON)
+		_, _ = w.Write([]byte(`{"code":200,"data":` + response + `}`))
+	}))
+	defer server.Close()
+	data, err := NewClient(server.URL, "node-key").SecretaryTool(t.Context(), "agent", SecretaryToolRequest{
+		SessionID: "execution-session", Capability: "cap", Tool: "summaries", ArgumentsJSON: `{"session_id":"origin-session","limit":20}`,
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, response, string(data))
+}
