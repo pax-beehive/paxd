@@ -232,7 +232,7 @@ func (s *Service) runRemote(ctx context.Context, runtimes []supervisor.ObservedA
 			}
 		}
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, s.scanTimeout)
-		statuses, err := s.sessionStatuses(resolveCtx, spec, sessions)
+		statuses, err := s.sessionStatuses(resolveCtx, spec, sessions, s.managedSessions != nil && reportLocalSessions)
 		resolveCancel()
 		if err != nil {
 			log.Printf("[sessionreporter] route resolution failed remote=%q connection=%q agent=%q: %v", spec.RemoteID, spec.ConnectionID, spec.CloudAgentID, err)
@@ -346,6 +346,7 @@ func (s *Service) sessionStatuses(
 	ctx context.Context,
 	spec SessionScannerSpec,
 	sessions []model.SessionInfo,
+	allowLocalSessions bool,
 ) ([]cloud.SessionStatus, error) {
 	if s.routeResolver == nil {
 		return sessionStatuses(spec, sessions), nil
@@ -365,7 +366,13 @@ func (s *Service) sessionStatuses(
 			return nil, fmt.Errorf("resolve native session %q: %w", nativeSessionID, err)
 		}
 		managerSessionID = strings.TrimSpace(managerSessionID)
-		if !found || managerSessionID == "" || isSecretaryWorkSession(managerSessionID) {
+		// A missing route is expected for an opted-in native CLI session.
+		// Manager normalizes this native identity to its own stable session ID.
+		// An existing, unbound ACP route must still wait for session/new binding.
+		if !found && allowLocalSessions {
+			managerSessionID = session.SessionID
+		}
+		if managerSessionID == "" || (!found && !allowLocalSessions) || isSecretaryWorkSession(managerSessionID) {
 			continue
 		}
 		agentType := firstNonEmpty(session.AgentType, spec.AgentType, spec.Harness)
