@@ -122,7 +122,9 @@ These interfaces are intentionally business-shaped. Transport-specific request s
 
 ## Harness authentication
 
-`harness_auth.login` and `harness_auth.status` expose short-lived Claude and Codex native CLI
-login sessions through the shared control layer. Login commands bypass the
+`harness_auth.login` and `harness_auth.status` expose short-lived, actor-scoped
+paxl authentication attempts through the shared control layer. paxl owns native
+authentication; request/control-WebSocket disconnection does not cancel a running
+attempt. Commands and submitted prompt input bypass the
 durable command journal so authorization codes are never persisted there.
 See [the login protocol and lifecycle](../harnessauth/README.md).
