@@ -1,7 +1,8 @@
 # Harness authentication model proposal
 
-Status: proposed replacement for the current Claude/Codex protocol; the general
-multi-provider and multi-credential model is not implemented.
+Status: paxl delegation, multi-provider prompts and ephemeral attempt lifecycle
+are implemented; see README.md for the current protocol. The richer credential
+contexts, account enumeration and ordered pools below remain proposed.
 
 Deferred implementation: [KEV-92](https://linear.app/kevin-geng/issue/KEV-92).
 
@@ -165,35 +166,38 @@ clients cannot claim a user identity in an arbitrary request field.
 
 The attempt token and challenge ID are internal protocol guards, not CLI session
 management. They stop a delayed response from being submitted to a newer login.
-A fresh paxl invocation resolves the current owned attempt and submits against
-that exact token. Frontends retain the token from the displayed challenge. An
+Local paxl owns one foreground native login; it never queries paxd to continue
+a previous invocation. Frontends retain the token from the displayed challenge. An
 explicit old token is never retargeted; native OAuth state validation remains
 necessary for a pasted code from an old flow.
 
-paxd owns the process and stdin/PTY as required by the adapter. The deadline is
+paxd owns the paxl child. paxl owns the native process/SDK and its input.
+PTY transport remains separate fallback work. The deadline is
 five minutes or the provider's earlier expiry. Polling and repeated starts do
 not extend it. Client disconnect does not cancel it; shutdown or expiry kills
 and reaps the process. Terminal outcomes have bounded retention for polling.
 No public session list/create/update/delete commands are required. Credential
 removal, activation, and pool-priority editing are outside this change.
 
-## Proposed CLI
+## Current local CLI and future credential selectors
 
+```sh
 paxl auth status --harness claude
 paxl auth status --harness hermes --provider anthropic
 paxl auth login --harness claude --method console
-paxl auth login --harness hermes --provider anthropic --method oauth --add
-paxl auth login --harness hermes --credential <id> --method oauth
+paxl auth login --harness hermes --provider anthropic --method oauth
 paxl auth login --harness codex --method api-key --secret-stdin
-paxl auth login --harness claude --code-stdin
+```
 
---credential implies targeted replacement; --add and --credential conflict.
-The API uses typed intent values. Provider can be inferred from a stable
-credential target. Missing required choices are interactive prompts only on a
-TTY; machine callers receive a structured selection_required result.
---secret-stdin can establish a secret-input attempt and complete it within one
-CLI invocation. --code-stdin continues the current owned browser-code attempt.
-No --session flag and no local CLI daemon are introduced.
+Each local invocation executes native authentication itself. Paste authorization
+codes in that running invocation; there is no `--code-stdin` continuation or
+`--socket` remote-login entry. The Console instead drives paxd-owned attempts
+through versioned paxl JSONL events/input. SDK selections can be presented as web
+prompts without a terminal. Terminal-only tools use the separate PTY fallback.
+
+Future `--credential` and `--add` selectors remain unimplemented under KEV-92.
+They require native credential identity/intent support and must not introduce a
+second store or resurrect a paxl-to-paxd authentication executor.
 
 ## Migration and acceptance
 

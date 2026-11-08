@@ -13,81 +13,128 @@ type HarnessAuth interface {
 }
 
 type HarnessAuthLoginCommand struct {
-	Harness   string `json:"harness"`
-	Operation string `json:"operation"`
-	Method    string `json:"method,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Code      string `json:"code,omitempty"`
+	Harness     string `json:"harness"`
+	Operation   string `json:"operation"`
+	Action      string `json:"action,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Method      string `json:"method,omitempty"`
+	SecretStdin bool   `json:"secret_stdin,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	PromptID    string `json:"prompt_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	ActorID     string `json:"actor_id,omitempty"`
 }
-
 type HarnessAuthStatusQuery struct {
+	CommandID string `json:"command_id,omitempty"`
 	Harness   string `json:"harness"`
 	SessionID string `json:"session_id,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	ActorID   string `json:"actor_id,omitempty"`
 }
-
+type HarnessAuthChoice struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+}
+type HarnessAuthEvent struct {
+	Version int                 `json:"version"`
+	Type    string              `json:"type"`
+	ID      string              `json:"id,omitempty"`
+	Kind    string              `json:"kind,omitempty"`
+	Message string              `json:"message,omitempty"`
+	URL     string              `json:"url,omitempty"`
+	Code    string              `json:"code,omitempty"`
+	Options []HarnessAuthChoice `json:"options,omitempty"`
+	Result  *HarnessAuthResult  `json:"result,omitempty"`
+}
+type HarnessAuthProvider struct {
+	ID             string   `json:"id"`
+	Label          string   `json:"label,omitempty"`
+	Methods        []string `json:"methods,omitempty"`
+	ProfileID      string   `json:"profile_id,omitempty"`
+	CredentialType string   `json:"credential_type,omitempty"`
+	Source         string   `json:"source,omitempty"`
+}
+type HarnessAuthResult struct {
+	Harness        string                `json:"harness"`
+	State          string                `json:"state"`
+	Provider       string                `json:"provider,omitempty"`
+	Method         string                `json:"method,omitempty"`
+	Providers      []HarnessAuthProvider `json:"providers,omitempty"`
+	Message        string                `json:"message,omitempty"`
+	RuntimeVersion string                `json:"runtime_version,omitempty"`
+	LoggedIn       *bool                 `json:"logged_in,omitempty"`
+	AuthMethod     string                `json:"auth_method,omitempty"`
+}
 type HarnessAuthView struct {
-	Harness          string `json:"harness"`
-	SessionID        string `json:"session_id,omitempty"`
-	State            string `json:"state"`
+	ProtocolVersion int                `json:"protocol_version"`
+	Harness         string             `json:"harness"`
+	SessionID       string             `json:"session_id,omitempty"`
+	State           string             `json:"state"`
+	Method          string             `json:"method,omitempty"`
+	ExpiresAt       string             `json:"expires_at,omitempty"`
+	ErrorCode       string             `json:"error_code,omitempty"`
+	Prompt          *HarnessAuthEvent  `json:"prompt,omitempty"`
+	Events          []HarnessAuthEvent `json:"events,omitempty"`
+	Result          *HarnessAuthResult `json:"result,omitempty"`
+	// Native notice fields remain useful for clients that show a single challenge.
 	AuthorizationURL string `json:"authorization_url,omitempty"`
-	Method           string `json:"method,omitempty"`
 	UserCode         string `json:"user_code,omitempty"`
-	ExpiresAt        string `json:"expires_at,omitempty"`
 	LoggedIn         *bool  `json:"logged_in,omitempty"`
 	AuthMethod       string `json:"auth_method,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
 }
 
-func (c HarnessAuthLoginCommand) Validate() error {
-	if c.Harness != "claude" && c.Harness != "codex" {
-		return invalid("harness", "authentication is supported for claude and codex")
+func validAuthHarness(h string) bool {
+	switch h {
+	case "claude", "codex", "kimi", "pi", "gemini", "dsh", "dscode", "opencode", "kiro", "hermes", "openclaw", "antigravity":
+		return true
 	}
-	if len(c.SessionID) > 128 {
-		return invalid("session_id", "invalid login session id")
+	return false
+}
+func validAuthSelector(value string) bool {
+	return len(value) <= 128 && !strings.HasPrefix(value, "-") && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\r\n\x00")
+}
+func (c HarnessAuthLoginCommand) Validate() error {
+	if !validAuthHarness(c.Harness) {
+		return invalid("harness", "unknown authentication harness")
+	}
+	if !validAuthSelector(c.SessionID) || !validAuthSelector(c.ActorID) {
+		return invalid("session_id", "invalid authentication scope")
 	}
 	switch c.Operation {
 	case "start":
-		if c.SessionID != "" {
-			return invalid("session_id", "start accepts no login handle")
+		if c.SessionID != "" || c.Code != "" || c.PromptID != "" {
+			return invalid("harness_auth_login", "start accepts no handle or input; submit only after a prompt")
 		}
-		if c.Harness == "claude" {
-			if c.Method != "" && c.Method != "subscription" && c.Method != "console" {
-				return invalid("method", "Claude supports subscription or console")
-			}
-			if c.Code != "" {
-				return invalid("code", "Claude start does not accept a secret")
-			}
-		} else {
-			switch c.Method {
-			case "", "device":
-				if c.Code != "" {
-					return invalid("code", "device login does not accept a secret")
-				}
-			case "api-key", "access-token":
-				if !validAuthInput(c.Code) {
-					return invalid("code", "secret input must be one non-empty line of at most 4096 bytes")
-				}
-			default:
-				return invalid("method", "Codex supports device, api-key, or access-token")
-			}
+		if c.Action != "" && c.Action != "login" && c.Action != "logout" {
+			return invalid("action", "expected login or logout")
+		}
+		if !validAuthSelector(c.Method) || !validAuthSelector(c.Provider) || !validAuthSelector(c.Profile) {
+			return invalid("harness_auth_login", "invalid authentication selector")
 		}
 	case "submit":
-		if c.Harness != "claude" || c.Method != "" || !validAuthInput(c.Code) {
-			return invalid("harness_auth_login", "submit accepts a Claude authorization code, without a method")
+		if c.SessionID == "" || !validAuthSelector(c.PromptID) || c.PromptID == "" || !validAuthInput(c.Code) || c.Method != "" || c.Provider != "" || c.Profile != "" || c.SecretStdin || c.Action != "" {
+			return invalid("harness_auth_login", "submit requires a session, current prompt id and one input line")
 		}
 	case "cancel":
-		if c.SessionID == "" || c.Code != "" || c.Method != "" {
-			return invalid("harness_auth_login", "cancel requires a session id and no code or method")
+		if c.SessionID == "" || c.Code != "" || c.Method != "" || c.PromptID != "" || c.Provider != "" || c.Profile != "" || c.SecretStdin || c.Action != "" {
+			return invalid("harness_auth_login", "cancel requires only a session id")
 		}
 	default:
-		return invalid("operation", "expected start, submit, or cancel")
+		return invalid("operation", "expected start, submit or cancel")
 	}
 	return nil
 }
-
 func (q HarnessAuthStatusQuery) Validate() error {
-	if (q.Harness != "claude" && q.Harness != "codex") || len(q.SessionID) > 128 {
-		return invalid("harness_auth_status", "expected claude or codex and an optional login session id")
+	if !validAuthHarness(q.Harness) || !validAuthSelector(q.SessionID) || !validAuthSelector(q.CommandID) || !validAuthSelector(q.Provider) || !validAuthSelector(q.ActorID) {
+		return invalid("harness_auth_status", "invalid harness or authentication selector")
+	}
+	if q.Operation != "" && q.Operation != "status" && q.Operation != "methods" && q.Operation != "capabilities" {
+		return invalid("operation", "expected status, methods or capabilities")
+	}
+	if (q.SessionID != "" || q.CommandID != "") && (q.Operation == "methods" || q.Operation == "capabilities" || q.Provider != "") {
+		return invalid("harness_auth_status", "attempt lookup accepts only its session id")
 	}
 	return nil
 }

@@ -16,10 +16,10 @@ import (
 
 func TestCancellationStopsLoginDescendants(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "descendant-completed")
-	script := fmt.Sprintf("(sleep 0.5; touch '%s') >/dev/null 2>&1 &\nprintf '%%s\\n' '%s'\nprintf 'Paste code here > '\nwait\n", marker, testURL)
+	script := fmt.Sprintf("(sleep 0.5; touch '%s') >/dev/null 2>&1 &\nprintf '%%s\\n' '{\"version\":1,\"type\":\"prompt\",\"id\":\"one\",\"kind\":\"secret\"}'\nwait\n", marker)
 	m := fakeCLI(t, script, time.Minute)
 	view := startLogin(t, m)
-	awaitState(t, m, view.SessionID, "awaiting_code")
+	awaitState(t, m, view.SessionID, "awaiting_input")
 	_, err := m.Login(context.Background(), testOwner, "cancel", control.HarnessAuthLoginCommand{Harness: "claude", Operation: "cancel", SessionID: view.SessionID})
 	require.NoError(t, err)
 	m.Close()
