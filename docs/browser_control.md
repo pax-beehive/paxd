@@ -13,7 +13,7 @@ Native requests use loopback 7331 and the installed admin token selected by
 `~/.config/agent-browser-native/data-dir`. RFB connects only to loopback 5900,
 reads `~/.local/share/agent-browser/secrets/vnc-password`, performs RFB 3.8 VNC
 password authentication locally, and presents a private authenticated channel.
-VNC sessions are random, bound to the authenticated remote source, capped at two,
+VNC sessions are random, bound to the authenticated remote source, limited to one interactive controller,
 expire after 30 idle seconds / 30 minutes total, and close on sequence mismatch
 or buffer overflow. An ambiguous exchange must not be retried.
 
@@ -51,3 +51,26 @@ Deploy together with the matching browser runtime, Manager and Console changes.
 See agent-browser-runtime `docs/pax-browser-mvp.md` for the full rollout and
 native one-use password lifecycle. Restarting paxd interrupts MCP processes;
 source changes alone do not update the running daemon.
+
+
+Docker takeover text input uses `view` with
+`{"source":"docker","action":{"type":"text","vncID":"...","seq":0,"text":"..."}}`.
+It requires a live initialized VNC session owned by the authenticated source,
+uses the same monotonically increasing sequence as `vnc_exchange`, and permits
+at most 2000 Unicode characters. Replay or ambiguous execution retires that
+session. Preview-only callers do not get an interactive ID. Text is transient;
+it is not stored as an ACP event, command history, log payload or argv value.
+
+paxd invokes only the fixed `agent-browser` Docker container's `desktop-text.cjs`
+helper under `flock`, with JSON on stdin. It accepts no caller-supplied executable,
+container name or shell syntax. The node user needs access to the Docker CLI and
+engine. Standard macOS Docker installation paths are supported for LaunchAgents
+without a shell PATH. The helper owns a temporary UTF-8 clipboard, checks window
+focus and dispatches a single paste; acknowledgement means dispatch, not proof
+that the remote application stored the value. Inspect the field after a failure
+and do not replay it automatically. Runtime image and Console must be updated
+with paxd; there is no fallback to simulated Unicode key presses.
+
+A successful new interactive takeover retires the prior viewer connection.
+Both text and RFB input from the retired ID are rejected. Ordinary preview
+captures do not replace the controller.
