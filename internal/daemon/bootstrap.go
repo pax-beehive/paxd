@@ -29,6 +29,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
+	"github.com/pax-beehive/paxd/internal/mobilecontrol"
 	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
@@ -229,6 +230,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		PaxdLifecycle:       maintenance,
 		SecretChannel:       secretChannelRegistry,
 		BrowserControl:      &browsercontrol.Client{},
+		MobileControl:       &mobilecontrol.Client{},
 		ArtifactFetch:       artifactFetches,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
