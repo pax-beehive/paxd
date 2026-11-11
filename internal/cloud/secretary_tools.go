@@ -33,18 +33,19 @@ func (e *SecretaryToolError) Unwrap() error { return e.cause }
 
 func secretaryFailure(code string, cause error) *SecretaryToolError {
 	messages := map[string]string{
-		"invalid_request":     "The workspace tool request is invalid.",
-		"unauthenticated":     "Manager authentication failed.",
-		"forbidden":           "Workspace access was denied or the execution is no longer active.",
-		"not_found":           "The source was not found or is no longer accessible.",
-		"version_unavailable": "The referenced source version is unavailable; read the source again.",
-		"version_mismatch":    "The source version changed; read the source again.",
-		"version_conflict":    "The source version changed or is unavailable; read the source again.",
-		"rate_limited":        "Manager rate limit reached; retry later.",
-		"invalid_response":    "Manager returned an invalid workspace response.",
-		"canceled":            "The workspace request was canceled.",
-		"timeout":             "The workspace request timed out; retry later.",
-		"unavailable":         "Workspace tools are unavailable; continue with the supplied context or retry later.",
+		"invalid_request":        "The workspace tool request is invalid.",
+		"unauthenticated":        "Manager authentication failed.",
+		"authorization_required": "Workspace search scope is not authorized. Default permission covers all sessions of this agent (scope: {\"agent_ids\":[\"self\"],\"session_ids\":[\"*\"]}), including under PAX auto approve. Request a turn-scoped expansion separately with workspace_request_access unless the user preauthorized it. PAX auto approve can approve that explicit request. Search never narrows the scope or requests access automatically.",
+		"forbidden":              "Workspace access was denied or the execution is no longer active.",
+		"not_found":              "The source was not found or is no longer accessible.",
+		"version_unavailable":    "The referenced source version is unavailable; read the source again.",
+		"version_mismatch":       "The source version changed; read the source again.",
+		"version_conflict":       "The source version changed or is unavailable; read the source again.",
+		"rate_limited":           "Manager rate limit reached; retry later.",
+		"invalid_response":       "Manager returned an invalid workspace response.",
+		"canceled":               "The workspace request was canceled.",
+		"timeout":                "The workspace request timed out; retry later.",
+		"unavailable":            "Workspace tools are unavailable; continue with the supplied context or retry later.",
 	}
 	message, ok := messages[code]
 	if !ok {
@@ -95,6 +96,10 @@ func (c *Client) SecretaryTool(ctx context.Context, agentID string, request Secr
 		code, _ := SecretaryToolFailure(err)
 		return nil, secretaryFailure(code, context.Cause(ctx))
 	}
+	return readWorkspaceToolResponse(ctx, response, false)
+}
+
+func readWorkspaceToolResponse(ctx context.Context, response *http.Response, searchAuthorization bool) (json.RawMessage, error) {
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, secretaryToolMaxBytes+1))
 	if err != nil {
@@ -120,6 +125,9 @@ func (c *Client) SecretaryTool(ctx context.Context, agentID string, request Secr
 		}
 	}
 	if status < 200 || status >= 300 {
+		if searchAuthorization && status == http.StatusForbidden {
+			return nil, secretaryFailure("authorization_required", nil)
+		}
 		return nil, secretaryStatusFailure(status, envelope.Message)
 	}
 	if !valid || len(envelope.Data) == 0 || string(envelope.Data) == "null" {

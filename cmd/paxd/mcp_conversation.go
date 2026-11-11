@@ -397,7 +397,7 @@ func conversationMCPTools() []map[string]any {
 			},
 		},
 	}
-	return tools
+	return append(tools, ordinaryWorkspaceMCPTools()...)
 }
 
 func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mcpToolCallResult, error) {
@@ -410,6 +410,9 @@ func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mc
 			return callWorkspaceMCPTool(ctx, params.Name, params.Arguments)
 		}
 		return mcpToolCallResult{}, fmt.Errorf("tool unavailable in Secretary execution")
+	}
+	if params.Name == "workspace_search" || params.Name == "workspace_request_access" {
+		return callOrdinaryWorkspaceMCPTool(ctx, params.Name, params.Arguments)
 	}
 	args := map[string]any{}
 	if len(params.Arguments) > 0 {

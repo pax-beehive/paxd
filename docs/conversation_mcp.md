@@ -250,13 +250,78 @@ paxd mcp conversation reply "wozhidaodaan"
 However, the target ACP integration should use `paxd mcp conversation serve` as a
 stdio MCP server registered once at `session/new`.
 
+## Turn-scoped workspace search
+
+Ordinary sessions also expose `workspace_request_access` and `workspace_search`.
+Default permission covers this agent's own sessions. Every search must declare
+both agent and session scope, for example:
+
+```json
+{"query":"cicd","scope":{"agent_ids":["self"],"session_ids":["*"]}}
+```
+
+This default also applies under PAX auto approve. Starting a turn never grants
+cross-agent access automatically. PAX auto approve only automatically approves
+explicit `workspace_request_access` calls; user-provided turn preauthorization
+can separately authorize the requested expansion.
+
+`self` resolves to the calling agent. A sole `*` in `agent_ids` selects all
+agents owned by the user and requires an approved expansion; a sole `*` in
+`session_ids` selects all sessions within the requested agent scope. Either
+list can instead contain exact IDs. Missing, empty, or mixed-wildcard scopes are
+rejected. Top-level `session_ids` is not accepted by ordinary search. Declare the
+whole intended scope: Manager rejects unauthorized scope instead of silently
+narrowing it to the caller's own sessions. Successful responses include the
+scope resolved by Manager.
+
+Request an expansion separately before searching other agents, unless the user
+preauthorized it for the turn. The request accepts optional `queries`,
+`agent_ids`, `session_ids`, and `reason`:
+
+```json
+{"queries":["cicd"],"agent_ids":["*"],"session_ids":["*"],"reason":"Find previous CI decisions across agents"}
+```
+
+All three request lists default to `["*"]`. A sole `*` allows any complete
+query, agent, or session owned by the authenticated user; it cannot be combined
+with other list items. Other query values are complete-query allowlist entries,
+not substring patterns. Each list has at most 50 entries. Query values have at
+most 256 Unicode characters and IDs at most 4,096; the optional reason has at
+most 4,096. Request `agent_ids` also accepts `self`.
+
+The helper posts `{session_id, tool, arguments_json}` to
+`/api/v1/node/agents/:agent_id/workspace/tools` using stored node credentials.
+Caller agent/session identity comes from the injected MCP environment. Manager
+resolves the current active turn and checks the explicit scope and its
+authorization for every request.
+The helper never sends user-selected owner, turn, or capability fields, and does
+not cache authorization across calls or turns.
+
+Access requests return `status` (`pending`, `approved`, or `denied`),
+`approval_id`, `turn_id`, and `scope`. PAX auto approve can approve eligible
+requests. A pending response returns immediately so the agent can continue other
+work while the user decides. Search itself never creates an approval request.
+A search rejected with HTTP 403 returns the safe MCP error code
+`authorization_required` with the default agent boundary and instructions to
+request an expansion or use the Console's turn preauthorization before retrying.
+Search never creates an access request, retries at a narrower scope, or falls
+back to a different data set. Expanded authorization expires when its turn ends.
+Ordinary sessions do not expose workspace read, expand, history, or summary tools.
+
+Deploy a compatible Manager before enabling this client path. Older Managers
+return the safe `unavailable` tool error; arbitrary response bodies and node
+credentials are never included in error output.
+
 ## Optional Secretary workspace lookups
 
 Manager-created Secretary executions expose only read-only
-`workspace_search`, `workspace_read`, `workspace_expand` and `workspace_history`
+`workspace_search`, `workspace_read`, `workspace_expand`, `workspace_history`,
+and `workspace_summaries`
 through this same stdio server when `PAX_SECRETARY_CAPABILITY` is injected.
-Ordinary discovery remains unchanged; the four ordinary discovery/messaging/
-artifact tools are unavailable inside the Secretary context, including direct
+Their schemas retain the Secretary contract, including optional top-level
+`session_ids` on search and no ordinary `scope` field.
+The ordinary discovery/messaging/artifact and access-request tools are
+unavailable inside the Secretary context, including direct
 calls. The helper uses existing local node
 credentials; Manager validates the execution grant and current owner on every
 call. No user API key or local MCP configuration is needed. See

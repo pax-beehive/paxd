@@ -373,7 +373,7 @@ func TestMCPConversationServeGivenToolsListWhenCalledThenReturnsConversationAndA
 	require.Len(t, responses, 2)
 	assert.Equal(t, "pax-conversation", responses[0]["result"].(map[string]any)["serverInfo"].(map[string]any)["name"])
 	tools := responses[1]["result"].(map[string]any)["tools"].([]any)
-	require.Len(t, tools, 4)
+	require.Len(t, tools, 6)
 	assert.Equal(t, "list_agents", tools[0].(map[string]any)["name"])
 	assert.Equal(t, "ask", tools[1].(map[string]any)["name"])
 	assert.Equal(t, "reply", tools[2].(map[string]any)["name"])
