@@ -29,7 +29,11 @@ func workspaceEnum(values ...string) workspaceSchema {
 	return workspaceSchema{"type": "string", "enum": values}
 }
 func workspaceObject(properties map[string]any, required ...string) workspaceSchema {
-	return workspaceSchema{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+	schema := workspaceSchema{"type": "object", "properties": properties, "additionalProperties": false}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
 }
 func workspaceArray(items workspaceSchema, maximum int) workspaceSchema {
 	return workspaceSchema{"type": "array", "items": items, "maxItems": maximum}
@@ -87,27 +91,10 @@ var callSecretaryWorkspace = func(ctx context.Context, agentID string, request c
 }
 
 func callWorkspaceMCPTool(ctx context.Context, name string, raw json.RawMessage) (mcpToolCallResult, error) {
-	var arguments any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if len(raw) > 4*1024*1024 || decoder.Decode(&arguments) != nil {
-		return mcpToolCallResult{}, errors.New("invalid workspace tool arguments")
+	args, err := parseWorkspaceArguments(name, raw, workspaceMCPTools())
+	if err != nil {
+		return mcpToolCallResult{}, err
 	}
-	var extra any
-	if decoder.Decode(&extra) != io.EOF {
-		return mcpToolCallResult{}, errors.New("invalid workspace tool arguments")
-	}
-	var schema workspaceSchema
-	for _, tool := range workspaceMCPTools() {
-		if tool["name"] == name {
-			schema = tool["inputSchema"].(workspaceSchema)
-			break
-		}
-	}
-	if schema == nil || !validWorkspaceValue(arguments, schema) {
-		return mcpToolCallResult{}, errors.New("invalid workspace tool arguments")
-	}
-	args := arguments.(map[string]any)
 	if name == "workspace_history" && workspacePositive(args["before_seq"]) && workspacePositive(args["after_seq"]) {
 		return mcpToolCallResult{}, errors.New("history accepts only one pagination direction")
 	}
@@ -131,6 +118,34 @@ func callWorkspaceMCPTool(ctx context.Context, name string, raw json.RawMessage)
 	if err != nil {
 		return workspaceMCPFailure(err), nil
 	}
+	return workspaceMCPData(data)
+}
+
+func parseWorkspaceArguments(name string, raw json.RawMessage, tools []map[string]any) (map[string]any, error) {
+	var arguments any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if len(raw) > 4*1024*1024 || decoder.Decode(&arguments) != nil {
+		return nil, errors.New("invalid workspace tool arguments")
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return nil, errors.New("invalid workspace tool arguments")
+	}
+	var schema workspaceSchema
+	for _, tool := range tools {
+		if tool["name"] == name {
+			schema = tool["inputSchema"].(workspaceSchema)
+			break
+		}
+	}
+	if schema == nil || !validWorkspaceValue(arguments, schema) {
+		return nil, errors.New("invalid workspace tool arguments")
+	}
+	return arguments.(map[string]any), nil
+}
+
+func workspaceMCPData(data json.RawMessage) (mcpToolCallResult, error) {
 	if !json.Valid(data) {
 		return workspaceMCPFailure(errors.New("invalid workspace response")), nil
 	}
@@ -165,7 +180,8 @@ func validWorkspaceValue(value any, schema workspaceSchema) bool {
 			return false
 		}
 		properties := schema["properties"].(map[string]any)
-		for _, key := range schema["required"].([]string) {
+		required, _ := schema["required"].([]string)
+		for _, key := range required {
 			if _, ok = object[key]; !ok {
 				return false
 			}
@@ -179,6 +195,9 @@ func validWorkspaceValue(value any, schema workspaceSchema) bool {
 	case "array":
 		array, ok := value.([]any)
 		if !ok || len(array) > schema["maxItems"].(int) {
+			return false
+		}
+		if minimum, bounded := schema["minItems"].(int); bounded && len(array) < minimum {
 			return false
 		}
 		for _, child := range array {
