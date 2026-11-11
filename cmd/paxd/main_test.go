@@ -45,9 +45,11 @@ func TestAppExposesDaemonLoginSetupAndServiceCommands(t *testing.T) {
 func TestPaxdLoginCommitsRemoteAndLocalSecretRef(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("PAX_NODE_NAME", "Environment name")
 	restore := stubRemoteLogin(t, func(ctx context.Context, spec remotelogin.LoginSpec, opts remotelogin.Options) (remotelogin.LoginResult, error) {
 		assert.Equal(t, "prod", spec.RemoteID)
 		assert.Equal(t, "https://api.example.test", spec.CloudAPIURL)
+		assert.Equal(t, "Work laptop", spec.Node.Name)
 		return remotelogin.LoginResult{
 			RemoteID:    spec.RemoteID,
 			CloudAPIURL: spec.CloudAPIURL,
@@ -62,6 +64,7 @@ func TestPaxdLoginCommitsRemoteAndLocalSecretRef(t *testing.T) {
 		"login",
 		"--remote", "prod",
 		"--cloud-url", "https://api.example.test",
+		"--name", " Work laptop ",
 	})
 	require.NoError(t, err)
 
@@ -514,6 +517,7 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 		calls = append(calls, "login:"+spec.RemoteID)
 		assert.Equal(t, "default", spec.RemoteID)
 		assert.Equal(t, config.DefaultCloudAPIURL, spec.CloudAPIURL)
+		assert.Equal(t, "Work server", spec.Node.Name)
 		return remotelogin.LoginResult{
 			RemoteID:    spec.RemoteID,
 			CloudAPIURL: spec.CloudAPIURL,
@@ -549,6 +553,7 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	err := app.Run(context.Background(), []string{
 		"paxd",
 		"setup",
+		"--name", "Work server",
 	})
 	require.NoError(t, err)
 
@@ -567,12 +572,13 @@ func TestPaxdSetupLogsInInstallsStartsAndVerifies(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(home, ".paxd", "secrets", "remotes", "default", "cf_access_client_secret"))
 }
 
-func TestPaxdSetupExposesCloudURLAndTokenEnvironmentOption(t *testing.T) {
+func TestPaxdSetupExposesNameCloudURLAndTokenEnvironmentOption(t *testing.T) {
 	cmd := cmdSetupCommand()
 
-	require.Len(t, cmd.Flags, 2)
+	require.Len(t, cmd.Flags, 3)
+	assert.Contains(t, flagNames(cmd.Flags), "name")
 	assert.Contains(t, flagNames(cmd.Flags), "registration-token-env")
-	flag, ok := cmd.Flags[0].(*cli.StringFlag)
+	flag, ok := cmd.Flags[1].(*cli.StringFlag)
 	require.True(t, ok)
 	assert.Equal(t, "cloud-url", flag.Names()[0])
 	assert.Equal(t, config.DefaultCloudAPIURL, flag.Value)

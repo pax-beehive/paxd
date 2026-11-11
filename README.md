@@ -28,15 +28,20 @@ Console 应把下面的占位符替换成实际 token，让用户直接复制完
 
 ```bash
 curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxd/install.sh |
-  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN='<Console token>' bash
+  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN='<Console token>' bash -s -- --name default
 ```
 
 方式二：从电脑终端发起原有浏览器登录。运行后按照终端显示的链接和配对码完成授权：
 
 ```bash
 curl -fsSL --max-redirs 1 https://api.paxworkspace.net/api/v1/public/paxd/install.sh |
-  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN= bash
+  PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN= bash -s -- --name default
 ```
+
+Replace `default` with the device name you want in Console; quote names with
+spaces, for example `--name "My MacBook"`. Existing installations can use
+`paxd setup --name "My MacBook"`. `paxd login --name "My MacBook"` also accepts
+the name. Without `--name`, the existing configuration and `PAX_NODE_NAME` apply.
 
 两种方式均由 installer 执行 `paxd setup`，token 方式额外传入
 `--registration-token-env`。两个工具都安装成功后才开始设备注册；下载、校验或安装
