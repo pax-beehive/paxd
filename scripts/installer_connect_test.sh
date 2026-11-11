@@ -47,12 +47,13 @@ BIN
 
 run_installer() (
   local scenario="$1"
+  shift
   export PAX_INSTALL_DIR="$test_dir/$scenario/bin with spaces"
   export PAX_TEST_EVENTS="$test_dir/$scenario/events"
   mkdir -p "$PAX_INSTALL_DIR"
   : >"$PAX_TEST_EVENTS"
   unset SHELL
-  main
+  main "$@"
 )
 
 assert_cleaned() {
@@ -65,7 +66,7 @@ assert_cleaned() {
 }
 
 PAX_SETUP_AFTER_INSTALL=1 PAX_REGISTRATION_TOKEN=test-onetime-token \
-  PAX_CLOUD_URL=https://cloud.example/ run_installer token >"$test_dir/token.log" 2>&1 ||
+  PAX_CLOUD_URL=https://cloud.example/ run_installer token --name 'My work computer' >"$test_dir/token.log" 2>&1 ||
   fail_test 'token connection did not prepare both tools before setup'
 token_events="$test_dir/token/events"
 [[ -x "$test_dir/token/bin with spaces/paxl" ]] || fail_test 'paxl was not installed'
@@ -73,6 +74,8 @@ token_events="$test_dir/token/events"
 grep -Fxq 'arg:--registration-token-env' "$token_events" || fail_test 'token mode missing'
 grep -Fxq 'arg:https://cloud.example' "$token_events" || fail_test 'cloud URL missing'
 grep -Fxq 'token-present' "$token_events" || fail_test 'setup did not receive token'
+grep -Fxq 'arg:--name' "$token_events" || fail_test 'setup did not receive the name option'
+grep -Fxq 'arg:My work computer' "$token_events" || fail_test 'setup did not receive the name as one argument'
 if grep -Fq 'test-onetime-token' "$test_dir/token.log" "$token_events"; then
   fail_test 'token value was printed'
 fi

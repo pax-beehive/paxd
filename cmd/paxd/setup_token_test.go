@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,9 @@ func TestTokenSetupRegistersPersistsStartsAndDoesNotPair(t *testing.T) {
 		registrations++
 		assert.Equal(t, "/api/v1/node/register", r.URL.Path)
 		assert.Equal(t, "one-time-secret", r.Header.Get("X-Registration-Token"))
+		var registration cloud.RegisterNodeRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&registration))
+		assert.Equal(t, "My server", registration.Name)
 		fmt.Fprint(w, `{"code":200,"data":{"node_id":"node_quick","api_key":"node-key-secret"}}`)
 	}))
 	defer server.Close()
@@ -43,7 +47,7 @@ func TestTokenSetupRegistersPersistsStartsAndDoesNotPair(t *testing.T) {
 	app := newApp()
 	var output bytes.Buffer
 	app.Writer = &output
-	args := []string{"paxd", "setup", "--cloud-url", server.URL, "--registration-token-env"}
+	args := []string{"paxd", "setup", "--cloud-url", server.URL, "--registration-token-env", "--name", "My server"}
 	require.NoError(t, app.Run(context.Background(), args))
 	assert.Equal(t, []string{"install", "restart", "verify"}, actions)
 	assert.Equal(t, 1, registrations)
