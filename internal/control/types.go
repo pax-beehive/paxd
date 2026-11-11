@@ -558,6 +558,7 @@ const (
 	QueryCommandGet            QueryType = "command.get"
 	QueryAttachmentLocalStatus QueryType = "attachment.local_status"
 	QueryBrowserControl        QueryType = "browser.control"
+	QueryMobileControl         QueryType = "mobile.control"
 	QueryHarnessAuthStatus     QueryType = "harness_auth.status"
 	QuerySecretChannelOpen     QueryType = "secret_channel.open"
 	QueryArtifactFetchCheck    QueryType = "artifact_fetch.check"
@@ -582,6 +583,7 @@ type Query struct {
 	GetCommand               *GetCommandQuery               `json:"get_command,omitempty"`
 	GetAttachmentLocalStatus *GetAttachmentLocalStatusQuery `json:"get_attachment_local_status,omitempty"`
 	BrowserControl           *BrowserControlQuery           `json:"browser_control,omitempty"`
+	MobileControl            *MobileControlQuery            `json:"mobile_control,omitempty"`
 	HarnessAuthStatus        *HarnessAuthStatusQuery        `json:"harness_auth_status,omitempty"`
 	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
 	CheckArtifactFetch       *CheckArtifactFetchQuery       `json:"check_artifact_fetch,omitempty"`
@@ -597,6 +599,15 @@ type BrowserControlQuery struct {
 }
 
 type BrowserControl interface {
+	Request(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+}
+
+type MobileControlQuery struct {
+	Operation string          `json:"operation"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+type MobileControl interface {
 	Request(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
 }
 
@@ -760,6 +771,7 @@ type QueryResult struct {
 	Command               *CommandView                 `json:"command,omitempty"`
 	AttachmentLocalStatus *AttachmentLocalStatusResult `json:"attachment_local_status,omitempty"`
 	BrowserControl        json.RawMessage              `json:"browser_control,omitempty"`
+	MobileControl         json.RawMessage              `json:"mobile_control,omitempty"`
 	SecretChannelOpen     *SecretChannelOpenResult     `json:"secret_channel_open,omitempty"`
 	ArtifactFetchCheck    *ArtifactFetchCheckResult    `json:"artifact_fetch_check,omitempty"`
 }

@@ -8,6 +8,11 @@ All transports must enter paxd control behavior through this package:
 - optional `127.0.0.1` debug HTTP API
 - remote node-control WebSocket
 
+The transient `browser.control` and `mobile.control` operator queries forward
+only named operations through narrow node-local adapters. Mobile configuration,
+credentials and loopback destinations stay on the node; see
+[`docs/mobile_control.md`](../../docs/mobile_control.md).
+
 This package owns:
 
 - typed command/query contracts
