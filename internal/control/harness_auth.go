@@ -26,16 +26,25 @@ type HarnessAuthStatusQuery struct {
 }
 
 type HarnessAuthView struct {
-	Harness          string `json:"harness"`
-	SessionID        string `json:"session_id,omitempty"`
-	State            string `json:"state"`
-	AuthorizationURL string `json:"authorization_url,omitempty"`
-	Method           string `json:"method,omitempty"`
-	UserCode         string `json:"user_code,omitempty"`
-	ExpiresAt        string `json:"expires_at,omitempty"`
-	LoggedIn         *bool  `json:"logged_in,omitempty"`
-	AuthMethod       string `json:"auth_method,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
+	Harness          string              `json:"harness"`
+	SessionID        string              `json:"session_id,omitempty"`
+	State            string              `json:"state"`
+	AuthorizationURL string              `json:"authorization_url,omitempty"`
+	Method           string              `json:"method,omitempty"`
+	UserCode         string              `json:"user_code,omitempty"`
+	ExpiresAt        string              `json:"expires_at,omitempty"`
+	LoggedIn         *bool               `json:"logged_in,omitempty"`
+	AuthMethod       string              `json:"auth_method,omitempty"`
+	ErrorCode        string              `json:"error_code,omitempty"`
+	Account          *HarnessAuthAccount `json:"account,omitempty"`
+}
+
+// HarnessAuthAccount contains only native-reported public account metadata.
+type HarnessAuthAccount struct {
+	Email        string `json:"email,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	Organization string `json:"organization,omitempty"`
+	Plan         string `json:"plan,omitempty"`
 }
 
 func (c HarnessAuthLoginCommand) Validate() error {

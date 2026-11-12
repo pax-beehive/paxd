@@ -5,6 +5,17 @@ passes a one-time authorization code to its stdin. Claude owns OAuth, token
 refresh, and credential storage. paxd never reads or copies those credentials.
 `claude auth status` verifies successful login and reports the current state.
 
+Logged-in status may include an optional `account` containing native-reported
+`email`, `display_name`, `organization`, and `plan`. Claude uses its JSON status
+fields. Codex ChatGPT/access-token status additionally tries the public
+`codex app-server` `account/read` protocol with `refreshToken: false`; this bounded
+three-second read does not force credential refresh. API keys and unsupported
+CLI versions may not report identity. Failed identity reads preserve the native
+login result and omit the account. Account fields are bounded and allowlisted;
+token files and raw subprocess output are never read or returned by this package.
+Successful login attempts also carry the account from their final native status
+check. Identity metadata is not proof that a provider will accept a model request.
+
 The credential context is the OS account and environment running paxd (including
 HOME and CLAUDE_CONFIG_DIR). Connections with a different account, config directory,
 or credential environment may not use the resulting login. Existing Claude/ACP

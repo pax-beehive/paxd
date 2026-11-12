@@ -242,6 +242,7 @@ func (m *Manager) wait(ctx context.Context, s *session, cmd *exec.Cmd) {
 		s.view.State = "succeeded"
 		s.view.LoggedIn = status.LoggedIn
 		s.view.AuthMethod = status.AuthMethod
+		s.view.Account = status.Account
 	}
 }
 
@@ -286,8 +287,12 @@ func (m *Manager) authStatus(ctx context.Context, harness string) (control.Harne
 		return control.HarnessAuthView{}, authError("status_failed", "could not check Claude authentication")
 	}
 	var raw struct {
-		LoggedIn   *bool  `json:"loggedIn"`
-		AuthMethod string `json:"authMethod"`
+		LoggedIn     *bool           `json:"loggedIn"`
+		AuthMethod   string          `json:"authMethod"`
+		Email        json.RawMessage `json:"email"`
+		DisplayName  json.RawMessage `json:"displayName"`
+		Organization json.RawMessage `json:"orgName"`
+		Plan         json.RawMessage `json:"subscriptionType"`
 	}
 	if json.Unmarshal(output.data, &raw) != nil || raw.LoggedIn == nil {
 		return control.HarnessAuthView{}, authError("status_failed", "invalid Claude authentication status")
@@ -296,7 +301,11 @@ func (m *Manager) authStatus(ctx context.Context, harness string) (control.Harne
 	if *raw.LoggedIn {
 		state = "logged_in"
 	}
-	return control.HarnessAuthView{Harness: "claude", State: state, LoggedIn: raw.LoggedIn, AuthMethod: raw.AuthMethod}, nil
+	view := control.HarnessAuthView{Harness: "claude", State: state, LoggedIn: raw.LoggedIn, AuthMethod: raw.AuthMethod}
+	if *raw.LoggedIn {
+		view.Account = publicAccount(nativeAccountString(raw.Email), nativeAccountString(raw.DisplayName), nativeAccountString(raw.Organization), nativeAccountString(raw.Plan))
+	}
+	return view, nil
 }
 
 type limitedOutput struct{ data []byte }
