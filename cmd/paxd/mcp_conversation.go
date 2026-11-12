@@ -411,7 +411,7 @@ func callConversationMCPTool(ctx context.Context, rawParams json.RawMessage) (mc
 		}
 		return mcpToolCallResult{}, fmt.Errorf("tool unavailable in Secretary execution")
 	}
-	if params.Name == "workspace_search" || params.Name == "workspace_request_access" {
+	if isOrdinaryWorkspaceMCPTool(params.Name) {
 		return callOrdinaryWorkspaceMCPTool(ctx, params.Name, params.Arguments)
 	}
 	args := map[string]any{}

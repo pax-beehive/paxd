@@ -22,7 +22,7 @@ func WorkspaceToolFailure(err error) (string, string) {
 }
 
 // WorkspaceTool uses node authentication without caching turn authorization.
-// Access requests return their pending decision immediately instead of polling.
+// Access, status, and cancellation calls return immediately instead of waiting.
 func (c *Client) WorkspaceTool(ctx context.Context, agentID string, request WorkspaceToolRequest) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		code, _ := WorkspaceToolFailure(err)
@@ -30,7 +30,7 @@ func (c *Client) WorkspaceTool(ctx context.Context, agentID string, request Work
 	}
 	if agentID == "" || agentID == "." || agentID == ".." || strings.ContainsAny(agentID, "/\\?#%\r\n\t ") ||
 		request.SessionID == "" || len(request.SessionID) > 4096 ||
-		(request.Tool != "search" && request.Tool != "request_access") {
+		!validWorkspaceTool(request.Tool) {
 		return nil, secretaryFailure("invalid_request", nil)
 	}
 	var arguments map[string]json.RawMessage
@@ -47,4 +47,13 @@ func (c *Client) WorkspaceTool(ctx context.Context, agentID string, request Work
 		return nil, secretaryFailure(code, context.Cause(ctx))
 	}
 	return readWorkspaceToolResponse(ctx, response, request.Tool == "search")
+}
+
+func validWorkspaceTool(tool string) bool {
+	switch tool {
+	case "search", "request_access", "access_status", "cancel_access":
+		return true
+	default:
+		return false
+	}
 }

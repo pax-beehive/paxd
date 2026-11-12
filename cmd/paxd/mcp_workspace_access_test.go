@@ -21,10 +21,10 @@ func TestOrdinaryWorkspaceMCPGivenNoSecretaryCapabilityWhenListedThenExposesSear
 	for _, tool := range tools {
 		names = append(names, tool["name"].(string))
 	}
-	assert.ElementsMatch(t, []string{"list_agents", "ask", "reply", "publish_artifact", "workspace_search", "workspace_request_access"}, names)
+	assert.ElementsMatch(t, []string{"list_agents", "ask", "reply", "publish_artifact", "workspace_search", "workspace_request_access", "workspace_access_status", "workspace_cancel_access"}, names)
 	for _, tool := range ordinaryWorkspaceMCPTools() {
 		annotations := tool["annotations"].(map[string]any)
-		assert.Equal(t, tool["name"] == "workspace_search", annotations["readOnlyHint"])
+		assert.Equal(t, tool["name"] == "workspace_search" || tool["name"] == "workspace_access_status", annotations["readOnlyHint"])
 		if tool["name"] == "workspace_search" {
 			schema := tool["inputSchema"].(workspaceSchema)
 			assert.ElementsMatch(t, []string{"query", "scope"}, schema["required"])
@@ -36,8 +36,10 @@ func TestOrdinaryWorkspaceMCPGivenNoSecretaryCapabilityWhenListedThenExposesSear
 	assert.Equal(t, []string{"query"}, secretarySchema["required"])
 	assert.Contains(t, secretarySchema["properties"], "session_ids")
 	assert.NotContains(t, secretarySchema["properties"], "scope")
-	_, err := callConversationMCPTool(t.Context(), json.RawMessage(`{"name":"workspace_request_access","arguments":{}}`))
-	require.ErrorContains(t, err, "tool unavailable in Secretary execution")
+	for _, name := range []string{"workspace_request_access", "workspace_access_status", "workspace_cancel_access"} {
+		_, err := callConversationMCPTool(t.Context(), json.RawMessage(`{"name":"`+name+`","arguments":{}}`))
+		require.ErrorContains(t, err, "tool unavailable in Secretary execution")
+	}
 }
 
 func TestOrdinaryWorkspaceMCPGivenAccessRequestWhenPendingThenReturnsWithoutWaiting(t *testing.T) {

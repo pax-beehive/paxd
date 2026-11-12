@@ -18,7 +18,7 @@ import (
 
 func TestWorkspaceMCPGivenCapabilityWhenListingThenAddsOnlyReadOnlyTools(t *testing.T) {
 	t.Setenv("PAX_SECRETARY_CAPABILITY", "")
-	require.Len(t, conversationMCPTools(), 6)
+	require.Len(t, conversationMCPTools(), 8)
 	_, err := callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"workspace_read","arguments":{"ref":{"kind":"message","id":"m1"}}}`))
 	require.Error(t, err)
 	_, err = callConversationMCPTool(context.Background(), json.RawMessage(`{"name":"workspace_summaries","arguments":{"session_id":"source-session"}}`))
