@@ -90,3 +90,30 @@ func TestWorkspaceToolGivenInvalidRequestWhenCalledThenDoesNotSend(t *testing.T)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, calls)
 }
+
+func TestWorkspaceToolGivenLifecycleOperationThenPreservesRequestAndResponse(t *testing.T) {
+	for _, operation := range []string{"access_status", "cancel_access"} {
+		t.Run(operation, func(t *testing.T) {
+			calls := 0
+			response := `{"status":"cancelled","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["*"],"agent_ids":["agent-target"],"session_ids":["*"]},"poll_after_ms":2000}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				assert.Equal(t, "/api/v1/node/agents/agent-1/workspace/tools", r.URL.Path)
+				assert.Equal(t, "node-secret", r.Header.Get("X-Pax-Key"))
+				assert.Empty(t, r.Header.Get("Authorization"))
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.Len(t, body, 3)
+				assert.Equal(t, "caller-session", body["session_id"])
+				assert.Equal(t, operation, body["tool"])
+				assert.JSONEq(t, `{"approval_id":"approval-1"}`, body["arguments_json"].(string))
+				_, _ = w.Write([]byte(`{"code":200,"data":` + response + `}`))
+			}))
+			defer server.Close()
+			data, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{SessionID: "caller-session", Tool: operation, ArgumentsJSON: `{"approval_id":"approval-1"}`})
+			require.NoError(t, err)
+			assert.JSONEq(t, response, string(data))
+			assert.Equal(t, 1, calls)
+		})
+	}
+}

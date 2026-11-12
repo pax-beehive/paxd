@@ -29,16 +29,44 @@ func ordinaryWorkspaceMCPTools() []map[string]any {
 		value["default"] = []string{"*"}
 		return value
 	}
+	timeout := workspaceInteger(0, 86400)
+	timeout["default"] = 600
 	return []map[string]any{
 		search,
 		{
 			"name":        "workspace_request_access",
-			"description": "Request a workspace search permission expansion separately from search. queries lists exact complete queries; agent_ids lists agents (self means this agent); session_ids lists sessions. Each defaults to [\"*\"] for any query, agent, or session owned by the user; * must be the only item. Expansion ends when this turn ends. PAX auto approve can approve requests automatically. A pending response returns immediately: continue other work while the user decides, then retry search with the intended explicit scope after approval.",
+			"description": "Request a workspace search permission expansion separately from search. queries lists exact complete queries; agent_ids lists agents (self means this agent); session_ids lists sessions. Each defaults to [\"*\"]; * must be the only item. timeout_seconds is 0..86400, default 600; 0 means no time deadline, while the turn-end boundary still applies. PAX auto approve can approve explicit requests. This call is nonblocking. Preserve approval_id; while pending, continue other work and query workspace_access_status after poll_after_ms (normally 2000). Use workspace_cancel_access when abandoning the request. Approval does not automatically resume a finished agent; search separately after approval, within the same turn.",
 			"inputSchema": workspaceObject(map[string]any{
 				"queries": accessList(256), "agent_ids": accessList(4096), "session_ids": accessList(4096), "reason": workspaceString(4096),
+				"timeout_seconds": timeout,
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
 		},
+		{
+			"name":        "workspace_access_status",
+			"description": "Query a workspace access request by its returned approval_id. Returns pending, approved, denied, expired, or cancelled with the owning turn and scope. While pending, continue other work and query again after poll_after_ms (normally 2000). This call never waits, requests access, or resumes the agent automatically. Approval remains bound to its turn even when the request has no time deadline.",
+			"inputSchema": workspaceObject(map[string]any{
+				"approval_id": workspaceString(4096),
+			}, "approval_id"),
+			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+		},
+		{
+			"name":        "workspace_cancel_access",
+			"description": "Cancel this session's workspace access request by approval_id when it is no longer needed. If it is already approved, also revoke that grant. Repeating cancellation is safe. Returns its latest status, including cancelled. This call never waits or resumes execution; cancellation does not authorize another turn.",
+			"inputSchema": workspaceObject(map[string]any{
+				"approval_id": workspaceString(4096),
+			}, "approval_id"),
+			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+		},
+	}
+}
+
+func isOrdinaryWorkspaceMCPTool(name string) bool {
+	switch name {
+	case "workspace_search", "workspace_request_access", "workspace_access_status", "workspace_cancel_access":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -62,7 +90,8 @@ func callOrdinaryWorkspaceMCPTool(ctx context.Context, name string, raw json.Raw
 		}
 		return mcpToolCallResult{}, err
 	}
-	if name == "workspace_request_access" {
+	switch name {
+	case "workspace_request_access":
 		for _, key := range []string{"queries", "agent_ids", "session_ids"} {
 			if _, present := args[key]; !present {
 				args[key] = []any{"*"}
@@ -71,10 +100,14 @@ func callOrdinaryWorkspaceMCPTool(ctx context.Context, name string, raw json.Raw
 				return mcpToolCallResult{}, errors.New("invalid workspace access scope")
 			}
 		}
-	} else {
+	case "workspace_search":
 		scope := args["scope"].(map[string]any)
 		if !validWorkspaceScopeList(scope["agent_ids"].([]any)) || !validWorkspaceScopeList(scope["session_ids"].([]any)) {
 			return mcpToolCallResult{}, ordinaryWorkspaceSearchInputError()
+		}
+	case "workspace_access_status", "workspace_cancel_access":
+		if strings.TrimSpace(args["approval_id"].(string)) == "" {
+			return mcpToolCallResult{}, errors.New("approval_id must be nonempty")
 		}
 	}
 	agentID, _, sessionID, err := conversationMCPIdentity()
