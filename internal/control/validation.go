@@ -404,6 +404,7 @@ func (query Query) Validate() error {
 		{QueryBrowserControl, query.BrowserControl != nil, validatePtr(query.BrowserControl)},
 		{QueryMobileControl, query.MobileControl != nil, validatePtr(query.MobileControl)},
 		{QueryHarnessAuthStatus, query.HarnessAuthStatus != nil, validatePtr(query.HarnessAuthStatus)},
+		{QueryHarnessUsageStatus, query.HarnessUsageStatus != nil, validatePtr(query.HarnessUsageStatus)},
 		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
 		{QueryArtifactFetchCheck, query.CheckArtifactFetch != nil, validatePtr(query.CheckArtifactFetch)},
 	}
@@ -593,7 +594,7 @@ func knownCommandType(typ CommandType) bool {
 
 func knownQueryType(typ QueryType) bool {
 	switch typ {
-	case QueryDirectoriesList, QueryHarnessAuthStatus, QueryStatusGet,
+	case QueryDirectoriesList, QueryHarnessAuthStatus, QueryHarnessUsageStatus, QueryStatusGet,
 		QueryDiagnosticsGet,
 		QueryRemotesList,
 		QueryRemoteGet,

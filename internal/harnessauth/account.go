@@ -114,10 +114,22 @@ func readCodexAccount(stdin io.Writer, stdout io.Reader) *control.HarnessAuthAcc
 }
 
 func accountResponse(scanner *bufio.Scanner, id int, budget *int) (json.RawMessage, bool) {
+	result, rpcErr, ok := codexRPC(scanner, id, budget)
+	return result, ok && rpcErr == nil && len(result) > 0
+}
+
+type codexRPCError struct {
+	Code int `json:"code"`
+}
+
+// codexRPC reads frames until the response with id. ok is false when the
+// stream ends, exceeds its budget, or carries a non-JSON frame; rpcErr is set
+// when the response is a JSON-RPC error. Error messages are never returned.
+func codexRPC(scanner *bufio.Scanner, id int, budget *int) (json.RawMessage, *codexRPCError, bool) {
 	for scanner.Scan() {
 		*budget -= len(scanner.Bytes()) + 1
 		if *budget < 0 {
-			return nil, false
+			return nil, nil, false
 		}
 		var frame struct {
 			ID     json.RawMessage `json:"id"`
@@ -125,12 +137,17 @@ func accountResponse(scanner *bufio.Scanner, id int, budget *int) (json.RawMessa
 			Error  json.RawMessage `json:"error"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &frame) != nil {
-			return nil, false
+			return nil, nil, false
 		}
 		if string(frame.ID) != strconv.Itoa(id) {
 			continue
 		}
-		return frame.Result, len(frame.Result) > 0 && (len(frame.Error) == 0 || string(frame.Error) == "null")
+		if len(frame.Error) > 0 && string(frame.Error) != "null" {
+			rpcErr := &codexRPCError{}
+			_ = json.Unmarshal(frame.Error, rpcErr)
+			return nil, rpcErr, true
+		}
+		return frame.Result, nil, true
 	}
-	return nil, false
+	return nil, nil, false
 }

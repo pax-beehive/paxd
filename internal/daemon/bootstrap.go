@@ -53,6 +53,7 @@ func DefaultControlSocketPath() string {
 
 type Runtime struct {
 	harnessAuth      *harnessauth.Manager
+	harnessUsage     *harnessauth.UsageReader
 	Store            *daemonstore.Store
 	Control          control.Service
 	LocalHandler     http.Handler
@@ -206,6 +207,11 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		},
 	}
 	harnessAuth := harnessauth.New(ctx, harnessauth.Options{})
+	// Native usage reads run in an empty paxd-owned directory so no project
+	// configuration from an arbitrary working directory applies to them.
+	harnessUsage := harnessauth.NewUsageReader(ctx, harnessauth.UsageOptions{
+		WorkDir: filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "harness-usage"),
+	})
 	paxlOptions := paxdUpdaterOptions(store, "", filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "paxl-updates"))
 	paxlOptions.ResolverURL = strings.TrimSpace(os.Getenv("PAXD_PAXL_UPDATE_RESOLVER_URL"))
 	resolvePaxd := paxlOptions.ResolverURLForRemote
@@ -217,6 +223,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		HarnessInstaller:    &harnessUpgradeCoordinator{store: store, supervisors: supervisors, maintenance: maintenance},
 		PaxlInstaller:       &paxlinstall.Installer{Options: paxlOptions},
 		HarnessAuth:         harnessAuth,
+		HarnessUsage:        harnessUsage,
 		Store:               store,
 		Supervisors:         supervisors,
 		Harnesses:           harnesses,
@@ -260,9 +267,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	return &Runtime{
-		harnessAuth: harnessAuth,
-		Store:       store,
-		Control:     service,
+		harnessAuth:  harnessAuth,
+		harnessUsage: harnessUsage,
+		Store:        store,
+		Control:      service,
 		LocalHandler: localapi.NewHandlerWithCron(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,

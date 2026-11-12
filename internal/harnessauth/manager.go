@@ -1,5 +1,6 @@
-// Package harnessauth owns short-lived native harness login processes. It never
-// reads credential files or returns raw subprocess output.
+// Package harnessauth owns short-lived native harness login processes and
+// bounded plan usage reads. It never reads credential files or returns raw
+// subprocess output.
 package harnessauth
 
 import (

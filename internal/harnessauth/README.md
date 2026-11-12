@@ -22,6 +22,62 @@ or credential environment may not use the resulting login. Existing Claude/ACP
 processes may need to be restarted to pick up credentials; this API does not
 interrupt conversations automatically.
 
+## Plan usage
+
+The `harness_usage.status` control query (`{"harness": "claude"|"codex"}`) reads
+subscription plan usage through each CLI's public protocol. It is separate from
+`harness_auth.status` because the native CLI contacts the provider; a failed or
+unsupported usage read never changes authentication state. The query result is
+`query_result.harness_usage`:
+
+```json
+{
+  "harness": "claude",
+  "state": "available",
+  "observed_at": "2026-11-12T17:31:51Z",
+  "plan": "max",
+  "windows": [
+    {"id": "seven_day", "window_minutes": 10080, "used_percent": 3, "resets_at": "2026-11-16T08:59:59Z"},
+    {"id": "seven_day_fable", "window_minutes": 10080, "scope": "Fable", "used_percent": 0, "resets_at": "2026-11-16T09:00:00Z"}
+  ],
+  "extra_usage": {"enabled": false}
+}
+```
+
+- `state` is `available`, `unsupported` (the credential has no plan limits, such
+  as an API key, Console login, or no sign-in), or `unavailable` with
+  `error_code` `cli_unsupported`, `read_failed`, or `timeout`. Windows and
+  `extra_usage` appear only when available; at most 12 windows, each with an id
+  matching `[a-z0-9_]{1,64}`, `window_minutes`, optional model `scope`,
+  `used_percent` in 0-100, and optional `resets_at`.
+- Claude: `claude -p --input-format stream-json --output-format stream-json
+  --verbose --strict-mcp-config --settings '{"disableAllHooks":true}'` sends the
+  SDK `initialize` and `get_usage` (`skip_behaviors: true`) control requests and
+  no user message, so no model request is made. `get_usage` is marked
+  experimental by the Agent SDK; an older or changed CLI yields
+  `cli_unsupported` or `read_failed`. Only the SDK-typed fields `five_hour`,
+  `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `model_scoped`, and
+  `extra_usage.is_enabled` are mapped; other response fields are discarded.
+  Without `--strict-mcp-config` and disabled hooks, a prompt-less session still
+  connects MCP servers (including claude.ai connectors) and runs `SessionStart`,
+  `InstructionsLoaded`, and `SessionEnd` hooks.
+- Codex: `codex app-server` sends `initialize`, `account/read`
+  (`refreshToken: false`), and `account/rateLimits/read`; non-ChatGPT accounts
+  are `unsupported`. Only `primary`/`secondary` windows and `planType` are mapped;
+  credits and other fields are discarded.
+- Both run in the daemon's private `harness-usage` directory next to the
+  database (mode 0700), because `-p` skips Claude's workspace trust check and
+  project settings in the working directory would otherwise apply. They use the
+  daemon's credential context, like login status. After the response, stdin is
+  closed and the CLI gets three seconds to exit on its own (Claude writes its
+  usage cache to `~/.claude.json`) before the process group is stopped.
+- Reads are bounded (10 s for Claude, 5 s for Codex, capped output) and shared:
+  concurrent callers join one in-flight read, which a cancelled caller does not
+  abort. Results are cached per harness for 60 s, or 15 s when unavailable. The
+  Claude CLI also caches usage for about a minute, so data can be up to roughly
+  two minutes old. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` in the daemon
+  environment makes the CLI answer only from its cache.
+
 ## Local API
 
 Use the Unix socket (default `~/.paxd/paxd.sock`):
