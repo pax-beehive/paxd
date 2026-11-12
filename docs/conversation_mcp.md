@@ -300,8 +300,8 @@ authorizes another turn.
 The helper posts `{session_id, tool, arguments_json}` to
 `/api/v1/node/agents/:agent_id/workspace/tools` using stored node credentials.
 Caller agent/session identity comes from the injected MCP environment. Manager
-resolves the current active turn and checks the explicit scope and its
-authorization for every request.
+resolves the current active turn for new requests and searches and checks their
+explicit scope and authorization.
 The helper never sends user-selected owner, turn, or capability fields, and does
 not cache authorization across calls or turns.
 
@@ -323,7 +323,9 @@ also revokes that grant. Status and cancellation responses
 are passed through unchanged, including terminal states and deadline metadata.
 Manager validates the caller's node, agent, and session. New requests and
 searches require an active turn; status can report an old request as expired
-without reviving its turn. There is no wait
+without reviving its turn. Cancellation does not require an active turn: it can
+close this session's abandoned request or revoke its grant, but never restores
+access or revives a turn. There is no wait
 tool, approval notification injection, or automatic agent resume. An agent that
 still needs approval must keep its turn open; finishing the turn ends its
 authorization even if the request had no time deadline.

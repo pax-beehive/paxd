@@ -52,7 +52,7 @@ func ordinaryWorkspaceMCPTools() []map[string]any {
 		},
 		{
 			"name":        "workspace_cancel_access",
-			"description": "Cancel this turn's workspace access request by approval_id when it is no longer needed. If it is already approved, also revoke that grant. Repeating cancellation is safe. Returns its latest status, including cancelled. This call never waits or resumes execution; cancellation does not authorize another turn.",
+			"description": "Cancel this session's workspace access request by approval_id when it is no longer needed. If it is already approved, also revoke that grant. Repeating cancellation is safe. Returns its latest status, including cancelled. This call never waits or resumes execution; cancellation does not authorize another turn.",
 			"inputSchema": workspaceObject(map[string]any{
 				"approval_id": workspaceString(4096),
 			}, "approval_id"),
