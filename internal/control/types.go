@@ -560,6 +560,7 @@ const (
 	QueryBrowserControl        QueryType = "browser.control"
 	QueryMobileControl         QueryType = "mobile.control"
 	QueryHarnessAuthStatus     QueryType = "harness_auth.status"
+	QueryHarnessUsageStatus    QueryType = "harness_usage.status"
 	QuerySecretChannelOpen     QueryType = "secret_channel.open"
 	QueryArtifactFetchCheck    QueryType = "artifact_fetch.check"
 )
@@ -585,6 +586,7 @@ type Query struct {
 	BrowserControl           *BrowserControlQuery           `json:"browser_control,omitempty"`
 	MobileControl            *MobileControlQuery            `json:"mobile_control,omitempty"`
 	HarnessAuthStatus        *HarnessAuthStatusQuery        `json:"harness_auth_status,omitempty"`
+	HarnessUsageStatus       *HarnessUsageStatusQuery       `json:"harness_usage_status,omitempty"`
 	OpenSecretChannel        *OpenSecretChannelQuery        `json:"open_secret_channel,omitempty"`
 	CheckArtifactFetch       *CheckArtifactFetchQuery       `json:"check_artifact_fetch,omitempty"`
 }
@@ -752,10 +754,11 @@ type GetCommandQuery struct {
 }
 
 type QueryResult struct {
-	Directories *DirectoryPage   `json:"directories,omitempty"`
-	HarnessAuth *HarnessAuthView `json:"harness_auth,omitempty"`
-	Type        QueryType        `json:"type"`
-	Error       *ControlError    `json:"error,omitempty"`
+	Directories  *DirectoryPage    `json:"directories,omitempty"`
+	HarnessAuth  *HarnessAuthView  `json:"harness_auth,omitempty"`
+	HarnessUsage *HarnessUsageView `json:"harness_usage,omitempty"`
+	Type         QueryType         `json:"type"`
+	Error        *ControlError     `json:"error,omitempty"`
 
 	Status                *DaemonStatus                `json:"status,omitempty"`
 	Diagnostics           *DiagnosticsView             `json:"diagnostics,omitempty"`

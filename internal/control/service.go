@@ -104,6 +104,7 @@ type ServiceOptions struct {
 	HarnessInstaller    HarnessInstaller
 	PaxlInstaller       PaxlInstaller
 	HarnessAuth         HarnessAuth
+	HarnessUsage        HarnessUsage
 	Store               Store
 	Supervisors         Supervisors
 	Harnesses           HarnessRegistry
@@ -127,6 +128,7 @@ type ControlService struct {
 	paxlInstaller        PaxlInstaller
 	paxlUpgradeActive    sync.Map
 	harnessAuth          HarnessAuth
+	harnessUsage         HarnessUsage
 	store                Store
 	supervisors          Supervisors
 	harnesses            HarnessRegistry
@@ -149,6 +151,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		paxlInstaller:       opts.PaxlInstaller,
 		harnessInstaller:    opts.HarnessInstaller,
 		harnessAuth:         opts.HarnessAuth,
+		harnessUsage:        opts.HarnessUsage,
 		store:               opts.Store,
 		supervisors:         opts.Supervisors,
 		harnesses:           opts.Harnesses,
@@ -490,6 +493,9 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	}
 	if query.Type == QueryHarnessAuthStatus {
 		return s.handleHarnessAuthStatus(ctx, src, *query.HarnessAuthStatus)
+	}
+	if query.Type == QueryHarnessUsageStatus {
+		return s.handleHarnessUsageStatus(ctx, src, *query.HarnessUsageStatus)
 	}
 	if query.Type == QueryMobileControl {
 		if s.mobileControl == nil || src.Kind != SourceLocal && (src.Kind != SourceRemote || src.RemoteID == "") {
