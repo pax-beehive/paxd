@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRegistryIncludesDSH(t *testing.T) {
@@ -247,4 +250,13 @@ func TestLocalSessionName(t *testing.T) {
 			t.Errorf("localSessionName(%q, %q) = %q, want %q", tc.cwd, tc.nativeID, got, tc.want)
 		}
 	}
+}
+
+func TestGivenDSCodeDiscoveryWhenInstallationIsSuggestedThenUsesOfficialStandaloneChannel(t *testing.T) {
+	agents, err := Default().Agents([]string{"dscode"})
+	require.NoError(t, err)
+	require.Len(t, agents, 1)
+	assert.Equal(t, [][]string{{"paxl", "daemon", "harness", "install", "dscode"}}, agents[0].InstallCommands)
+	assert.Contains(t, agents[0].InstallHint, "self-contained")
+	assert.Equal(t, []string{"dscode", "acp"}, agents[0].Command)
 }
