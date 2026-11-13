@@ -74,6 +74,7 @@ func (m *Manager) Close() {
 func authError(code, message string) error { return control.ControlError{Code: code, Message: message} }
 
 func (m *Manager) Login(ctx context.Context, owner control.Source, commandID string, req control.HarnessAuthLoginCommand) (control.HarnessAuthView, error) {
+	req.Harness = control.NativeHarness(req.Harness)
 	if err := req.Validate(); err != nil {
 		return control.HarnessAuthView{}, err
 	}
@@ -247,10 +248,25 @@ func (m *Manager) wait(ctx context.Context, s *session, cmd *exec.Cmd) {
 	}
 }
 
+// Status answers in the harness id the caller used (claude-code or claude) and
+// reports "unsupported" for agent types without a native login adapter.
 func (m *Manager) Status(ctx context.Context, owner control.Source, q control.HarnessAuthStatusQuery) (control.HarnessAuthView, error) {
 	if err := q.Validate(); err != nil {
 		return control.HarnessAuthView{}, err
 	}
+	requested := q.Harness
+	if !control.NativeLoginSupported(requested) {
+		return control.HarnessAuthView{Harness: requested, State: "unsupported"}, nil
+	}
+	q.Harness = control.NativeHarness(requested)
+	view, err := m.nativeStatus(ctx, owner, q)
+	if err == nil {
+		view.Harness = requested
+	}
+	return view, err
+}
+
+func (m *Manager) nativeStatus(ctx context.Context, owner control.Source, q control.HarnessAuthStatusQuery) (control.HarnessAuthView, error) {
 	if q.SessionID == "" {
 		m.mu.Lock()
 		if recent := m.latest[loginScope{owner: owner, harness: q.Harness}]; recent != nil && (recent.running || time.Now().Before(recent.expires)) {
