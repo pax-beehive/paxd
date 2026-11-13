@@ -131,3 +131,25 @@ func TestCodexIdentityFailurePreservesNativeCredentialStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusAcceptsAgentTypesAndReportsUnsupportedOnes(t *testing.T) {
+	m := accountCLI(t, `printf x >> "$0.calls"
+echo '{"loggedIn":true,"authMethod":"claude.ai","email":"owner@example.test"}'`)
+	view, err := m.Status(t.Context(), testOwner, control.HarnessAuthStatusQuery{Harness: "claude-code"})
+	require.NoError(t, err)
+	assert.Equal(t, "claude-code", view.Harness)
+	assert.Equal(t, "logged_in", view.State)
+	require.NotNil(t, view.Account)
+
+	view, err = m.Status(t.Context(), testOwner, control.HarnessAuthStatusQuery{Harness: "kimi"})
+	require.NoError(t, err)
+	assert.Equal(t, control.HarnessAuthView{Harness: "kimi", State: "unsupported"}, view)
+	_, err = m.Status(t.Context(), testOwner, control.HarnessAuthStatusQuery{Harness: "Not A Harness"})
+	require.Error(t, err)
+
+	calls, err := os.ReadFile(m.command + ".calls")
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(calls), "only the claude-code status ran a native command")
+	require.NoError(t, control.HarnessAuthLoginCommand{Harness: "claude-code", Operation: "start"}.Validate())
+	require.Error(t, control.HarnessAuthLoginCommand{Harness: "kimi", Operation: "start"}.Validate())
+}

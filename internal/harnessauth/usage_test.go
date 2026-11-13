@@ -98,6 +98,12 @@ func TestClaudeUsageMapsOnlyTypedWindowsFromAPromptlessSession(t *testing.T) {
 			{ID: "seven_day_sonnet", WindowMinutes: 10080, Scope: "Sonnet", UsedPercent: 12.5, ResetsAt: "2026-11-16T09:00:00Z"},
 			{ID: "seven_day_fable", WindowMinutes: 10080, Scope: "Fable", UsedPercent: 0, ResetsAt: "2026-11-16T09:00:00Z"},
 		},
+		Items: []control.HarnessUsageItem{
+			percentItem("seven_day", "Weekly", 3, 10080, "2026-11-16T08:59:59Z"),
+			percentItem("seven_day_sonnet", "Weekly · Sonnet", 12.5, 10080, "2026-11-16T09:00:00Z"),
+			percentItem("seven_day_fable", "Weekly · Fable", 0, 10080, "2026-11-16T09:00:00Z"),
+			{ID: "extra_usage", Label: "Extra usage", Kind: control.HarnessUsageKindStatus, Value: "off"},
+		},
 		ExtraUsage: &control.HarnessUsageExtra{Enabled: false},
 	}, view)
 	raw, err := json.Marshal(view)
@@ -216,6 +222,10 @@ func TestCodexUsageReadsChatGPTRateLimits(t *testing.T) {
 		{ID: "primary", WindowMinutes: 10080, UsedPercent: 31, ResetsAt: "2026-11-18T08:58:18Z"},
 	}, view.Windows)
 	assert.Nil(t, view.ExtraUsage)
+	assert.Equal(t, []control.HarnessUsageItem{
+		percentItem("primary", "Weekly", 31, 10080, "2026-11-18T08:58:18Z"),
+		{ID: "credits", Label: "Credits", Kind: control.HarnessUsageKindStatus, Value: "available"},
+	}, view.Items)
 	raw, err := json.Marshal(view)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "must-not-return")
@@ -397,12 +407,72 @@ func TestRealNativeUsageRead(t *testing.T) {
 	}
 }
 
-func TestUsageRejectsUnsupportedHarnessAndStoppedReader(t *testing.T) {
+func TestUsageRejectsMalformedHarnessAndStoppedReader(t *testing.T) {
 	r := usageReader(t, "exit 1\n", nil)
-	_, err := r.Usage(t.Context(), control.HarnessUsageStatusQuery{Harness: "gemini"})
+	_, err := r.Usage(t.Context(), control.HarnessUsageStatusQuery{Harness: "Not A Harness"})
 	require.Error(t, err)
 	r.Close()
 	_, err = r.Usage(t.Context(), claudeQuery)
 	require.Error(t, err)
 	assert.Equal(t, 0, usageCalls(t, r))
+}
+
+func percentItem(id, label string, used float64, minutes int, resetsAt string) control.HarnessUsageItem {
+	return control.HarnessUsageItem{
+		ID: id, Label: label, Kind: control.HarnessUsageKindPercent, UsedPercent: &used,
+		WindowMinutes: minutes, ResetsAt: resetsAt,
+	}
+}
+
+func TestUsageAnswersInTheRequestedAgentTypeAndSharesTheClaudeRead(t *testing.T) {
+	r := usageReader(t, claudeUsageScript(claudeUsageBody), nil)
+	r.label = func(harness string) string {
+		return map[string]string{"claude-code": "Claude Code", "kimi": "Kimi Code"}[harness]
+	}
+	view, err := r.Usage(t.Context(), control.HarnessUsageStatusQuery{Harness: "claude-code"})
+	require.NoError(t, err)
+	assert.Equal(t, "claude-code", view.Harness)
+	assert.Equal(t, "Claude Code", view.HarnessLabel)
+	assert.Equal(t, control.HarnessUsageAvailable, view.State)
+	legacy, err := r.Usage(t.Context(), claudeQuery)
+	require.NoError(t, err)
+	assert.Equal(t, "claude", legacy.Harness)
+	assert.Equal(t, "Claude Code", legacy.HarnessLabel)
+	assert.Equal(t, view.Items, legacy.Items)
+	assert.Equal(t, 1, usageCalls(t, r), "claude-code and claude share one cached read")
+
+	kimi, err := r.Usage(t.Context(), control.HarnessUsageStatusQuery{Harness: "kimi"})
+	require.NoError(t, err)
+	assert.Equal(t, control.HarnessUsageView{
+		Harness: "kimi", HarnessLabel: "Kimi Code", State: control.HarnessUsageUnsupported, ObservedAt: kimi.ObservedAt,
+	}, kimi)
+	assert.NotEmpty(t, kimi.ObservedAt)
+	assert.Equal(t, 1, usageCalls(t, r), "agent types without an adapter never start a process")
+}
+
+func TestUsageWindowLabels(t *testing.T) {
+	for _, tc := range []struct {
+		minutes int
+		scope   string
+		label   string
+	}{
+		{300, "", "5-hour"}, {10080, "", "Weekly"}, {10080, "Fable", "Weekly · Fable"},
+		{2880, "", "2-day"}, {90, "", "90-minute"}, {1500, "", "25-hour"},
+	} {
+		assert.Equal(t, tc.label, usageWindowLabel(tc.minutes, tc.scope))
+	}
+}
+
+func TestCodexCreditsReportOnlyTheirState(t *testing.T) {
+	for credits, value := range map[string]string{
+		`{"hasCredits":true,"unlimited":true}`:                 "unlimited",
+		`{"hasCredits":false,"unlimited":false,"balance":"9"}`: "none",
+	} {
+		r := usageReader(t, codexUsageScript(codexChatGPTAccount, `{"id":3,"result":{"rateLimits":{`+
+			`"primary":{"usedPercent":1,"windowDurationMins":300},"credits":`+credits+`}}}`), nil)
+		view, err := r.Usage(t.Context(), control.HarnessUsageStatusQuery{Harness: "codex"})
+		require.NoError(t, err)
+		require.Len(t, view.Items, 2)
+		assert.Equal(t, control.HarnessUsageItem{ID: "credits", Label: "Credits", Kind: control.HarnessUsageKindStatus, Value: value}, view.Items[1])
+	}
 }

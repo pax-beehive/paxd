@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,8 @@ type UsageOptions struct {
 	// settings, hooks, and instructions from their working directory.
 	WorkDir string
 	Now     func() time.Time
+	// Label returns the display name of a PAX agent type such as claude-code.
+	Label func(harness string) string
 }
 
 // UsageReader reads plan usage through each harness CLI's public protocol and
@@ -57,6 +60,7 @@ type UsageReader struct {
 	command string
 	workDir string
 	now     func() time.Time
+	label   func(string) string
 	wg      sync.WaitGroup
 	// Bounds for one native read; fixed outside tests.
 	claudeTimeout, codexTimeout, exitGrace time.Duration
@@ -76,9 +80,12 @@ func NewUsageReader(ctx context.Context, opts UsageOptions) *UsageReader {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.Label == nil {
+		opts.Label = func(string) string { return "" }
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &UsageReader{
-		ctx: ctx, cancel: cancel, command: opts.Command, workDir: opts.WorkDir, now: opts.Now,
+		ctx: ctx, cancel: cancel, command: opts.Command, workDir: opts.WorkDir, now: opts.Now, label: opts.Label,
 		claudeTimeout: claudeUsageTimeout, codexTimeout: codexUsageTimeout, exitGrace: usageExitGrace,
 		entries: map[string]*usageEntry{},
 	}
@@ -92,13 +99,36 @@ func (r *UsageReader) Close() {
 	r.wg.Wait()
 }
 
-// Usage returns the cached view or joins the single in-flight native read. The
-// read is detached from the caller so one cancelled request cannot abort a read
-// that other callers are waiting for.
+// Usage answers in the harness id the caller used. Agent types without a usage
+// adapter are unsupported; claude-code and the legacy claude share one adapter.
 func (r *UsageReader) Usage(ctx context.Context, q control.HarnessUsageStatusQuery) (control.HarnessUsageView, error) {
 	if err := q.Validate(); err != nil {
 		return control.HarnessUsageView{}, err
 	}
+	requested, native := q.Harness, control.NativeHarness(q.Harness)
+	agentType := native
+	if native == "claude" {
+		agentType = "claude-code"
+	}
+	label := accountField(r.label(agentType), 64)
+	if native != "claude" && native != "codex" {
+		return control.HarnessUsageView{
+			Harness: requested, HarnessLabel: label, State: control.HarnessUsageUnsupported,
+			ObservedAt: r.now().UTC().Format(time.RFC3339),
+		}, nil
+	}
+	view, err := r.cachedUsage(ctx, native)
+	if err == nil {
+		view.Harness, view.HarnessLabel = requested, label
+	}
+	return view, err
+}
+
+// cachedUsage returns the cached view or joins the single in-flight native
+// read. The read is detached from the caller so one cancelled request cannot
+// abort a read that other callers are waiting for.
+func (r *UsageReader) cachedUsage(ctx context.Context, harness string) (control.HarnessUsageView, error) {
+	q := control.HarnessUsageStatusQuery{Harness: harness}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -156,7 +186,55 @@ func (r *UsageReader) read(harness string) control.HarnessUsageView {
 	}
 	view.Harness = harness
 	view.ObservedAt = r.now().UTC().Format(time.RFC3339)
+	if view.State == control.HarnessUsageAvailable {
+		view.Items = usageItems(view)
+	}
 	return view
+}
+
+// usageItems turns the adapter's windows and extras into display-ready items:
+// windows first, then adapter-specific items, then extra usage.
+func usageItems(view control.HarnessUsageView) []control.HarnessUsageItem {
+	items := make([]control.HarnessUsageItem, 0, len(view.Windows)+len(view.Items)+1)
+	for _, window := range view.Windows {
+		used := window.UsedPercent
+		items = append(items, control.HarnessUsageItem{
+			ID: window.ID, Label: usageWindowLabel(window.WindowMinutes, window.Scope),
+			Kind: control.HarnessUsageKindPercent, UsedPercent: &used,
+			WindowMinutes: window.WindowMinutes, ResetsAt: window.ResetsAt,
+		})
+	}
+	items = append(items, view.Items...)
+	if view.ExtraUsage != nil {
+		value := "off"
+		if view.ExtraUsage.Enabled {
+			value = "on"
+		}
+		items = append(items, control.HarnessUsageItem{
+			ID: "extra_usage", Label: "Extra usage", Kind: control.HarnessUsageKindStatus, Value: value,
+		})
+	}
+	return items
+}
+
+// usageWindowLabel names a rolling window by its length, such as "5-hour" or
+// "Weekly", followed by its model scope.
+func usageWindowLabel(minutes int, scope string) string {
+	var label string
+	switch {
+	case minutes == usageWeekMinutes:
+		label = "Weekly"
+	case minutes%1440 == 0:
+		label = strconv.Itoa(minutes/1440) + "-day"
+	case minutes%60 == 0:
+		label = strconv.Itoa(minutes/60) + "-hour"
+	default:
+		label = strconv.Itoa(minutes) + "-minute"
+	}
+	if scope != "" {
+		label += " · " + scope
+	}
+	return label
 }
 
 // run drives one native JSON session over stdin/stdout. After the read, the
@@ -412,6 +490,7 @@ func codexUsageView(result json.RawMessage) control.HarnessUsageView {
 			Primary   json.RawMessage `json:"primary"`
 			Secondary json.RawMessage `json:"secondary"`
 			PlanType  json.RawMessage `json:"planType"`
+			Credits   json.RawMessage `json:"credits"`
 		} `json:"rateLimits"`
 	}
 	if json.Unmarshal(result, &response) != nil || response.RateLimits == nil {
@@ -437,6 +516,23 @@ func codexUsageView(result json.RawMessage) control.HarnessUsageView {
 		windows.add(named.id, *window.WindowDurationMins, "", window.UsedPercent, resets)
 	}
 	view.Windows = windows.list
+	var credits struct {
+		HasCredits *bool `json:"hasCredits"`
+		Unlimited  *bool `json:"unlimited"`
+	}
+	if json.Unmarshal(response.RateLimits.Credits, &credits) == nil && credits.HasCredits != nil {
+		// The balance has no documented unit, so only its state is reported.
+		value := "none"
+		switch {
+		case credits.Unlimited != nil && *credits.Unlimited:
+			value = "unlimited"
+		case *credits.HasCredits:
+			value = "available"
+		}
+		view.Items = append(view.Items, control.HarnessUsageItem{
+			ID: "credits", Label: "Credits", Kind: control.HarnessUsageKindStatus, Value: value,
+		})
+	}
 	return view
 }
 
@@ -491,6 +587,7 @@ func unavailableUsage(code string) control.HarnessUsageView {
 
 func cloneUsageView(view control.HarnessUsageView) control.HarnessUsageView {
 	view.Windows = append([]control.HarnessUsageWindow(nil), view.Windows...)
+	view.Items = append([]control.HarnessUsageItem(nil), view.Items...)
 	if view.ExtraUsage != nil {
 		extra := *view.ExtraUsage
 		view.ExtraUsage = &extra

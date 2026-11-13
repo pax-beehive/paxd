@@ -211,6 +211,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	// configuration from an arbitrary working directory applies to them.
 	harnessUsage := harnessauth.NewUsageReader(ctx, harnessauth.UsageOptions{
 		WorkDir: filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "harness-usage"),
+		Label:   harnessregistry.DisplayName,
 	})
 	paxlOptions := paxdUpdaterOptions(store, "", filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "paxl-updates"))
 	paxlOptions.ResolverURL = strings.TrimSpace(os.Getenv("PAXD_PAXL_UPDATE_RESOLVER_URL"))

@@ -45,7 +45,7 @@ func TestHarnessUsageQueryValidation(t *testing.T) {
 	s := NewService(ServiceOptions{HarnessUsage: f})
 	local := Source{Kind: SourceLocal}
 
-	result, err := s.HandleQuery(context.Background(), local, Query{Type: QueryHarnessUsageStatus, HarnessUsageStatus: &HarnessUsageStatusQuery{Harness: "gemini"}})
+	result, err := s.HandleQuery(context.Background(), local, Query{Type: QueryHarnessUsageStatus, HarnessUsageStatus: &HarnessUsageStatusQuery{Harness: "Not A Harness"}})
 	require.NoError(t, err)
 	require.NotNil(t, result.Error)
 	assert.Equal(t, ErrCodeInvalidArgument, result.Error.Code)

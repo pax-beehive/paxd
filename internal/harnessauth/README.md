@@ -44,6 +44,23 @@ unsupported usage read never changes authentication state. The query result is
 }
 ```
 
+- `harness` accepts any PAX agent type id (`[a-z0-9][a-z0-9_-]{0,31}`, such as
+  `claude-code`, `codex`, `kimi`); `claude` remains an alias of `claude-code`
+  and both share one cached read. The response uses the id the caller sent and
+  adds `harness_label` (display name from the built-in registry table; nothing
+  on the machine is probed). Agent types without a usage adapter return
+  `unsupported` without starting a process. `harness_auth.status` likewise
+  accepts any id and reports `unsupported` for agent types without native
+  login; `harness_auth.login` accepts `claude-code` as `claude`.
+- `items` is the display-ready list clients should render. Each item has `id`,
+  English `label`, and `kind`: `percent` (`used_percent`, optional
+  `window_minutes`, `resets_at`), `amount` (`used`, optional `limit`, `unit`,
+  `resets_at`), or `status` (`value`); `severity` is optional. Claude maps its
+  windows to percent items labelled by window length and model scope (for
+  example `Weekly · Fable`) plus an `Extra usage` status; Codex maps
+  `primary`/`secondary` windows plus a `Credits` status (`available`,
+  `unlimited`, or `none`; the balance has no documented unit and is omitted).
+  `windows` and `extra_usage` are deprecated and kept for older clients.
 - `state` is `available`, `unsupported` (the credential has no plan limits, such
   as an API key, Console login, or no sign-in), or `unavailable` with
   `error_code` `cli_unsupported`, `read_failed`, or `timeout`. Windows and
