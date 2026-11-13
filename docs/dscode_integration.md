@@ -1,10 +1,23 @@
 # DSCODE integration
 
-Use a DSCODE build containing native `dscode acp` support, merged into upstream
-main at `6bd354e` (PR #7). The package version at that commit still says 0.7.35;
-the earlier published 0.7.35 build does not contain this command. A version
-string alone is therefore not sufficient to establish ACP support. Use a source
-build containing this commit or a subsequent release that includes it.
+Use the official self-contained DSCODE terminal release. GitHub release archives
+and the maintained Homebrew tap currently provide 0.7.54; legacy npm launcher and
+bundle packages remain at 0.7.40 and are no longer the current terminal channel.
+
+```sh
+paxl daemon harness install dscode --dry-run
+paxl daemon harness install dscode
+```
+
+The command runs on the CLI host, verifies the official platform archive through
+the reviewed upstream installer and requires no system Node or npm. Add
+`~/.local/bin` to the daemon's PATH. Existing foreign command links are refused.
+Configure providers with `/login` in the TUI. New state lives under
+`~/.local/share/dscode-state`; migrating old Hub/source data and credentials is
+explicit. Follow the upstream [distribution and migration guide](https://github.com/qiz029/dscode/blob/main/docs/distribution.md).
+Standalone updates use `dscode update` with all sessions/schedulers stopped;
+Homebrew uses `brew upgrade dscode`. DSCODE is not yet supported by the remote
+`harness.upgrade` coordinator.
 
 ```sh
 paxl daemon harness discover dscode
@@ -17,18 +30,17 @@ preset composition, credentials, default model, process lifetime and installatio
 locks. Configure credentials and custom providers in the TUI before connecting.
 Discovery availability does not verify those settings or ACP support.
 
-Node 22.19+ on 22.x or Node 24+ and DSCODE must be resolvable in the daemon's
-PATH. For a source checkout, use an explicit connection command consisting of
+The installed DSCODE command must be resolvable in the daemon's PATH. For a
+source checkout, use an explicit connection command consisting of
 `node /absolute/path/to/dscode/bin/dscode.mjs acp`, or put a `dscode` wrapper
 for that checkout on PATH. An explicit `--model provider/id` can be appended
 to a custom command.
 
 Native ACP sessions use the `ask` permission preset: the ACP client answers
-approval requests. Title, session-card and memory generation are disabled in
-this transport. First-install progress goes to stderr; stdout is reserved for
+approval requests. First-install progress goes to stderr; stdout is reserved for
 protocol frames. Resume does not replay history and cannot take over a session
 locked by another running process. See the upstream
-[ACP guide](https://github.com/qiz029/dscode/blob/6bd354e/docs/acp.md) for capabilities.
+[ACP guide](https://github.com/qiz029/dscode/blob/main/docs/acp.md) for capabilities.
 
 The local-session reporter uses `paxl session list/get` and forwards the
 connection's `DSCODE_HOME` and `PAXL_DSCODE_SESSIONS_DIR` overrides, preserving
