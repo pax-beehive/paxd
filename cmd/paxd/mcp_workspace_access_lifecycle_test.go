@@ -17,10 +17,10 @@ func TestWorkspaceAccessGivenOptionalTimeoutThenPreservesNoDeadlineAndExplicitTi
 	before := callOrdinaryWorkspace
 	t.Cleanup(func() { callOrdinaryWorkspace = before })
 	for _, tc := range []struct{ name, args, expected string }{
-		{"omitted", `{}`, `{"queries":["*"],"agent_ids":["*"],"session_ids":["*"]}`},
-		{"no deadline", `{"timeout_seconds":0}`, `{"queries":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":0}`},
-		{"default explicit", `{"timeout_seconds":600}`, `{"queries":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":600}`},
-		{"maximum", `{"timeout_seconds":86400}`, `{"queries":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":86400}`},
+		{"omitted", `{}`, `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["*"]}`},
+		{"no deadline", `{"timeout_seconds":0}`, `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":0}`},
+		{"default explicit", `{"timeout_seconds":600}`, `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":600}`},
+		{"maximum", `{"timeout_seconds":86400}`, `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["*"],"timeout_seconds":86400}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -62,7 +62,7 @@ func TestWorkspaceAccessGivenApprovalIDThenQueriesAndCancelsWithoutWaitingOrRewr
 	} {
 		for _, status := range []string{"pending", "approved", "denied", "expired", "cancelled"} {
 			t.Run(tc.name+"/"+status, func(t *testing.T) {
-				response := `{"status":"` + status + `","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["cicd"],"agent_ids":["agent-target"],"session_ids":["*"]},"expires_at":"2026-11-11T23:00:00Z","poll_after_ms":2000}`
+				response := `{"status":"` + status + `","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["cicd"],"node_ids":["node-target"],"agent_ids":["agent-target"],"session_ids":["*"]},"expires_at":"2026-11-11T23:00:00Z","poll_after_ms":2000}`
 				calls := 0
 				callOrdinaryWorkspace = func(_ context.Context, agentID string, request cloud.WorkspaceToolRequest) (json.RawMessage, error) {
 					calls++

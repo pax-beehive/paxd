@@ -254,41 +254,44 @@ stdio MCP server registered once at `session/new`.
 
 Ordinary sessions expose `workspace_search`, `workspace_request_access`,
 `workspace_access_status`, and `workspace_cancel_access`.
-Default permission covers this agent's own sessions. Every search must declare
-both agent and session scope, for example:
+Default permission covers all user-owned agents and sessions on the caller's
+node. Every search must declare node, agent, and session scope, for example:
 
 ```json
-{"query":"cicd","scope":{"agent_ids":["self"],"session_ids":["*"]}}
+{"query":"cicd","scope":{"node_ids":["self"],"agent_ids":["*"],"session_ids":["*"]}}
 ```
 
 This default also applies under PAX auto approve. Starting a turn never grants
-cross-agent access automatically. PAX auto approve only automatically approves
+cross-node access automatically. PAX auto approve only automatically approves
 explicit `workspace_request_access` calls; user-provided turn preauthorization
 can separately authorize the requested expansion.
 
-`self` resolves to the calling agent. A sole `*` in `agent_ids` selects all
-agents owned by the user and requires an approved expansion; a sole `*` in
-`session_ids` selects all sessions within the requested agent scope. Either
-list can instead contain exact IDs. Missing, empty, or mixed-wildcard scopes are
+`self` in `node_ids` resolves to the caller's node; `self` in `agent_ids` still
+resolves to the calling agent. A sole `*` in `node_ids` selects all nodes owned
+by the user and requires an approved expansion. A sole `*` in `agent_ids`
+selects all user-owned agents within the declared node scope; a sole `*` in
+`session_ids` selects all sessions within the requested node and agent scope.
+Each list can instead contain exact IDs. Missing, empty, or mixed-wildcard scopes are
 rejected. Top-level `session_ids` is not accepted by ordinary search. Declare the
 whole intended scope: Manager rejects unauthorized scope instead of silently
-narrowing it to the caller's own sessions. Successful responses include the
+narrowing it to the caller's own node. Successful responses include the
 scope resolved by Manager.
 
-Request an expansion separately before searching other agents, unless the user
+Request an expansion separately before searching other nodes, unless the user
 preauthorized it for the turn. The request accepts optional `queries`,
-`agent_ids`, `session_ids`, `reason`, and `timeout_seconds`:
+`node_ids`, `agent_ids`, `session_ids`, `reason`, and `timeout_seconds`:
 
 ```json
-{"queries":["cicd"],"agent_ids":["*"],"session_ids":["*"],"reason":"Find previous CI decisions across agents","timeout_seconds":600}
+{"queries":["cicd"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["*"],"reason":"Find previous CI decisions across nodes","timeout_seconds":600}
 ```
 
-All three request lists default to `["*"]`. A sole `*` allows any complete
-query, agent, or session owned by the authenticated user; it cannot be combined
+All four request lists default to `["*"]`. A sole `*` allows any complete
+query, node, agent, or session owned by the authenticated user; it cannot be combined
 with other list items. Other query values are complete-query allowlist entries,
 not substring patterns. Each list has at most 50 entries. Query values have at
 most 256 Unicode characters and IDs at most 4,096; the optional reason has at
-most 4,096. Request `agent_ids` also accepts `self`.
+most 4,096. Request `node_ids` accepts `self` for the caller's node and
+`agent_ids` accepts `self` for the calling agent.
 
 The request timeout is an integer from 0 through 86,400 seconds and defaults to
 600 when omitted. An explicit `timeout_seconds: 0` means no time deadline; it is
@@ -332,7 +335,7 @@ authorization even if the request had no time deadline.
 
 Search itself never creates an approval request.
 A search rejected with HTTP 403 returns the safe MCP error code
-`authorization_required` with the default agent boundary and instructions to
+`authorization_required` with the default node boundary and instructions to
 request an expansion or use the Console's turn preauthorization before retrying.
 Search never creates an access request, retries at a narrower scope, or falls
 back to a different data set. Expanded authorization expires when its turn ends.
@@ -340,9 +343,15 @@ Ordinary sessions do not expose workspace read, expand, history, or summary tool
 
 Deploy a compatible Manager before enabling these tools. A Manager without the
 workspace endpoint returns the safe `unavailable` error; an older workspace
-endpoint can reject the new timeout field or lifecycle operations as
+endpoint can reject the node scope, timeout field, or lifecycle operations as
 `invalid_request`. The helper never retries with weaker semantics. Arbitrary
 response bodies and node credentials are never included in error output.
+
+The new MCP search schema requires explicit `scope.node_ids`. For compatibility,
+Manager interprets omission by an older HTTP client as `["*"]`, preserving its
+declared all-nodes scope and requiring expansion authorization. It never silently
+substitutes the caller's node. Restart an existing MCP helper after upgrading so
+its client discovers the three-dimensional schema and the new default example.
 
 ## Optional Secretary workspace lookups
 
@@ -351,7 +360,7 @@ Manager-created Secretary executions expose only read-only
 and `workspace_summaries`
 through this same stdio server when `PAX_SECRETARY_CAPABILITY` is injected.
 Their schemas retain the Secretary contract, including optional top-level
-`session_ids` on search and no ordinary `scope` field.
+`session_ids` on search and no ordinary `scope` or required `node_ids` field.
 The ordinary discovery/messaging/artifact and access-request/status/cancel tools are
 unavailable inside the Secretary context, including direct
 calls. The helper uses existing local node

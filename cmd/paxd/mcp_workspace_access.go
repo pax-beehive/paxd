@@ -11,7 +11,7 @@ import (
 
 func ordinaryWorkspaceMCPTools() []map[string]any {
 	search := workspaceMCPTools()[0]
-	search["description"] = "Search with an explicit scope. Default permission always covers only this agent's sessions: scope {\"agent_ids\":[\"self\"],\"session_ids\":[\"*\"]}, including under PAX auto approve. Other agents require an approved turn-scoped expansion. Declare the whole intended scope; an unauthorized scope is rejected, never silently narrowed or used to create an approval. Use workspace_request_access separately unless the user preauthorized the expansion. PAX auto approve approves explicit access requests; it never expands scope merely by starting a turn. Expanded authorization ends with the turn. The response includes the actual scope resolved by Manager."
+	search["description"] = "Search with an explicit node, agent, and session scope. Default permission covers all user-owned agents and sessions on this node: scope {\"node_ids\":[\"self\"],\"agent_ids\":[\"*\"],\"session_ids\":[\"*\"]}, including under PAX auto approve. node_ids self means this node; agent_ids self still means this agent. Other nodes require an approved turn-scoped expansion. Declare the whole intended scope; an unauthorized scope is rejected, never silently narrowed or used to create an approval. Use workspace_request_access separately unless the user preauthorized the expansion. PAX auto approve approves explicit access requests; it never expands scope merely by starting a turn. Expanded authorization ends with the turn. The response includes the actual scope resolved by Manager."
 	list := func(maximum int) workspaceSchema {
 		value := workspaceArray(workspaceString(maximum), 50)
 		value["minItems"] = 1
@@ -21,8 +21,8 @@ func ordinaryWorkspaceMCPTools() []map[string]any {
 	properties := searchSchema["properties"].(map[string]any)
 	delete(properties, "session_ids")
 	properties["scope"] = workspaceObject(map[string]any{
-		"agent_ids": list(4096), "session_ids": list(4096),
-	}, "agent_ids", "session_ids")
+		"node_ids": list(4096), "agent_ids": list(4096), "session_ids": list(4096),
+	}, "node_ids", "agent_ids", "session_ids")
 	searchSchema["required"] = []string{"query", "scope"}
 	accessList := func(maximum int) workspaceSchema {
 		value := list(maximum)
@@ -35,9 +35,9 @@ func ordinaryWorkspaceMCPTools() []map[string]any {
 		search,
 		{
 			"name":        "workspace_request_access",
-			"description": "Request a workspace search permission expansion separately from search. queries lists exact complete queries; agent_ids lists agents (self means this agent); session_ids lists sessions. Each defaults to [\"*\"]; * must be the only item. timeout_seconds is 0..86400, default 600; 0 means no time deadline, while the turn-end boundary still applies. PAX auto approve can approve explicit requests. This call is nonblocking. Preserve approval_id; while pending, continue other work and query workspace_access_status after poll_after_ms (normally 2000). Use workspace_cancel_access when abandoning the request. Approval does not automatically resume a finished agent; search separately after approval, within the same turn.",
+			"description": "Request a workspace search permission expansion separately from search. queries lists exact complete queries; node_ids lists nodes (self means this node); agent_ids lists agents (self means this agent); session_ids lists sessions. Each defaults to [\"*\"]; * must be the only item. timeout_seconds is 0..86400, default 600; 0 means no time deadline, while the turn-end boundary still applies. PAX auto approve can approve explicit requests. This call is nonblocking. Preserve approval_id; while pending, continue other work and query workspace_access_status after poll_after_ms (normally 2000). Use workspace_cancel_access when abandoning the request. Approval does not automatically resume a finished agent; search separately after approval, within the same turn.",
 			"inputSchema": workspaceObject(map[string]any{
-				"queries": accessList(256), "agent_ids": accessList(4096), "session_ids": accessList(4096), "reason": workspaceString(4096),
+				"queries": accessList(256), "node_ids": accessList(4096), "agent_ids": accessList(4096), "session_ids": accessList(4096), "reason": workspaceString(4096),
 				"timeout_seconds": timeout,
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
@@ -92,7 +92,7 @@ func callOrdinaryWorkspaceMCPTool(ctx context.Context, name string, raw json.Raw
 	}
 	switch name {
 	case "workspace_request_access":
-		for _, key := range []string{"queries", "agent_ids", "session_ids"} {
+		for _, key := range []string{"queries", "node_ids", "agent_ids", "session_ids"} {
 			if _, present := args[key]; !present {
 				args[key] = []any{"*"}
 			}
@@ -102,8 +102,10 @@ func callOrdinaryWorkspaceMCPTool(ctx context.Context, name string, raw json.Raw
 		}
 	case "workspace_search":
 		scope := args["scope"].(map[string]any)
-		if !validWorkspaceScopeList(scope["agent_ids"].([]any)) || !validWorkspaceScopeList(scope["session_ids"].([]any)) {
-			return mcpToolCallResult{}, ordinaryWorkspaceSearchInputError()
+		for _, key := range []string{"node_ids", "agent_ids", "session_ids"} {
+			if !validWorkspaceScopeList(scope[key].([]any)) {
+				return mcpToolCallResult{}, ordinaryWorkspaceSearchInputError()
+			}
 		}
 	case "workspace_access_status", "workspace_cancel_access":
 		if strings.TrimSpace(args["approval_id"].(string)) == "" {
@@ -138,5 +140,5 @@ func validWorkspaceScopeList(values []any) bool {
 }
 
 func ordinaryWorkspaceSearchInputError() error {
-	return errors.New(`workspace_search requires query and explicit scope, for example {"query":"cicd","scope":{"agent_ids":["self"],"session_ids":["*"]}}. Both scope lists must be nonempty; * must be the only item. Put session_ids inside scope. Other agents require workspace_request_access approval`)
+	return errors.New(`workspace_search requires query and explicit scope, for example {"query":"cicd","scope":{"node_ids":["self"],"agent_ids":["*"],"session_ids":["*"]}}. All three scope lists must be nonempty; * must be the only item. node_ids self means this node; agent_ids self means this agent. Put session_ids inside scope. Other nodes require workspace_request_access approval`)
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestWorkspaceToolGivenPendingApprovalWhenRequestedThenPreservesDecisionAndCaller(t *testing.T) {
-	response := `{"status":"pending","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["*"],"agent_ids":["*"],"session_ids":["session-1"]}}`
+	response := `{"status":"pending","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["session-1"]}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/node/agents/agent-1/workspace/tools", r.URL.Path)
 		assert.Equal(t, "node-secret", r.Header.Get("X-Pax-Key"))
@@ -23,11 +23,11 @@ func TestWorkspaceToolGivenPendingApprovalWhenRequestedThenPreservesDecisionAndC
 		assert.Len(t, body, 3)
 		assert.Equal(t, "caller-session", body["session_id"])
 		assert.Equal(t, "request_access", body["tool"])
-		assert.JSONEq(t, `{"queries":["*"],"agent_ids":["*"],"session_ids":["session-1"]}`, body["arguments_json"].(string))
+		assert.JSONEq(t, `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["session-1"]}`, body["arguments_json"].(string))
 		_, _ = w.Write([]byte(`{"code":200,"data":` + response + `}`))
 	}))
 	defer server.Close()
-	data, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{SessionID: "caller-session", Tool: "request_access", ArgumentsJSON: `{"queries":["*"],"agent_ids":["*"],"session_ids":["session-1"]}`})
+	data, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{SessionID: "caller-session", Tool: "request_access", ArgumentsJSON: `{"queries":["*"],"node_ids":["*"],"agent_ids":["*"],"session_ids":["session-1"]}`})
 	require.NoError(t, err)
 	assert.JSONEq(t, response, string(data))
 }
@@ -57,7 +57,7 @@ func TestWorkspaceToolGivenManagerFailureWhenSearchingThenReturnsSafeRecoveryCod
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer server.Close()
-			_, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{SessionID: "caller-session", Tool: "search", ArgumentsJSON: `{"query":"cicd","scope":{"agent_ids":["*"],"session_ids":["*"]}}`})
+			_, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{SessionID: "caller-session", Tool: "search", ArgumentsJSON: `{"query":"cicd","scope":{"node_ids":["self"],"agent_ids":["*"],"session_ids":["*"]}}`})
 			require.Error(t, err)
 			code, message := WorkspaceToolFailure(err)
 			assert.Equal(t, tc.code, code)
@@ -95,7 +95,7 @@ func TestWorkspaceToolGivenLifecycleOperationThenPreservesRequestAndResponse(t *
 	for _, operation := range []string{"access_status", "cancel_access"} {
 		t.Run(operation, func(t *testing.T) {
 			calls := 0
-			response := `{"status":"cancelled","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["*"],"agent_ids":["agent-target"],"session_ids":["*"]},"poll_after_ms":2000}`
+			response := `{"status":"cancelled","approval_id":"approval-1","turn_id":"turn-1","scope":{"queries":["*"],"node_ids":["*"],"agent_ids":["agent-target"],"session_ids":["*"]},"poll_after_ms":2000}`
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				assert.Equal(t, "/api/v1/node/agents/agent-1/workspace/tools", r.URL.Path)
@@ -116,4 +116,30 @@ func TestWorkspaceToolGivenLifecycleOperationThenPreservesRequestAndResponse(t *
 			assert.Equal(t, 1, calls)
 		})
 	}
+}
+
+func TestWorkspaceToolGivenLegacyScopeThenDoesNotSubstituteCallerNode(t *testing.T) {
+	arguments := `{"query":"cicd","scope":{"agent_ids":["self"],"session_ids":["*"]}}`
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var request WorkspaceToolRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		assert.Equal(t, "caller-session", request.SessionID)
+		assert.Equal(t, "search", request.Tool)
+		assert.JSONEq(t, arguments, request.ArgumentsJSON)
+		assert.NotContains(t, request.ArgumentsJSON, "node_ids")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":403,"message":"legacy all-nodes scope requires authorization"}`))
+	}))
+	defer server.Close()
+	_, err := NewClient(server.URL, "node-secret").WorkspaceTool(t.Context(), "agent-1", WorkspaceToolRequest{
+		SessionID: "caller-session", Tool: "search", ArgumentsJSON: arguments,
+	})
+	require.Error(t, err)
+	code, message := WorkspaceToolFailure(err)
+	assert.Equal(t, "authorization_required", code)
+	assert.Contains(t, message, `"node_ids":["self"]`)
+	assert.Contains(t, message, "workspace_request_access")
+	assert.Equal(t, 1, calls)
 }

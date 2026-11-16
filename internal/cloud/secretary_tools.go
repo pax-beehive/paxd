@@ -35,7 +35,7 @@ func secretaryFailure(code string, cause error) *SecretaryToolError {
 	messages := map[string]string{
 		"invalid_request":        "The workspace tool request is invalid.",
 		"unauthenticated":        "Manager authentication failed.",
-		"authorization_required": "Workspace search scope is not authorized. Default permission covers all sessions of this agent (scope: {\"agent_ids\":[\"self\"],\"session_ids\":[\"*\"]}), including under PAX auto approve. Request a turn-scoped expansion separately with workspace_request_access unless the user preauthorized it. PAX auto approve can approve that explicit request. Search never narrows the scope or requests access automatically.",
+		"authorization_required": "Workspace search scope is not authorized. Default permission covers all user-owned agents and sessions on this node (scope: {\"node_ids\":[\"self\"],\"agent_ids\":[\"*\"],\"session_ids\":[\"*\"]}), including under PAX auto approve. Other nodes require a turn-scoped expansion requested separately with workspace_request_access unless the user preauthorized it. PAX auto approve can approve that explicit request. Search never narrows the scope or requests access automatically.",
 		"forbidden":              "Workspace access was denied or the execution is no longer active.",
 		"not_found":              "The source was not found or is no longer accessible.",
 		"version_unavailable":    "The referenced source version is unavailable; read the source again.",
