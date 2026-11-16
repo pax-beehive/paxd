@@ -435,7 +435,9 @@ func (s *LocalAPIServer) Close() error {
 		_ = s.server.Shutdown(ctx)
 	}
 	if s.listener != nil {
-		return s.listener.Close()
+		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }
