@@ -4,6 +4,11 @@ The November 2026 tunnel incident requires changes in paxd, paxkit, and
 pax-manager. Updating Manager alone does not update clients' embedded transport
 engine or fix their ACP worker lifecycle.
 
+The final shared dependency is `paxkit v0.0.0-20261116222722-f08901d65244`
+(`f08901d652447fefd4a0806437b2d606be13dc30`). Both paxd and pax-manager must
+consume this revision for paired validation; merging the shared library does
+not update either consumer's embedded dependency.
+
 ## Failure and recovery behavior
 
 - The production daemon and standalone ACP forwarder wrap SQLite transport
