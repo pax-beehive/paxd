@@ -86,6 +86,7 @@ func cmdLoginCommand() *cli.Command {
 		Name:  "login",
 		Usage: "login this machine to a Pax remote",
 		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "name", Usage: "device display name"},
 			&cli.StringFlag{Name: "remote", Value: "default", Usage: "local remote id"},
 			&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
 			&cli.StringFlag{Name: "api-endpoint", Usage: "optional local API endpoint advertised for this node"},
@@ -105,7 +106,7 @@ func cmdLoginCommand() *cli.Command {
 				RemoteID:    remoteID,
 				CloudAPIURL: cloudURL,
 				Node: remotelogin.NodeRegistrationInfo{
-					Name:        cfg.Agent.Name,
+					Name:        firstNonEmpty(strings.TrimSpace(cmd.String("name")), cfg.Agent.Name),
 					Hostname:    cfg.Agent.Hostname,
 					MachineType: cfg.Agent.MachineType,
 					OS:          runtime.GOOS,
@@ -134,6 +135,7 @@ func cmdSetupCommand() *cli.Command {
 		Name:  "setup",
 		Usage: "login this machine and start paxd as a background service",
 		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "name", Usage: "device display name"},
 			&cli.StringFlag{Name: "cloud-url", Value: config.DefaultCloudAPIURL, Usage: "Pax cloud API URL"},
 			&cli.BoolFlag{Name: "registration-token-env", Usage: "register using the one-time PAX_REGISTRATION_TOKEN environment variable instead of browser pairing"},
 		},
@@ -161,7 +163,7 @@ func cmdSetup(ctx context.Context, cmd *cli.Command) error {
 		RemoteID:    remoteID,
 		CloudAPIURL: cloudURL,
 		Node: remotelogin.NodeRegistrationInfo{
-			Name:        cfg.Agent.Name,
+			Name:        firstNonEmpty(strings.TrimSpace(cmd.String("name")), cfg.Agent.Name),
 			Hostname:    cfg.Agent.Hostname,
 			MachineType: cfg.Agent.MachineType,
 			OS:          runtime.GOOS,

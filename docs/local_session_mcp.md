@@ -32,3 +32,8 @@ BDD: two sessions get different keys; re-expansion is idempotent; prompt frames
 are unchanged; missing configuration is a no-op. Tests are in local_mcp_test.go.
 The sibling agent-browser-runtime/IMPLEMENTATION_PLAN.md describes the runtime
 BDD/TDD plan. Existing resume-configuration work is verified in the same branch.
+
+Manager-created Secretary workspace tools use the already injected conversation
+MCP server and its existing command localization. They do not require adding a
+local configuration file or changing this template mechanism. See
+[Secretary workspace tools](secretary_workspace_mcp.md).

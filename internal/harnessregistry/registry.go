@@ -251,6 +251,18 @@ func normalizeView(name string, view control.HarnessView) control.HarnessView {
 	return view
 }
 
+// DisplayName returns the built-in display name for a harness id. It reads the
+// static detector table only and never probes the machine.
+func DisplayName(harness string) string {
+	name := normalizeName(harness)
+	for _, detector := range DefaultDetectors() {
+		if command, ok := detector.(CommandDetector); ok && normalizeName(command.Harness) == name {
+			return command.DisplayName
+		}
+	}
+	return ""
+}
+
 func normalizeName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }

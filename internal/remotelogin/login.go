@@ -68,7 +68,11 @@ func Login(ctx context.Context, spec LoginSpec, opts Options) (LoginResult, erro
 		stdout = io.Discard
 	}
 
-	start, err := opts.Client.StartNodeRegistration(&cloud.StartNodeRegistrationRequest{
+	sleep := opts.Sleep
+	if sleep == nil {
+		sleep = Sleep
+	}
+	startRequest := &cloud.StartNodeRegistrationRequest{
 		Name:        spec.Node.Name,
 		Hostname:    spec.Node.Hostname,
 		MachineType: spec.Node.MachineType,
@@ -76,6 +80,9 @@ func Login(ctx context.Context, spec LoginSpec, opts Options) (LoginResult, erro
 		Arch:        stringDefault(spec.Node.Arch, runtime.GOARCH),
 		PaxdVersion: spec.Node.PaxdVersion,
 		APIEndpoint: spec.Node.APIEndpoint,
+	}
+	start, err := retryRegistration(ctx, stdout, sleep, func() (*cloud.StartNodeRegistrationResponse, error) {
+		return opts.Client.StartNodeRegistration(startRequest)
 	})
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("start node registration: %w", err)
@@ -93,18 +100,16 @@ func Login(ctx context.Context, spec LoginSpec, opts Options) (LoginResult, erro
 		_ = open(ctx, url)
 	}
 
-	sleep := opts.Sleep
-	if sleep == nil {
-		sleep = Sleep
-	}
 	interval := pollInterval(start.Interval)
 	for {
 		if err := ctx.Err(); err != nil {
 			return LoginResult{}, err
 		}
-		poll, err := opts.Client.PollNodeRegistration(&cloud.PollNodeRegistrationRequest{
-			RegistrationID: start.RegistrationID,
-			PollToken:      start.PollToken,
+		poll, err := retryRegistration(ctx, stdout, sleep, func() (*cloud.PollNodeRegistrationResponse, error) {
+			return opts.Client.PollNodeRegistration(&cloud.PollNodeRegistrationRequest{
+				RegistrationID: start.RegistrationID,
+				PollToken:      start.PollToken,
+			})
 		})
 		if err != nil {
 			return LoginResult{}, fmt.Errorf("poll node registration: %w", err)
@@ -133,6 +138,26 @@ func Login(ctx context.Context, spec LoginSpec, opts Options) (LoginResult, erro
 			if err := sleep(ctx, interval); err != nil {
 				return LoginResult{}, err
 			}
+		}
+	}
+}
+
+// Retry only explicit rate-limit rejections; ambiguous failures may have created
+// a registration already. Long server delays are returned for a manual retry.
+func retryRegistration[T any](ctx context.Context, stdout io.Writer, sleep Sleeper, request func() (*T, error)) (*T, error) {
+	for retries := 0; ; retries++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result, err := request()
+		var limited *cloud.RateLimitError
+		if !errors.As(err, &limited) || retries >= 3 || limited.RetryAfter > time.Minute {
+			return result, err
+		}
+		delay := max(time.Second, limited.RetryAfter)
+		fmt.Fprintf(stdout, "Registration rate limited; retrying in %s...\n", delay)
+		if err := sleep(ctx, delay); err != nil {
+			return nil, err
 		}
 	}
 }

@@ -1,5 +1,6 @@
-// Package harnessauth owns short-lived native harness login processes. It never
-// reads credential files or returns raw subprocess output.
+// Package harnessauth owns short-lived native harness login processes and
+// bounded plan usage reads. It never reads credential files or returns raw
+// subprocess output.
 package harnessauth
 
 import (
@@ -73,6 +74,7 @@ func (m *Manager) Close() {
 func authError(code, message string) error { return control.ControlError{Code: code, Message: message} }
 
 func (m *Manager) Login(ctx context.Context, owner control.Source, commandID string, req control.HarnessAuthLoginCommand) (control.HarnessAuthView, error) {
+	req.Harness = control.NativeHarness(req.Harness)
 	if err := req.Validate(); err != nil {
 		return control.HarnessAuthView{}, err
 	}
@@ -242,13 +244,29 @@ func (m *Manager) wait(ctx context.Context, s *session, cmd *exec.Cmd) {
 		s.view.State = "succeeded"
 		s.view.LoggedIn = status.LoggedIn
 		s.view.AuthMethod = status.AuthMethod
+		s.view.Account = status.Account
 	}
 }
 
+// Status answers in the harness id the caller used (claude-code or claude) and
+// reports "unsupported" for agent types without a native login adapter.
 func (m *Manager) Status(ctx context.Context, owner control.Source, q control.HarnessAuthStatusQuery) (control.HarnessAuthView, error) {
 	if err := q.Validate(); err != nil {
 		return control.HarnessAuthView{}, err
 	}
+	requested := q.Harness
+	if !control.NativeLoginSupported(requested) {
+		return control.HarnessAuthView{Harness: requested, State: "unsupported"}, nil
+	}
+	q.Harness = control.NativeHarness(requested)
+	view, err := m.nativeStatus(ctx, owner, q)
+	if err == nil {
+		view.Harness = requested
+	}
+	return view, err
+}
+
+func (m *Manager) nativeStatus(ctx context.Context, owner control.Source, q control.HarnessAuthStatusQuery) (control.HarnessAuthView, error) {
 	if q.SessionID == "" {
 		m.mu.Lock()
 		if recent := m.latest[loginScope{owner: owner, harness: q.Harness}]; recent != nil && (recent.running || time.Now().Before(recent.expires)) {
@@ -286,8 +304,12 @@ func (m *Manager) authStatus(ctx context.Context, harness string) (control.Harne
 		return control.HarnessAuthView{}, authError("status_failed", "could not check Claude authentication")
 	}
 	var raw struct {
-		LoggedIn   *bool  `json:"loggedIn"`
-		AuthMethod string `json:"authMethod"`
+		LoggedIn     *bool           `json:"loggedIn"`
+		AuthMethod   string          `json:"authMethod"`
+		Email        json.RawMessage `json:"email"`
+		DisplayName  json.RawMessage `json:"displayName"`
+		Organization json.RawMessage `json:"orgName"`
+		Plan         json.RawMessage `json:"subscriptionType"`
 	}
 	if json.Unmarshal(output.data, &raw) != nil || raw.LoggedIn == nil {
 		return control.HarnessAuthView{}, authError("status_failed", "invalid Claude authentication status")
@@ -296,7 +318,11 @@ func (m *Manager) authStatus(ctx context.Context, harness string) (control.Harne
 	if *raw.LoggedIn {
 		state = "logged_in"
 	}
-	return control.HarnessAuthView{Harness: "claude", State: state, LoggedIn: raw.LoggedIn, AuthMethod: raw.AuthMethod}, nil
+	view := control.HarnessAuthView{Harness: "claude", State: state, LoggedIn: raw.LoggedIn, AuthMethod: raw.AuthMethod}
+	if *raw.LoggedIn {
+		view.Account = publicAccount(nativeAccountString(raw.Email), nativeAccountString(raw.DisplayName), nativeAccountString(raw.Organization), nativeAccountString(raw.Plan))
+	}
+	return view, nil
 }
 
 type limitedOutput struct{ data []byte }

@@ -5,11 +5,95 @@ passes a one-time authorization code to its stdin. Claude owns OAuth, token
 refresh, and credential storage. paxd never reads or copies those credentials.
 `claude auth status` verifies successful login and reports the current state.
 
+Logged-in status may include an optional `account` containing native-reported
+`email`, `display_name`, `organization`, and `plan`. Claude uses its JSON status
+fields. Codex ChatGPT/access-token status additionally tries the public
+`codex app-server` `account/read` protocol with `refreshToken: false`; this bounded
+three-second read does not force credential refresh. API keys and unsupported
+CLI versions may not report identity. Failed identity reads preserve the native
+login result and omit the account. Account fields are bounded and allowlisted;
+token files and raw subprocess output are never read or returned by this package.
+Successful login attempts also carry the account from their final native status
+check. Identity metadata is not proof that a provider will accept a model request.
+
 The credential context is the OS account and environment running paxd (including
 HOME and CLAUDE_CONFIG_DIR). Connections with a different account, config directory,
 or credential environment may not use the resulting login. Existing Claude/ACP
 processes may need to be restarted to pick up credentials; this API does not
 interrupt conversations automatically.
+
+## Plan usage
+
+The `harness_usage.status` control query (`{"harness": "claude"|"codex"}`) reads
+subscription plan usage through each CLI's public protocol. It is separate from
+`harness_auth.status` because the native CLI contacts the provider; a failed or
+unsupported usage read never changes authentication state. The query result is
+`query_result.harness_usage`:
+
+```json
+{
+  "harness": "claude",
+  "state": "available",
+  "observed_at": "2026-11-12T17:31:51Z",
+  "plan": "max",
+  "windows": [
+    {"id": "seven_day", "window_minutes": 10080, "used_percent": 3, "resets_at": "2026-11-16T08:59:59Z"},
+    {"id": "seven_day_fable", "window_minutes": 10080, "scope": "Fable", "used_percent": 0, "resets_at": "2026-11-16T09:00:00Z"}
+  ],
+  "extra_usage": {"enabled": false}
+}
+```
+
+- `harness` accepts any PAX agent type id (`[a-z0-9][a-z0-9_-]{0,31}`, such as
+  `claude-code`, `codex`, `kimi`); `claude` remains an alias of `claude-code`
+  and both share one cached read. The response uses the id the caller sent and
+  adds `harness_label` (display name from the built-in registry table; nothing
+  on the machine is probed). Agent types without a usage adapter return
+  `unsupported` without starting a process. `harness_auth.status` likewise
+  accepts any id and reports `unsupported` for agent types without native
+  login; `harness_auth.login` accepts `claude-code` as `claude`.
+- `items` is the display-ready list clients should render. Each item has `id`,
+  English `label`, and `kind`: `percent` (`used_percent`, optional
+  `window_minutes`, `resets_at`), `amount` (`used`, optional `limit`, `unit`,
+  `resets_at`), or `status` (`value`); `severity` is optional. Claude maps its
+  windows to percent items labelled by window length and model scope (for
+  example `Weekly · Fable`) plus an `Extra usage` status; Codex maps
+  `primary`/`secondary` windows plus a `Credits` status (`available`,
+  `unlimited`, or `none`; the balance has no documented unit and is omitted).
+  `windows` and `extra_usage` are deprecated and kept for older clients.
+- `state` is `available`, `unsupported` (the credential has no plan limits, such
+  as an API key, Console login, or no sign-in), or `unavailable` with
+  `error_code` `cli_unsupported`, `read_failed`, or `timeout`. Windows and
+  `extra_usage` appear only when available; at most 12 windows, each with an id
+  matching `[a-z0-9_]{1,64}`, `window_minutes`, optional model `scope`,
+  `used_percent` in 0-100, and optional `resets_at`.
+- Claude: `claude -p --input-format stream-json --output-format stream-json
+  --verbose --strict-mcp-config --settings '{"disableAllHooks":true}'` sends the
+  SDK `initialize` and `get_usage` (`skip_behaviors: true`) control requests and
+  no user message, so no model request is made. `get_usage` is marked
+  experimental by the Agent SDK; an older or changed CLI yields
+  `cli_unsupported` or `read_failed`. Only the SDK-typed fields `five_hour`,
+  `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `model_scoped`, and
+  `extra_usage.is_enabled` are mapped; other response fields are discarded.
+  Without `--strict-mcp-config` and disabled hooks, a prompt-less session still
+  connects MCP servers (including claude.ai connectors) and runs `SessionStart`,
+  `InstructionsLoaded`, and `SessionEnd` hooks.
+- Codex: `codex app-server` sends `initialize`, `account/read`
+  (`refreshToken: false`), and `account/rateLimits/read`; non-ChatGPT accounts
+  are `unsupported`. Only `primary`/`secondary` windows and `planType` are mapped;
+  credits and other fields are discarded.
+- Both run in the daemon's private `harness-usage` directory next to the
+  database (mode 0700), because `-p` skips Claude's workspace trust check and
+  project settings in the working directory would otherwise apply. They use the
+  daemon's credential context, like login status. After the response, stdin is
+  closed and the CLI gets three seconds to exit on its own (Claude writes its
+  usage cache to `~/.claude.json`) before the process group is stopped.
+- Reads are bounded (10 s for Claude, 5 s for Codex, capped output) and shared:
+  concurrent callers join one in-flight read, which a cancelled caller does not
+  abort. Results are cached per harness for 60 s, or 15 s when unavailable. The
+  Claude CLI also caches usage for about a minute, so data can be up to roughly
+  two minutes old. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` in the daemon
+  environment makes the CLI answer only from its cache.
 
 ## Local API
 

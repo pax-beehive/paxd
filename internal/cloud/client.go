@@ -409,6 +409,9 @@ func (c *Client) StartNodeRegistration(
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := registrationRateLimit(resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("start node registration: status %d: %s", resp.StatusCode, string(body))
@@ -425,6 +428,9 @@ func (c *Client) PollNodeRegistration(
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := registrationRateLimit(resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("poll node registration: status %d: %s", resp.StatusCode, string(body))

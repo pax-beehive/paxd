@@ -48,7 +48,11 @@ func (m *Manager) codexStatus(ctx context.Context) (control.HarnessAuthView, err
 	if loggedIn {
 		state = "logged_in"
 	}
-	return control.HarnessAuthView{Harness: "codex", State: state, LoggedIn: &loggedIn, AuthMethod: method}, nil
+	view := control.HarnessAuthView{Harness: "codex", State: state, LoggedIn: &loggedIn, AuthMethod: method}
+	if loggedIn && (method == "chatgpt" || method == "access_token") {
+		view.Account = m.codexAccount(ctx)
+	}
+	return view, nil
 }
 
 var ansiCSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)

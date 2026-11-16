@@ -304,7 +304,7 @@ main() {
     # The calling shell cannot inherit PATH changes from a piped installer.
     # Setup and the background service must still resolve both installed tools.
     export PATH="$install_dir:${PATH:-}"
-    setup_args=(setup)
+    setup_args=(setup "$@")
     if [[ -n "${PAX_REGISTRATION_TOKEN:-}" ]]; then
       log "Connecting this device with the registration token"
       setup_args+=(--registration-token-env)

@@ -15,8 +15,9 @@ import (
 )
 
 type DefaultScanner struct {
-	Timeout     time.Duration
-	PaxlCommand []string
+	Timeout       time.Duration
+	PaxlCommand   []string
+	RouteResolver ACPRouteResolver
 }
 
 func (s DefaultScanner) ListSessions(
@@ -142,10 +143,20 @@ func (s DefaultScanner) listPaxlSessions(
 			}
 		}
 	}
-	sessions, err := client.ListSessions(ctx, agent, spec.Limit)
+	listLimit := spec.Limit
+	if s.RouteResolver != nil {
+		// Internal work must not consume the user-session report quota.
+		listLimit = 0
+	}
+	sessions, err := client.ListSessions(ctx, agent, listLimit)
 	if err != nil {
 		return nil, err
 	}
+	sessions, err = s.excludeSecretaryWorkSessions(ctx, spec, sessions)
+	if err != nil {
+		return nil, err
+	}
+	sessions = limitSessions(sessions, spec.Limit)
 	for i := range sessions {
 		messages, err := client.GetSessionMessages(ctx, sessions[i].SessionID, sessions[i].AgentType)
 		if err != nil {
@@ -154,6 +165,29 @@ func (s DefaultScanner) listPaxlSessions(
 		sessions[i].Messages = messages
 	}
 	return sessions, nil
+}
+
+func (s DefaultScanner) excludeSecretaryWorkSessions(
+	ctx context.Context,
+	spec SessionScannerSpec,
+	sessions []model.SessionInfo,
+) ([]model.SessionInfo, error) {
+	if s.RouteResolver == nil {
+		return sessions, nil
+	}
+	out := make([]model.SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		nativeID := firstNonEmpty(session.NativeID, session.SessionID)
+		managerID, found, err := s.RouteResolver.ResolveManagerSessionID(ctx, spec.ConnectionID, nativeID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve native session %q before reading history: %w", nativeID, err)
+		}
+		if found && isSecretaryWorkSession(managerID) {
+			continue
+		}
+		out = append(out, session)
+	}
+	return out, nil
 }
 
 func resolvePaxlCommand(command []string) ([]string, bool) {

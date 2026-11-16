@@ -29,6 +29,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/hostmetrics"
 	"github.com/pax-beehive/paxd/internal/localapi"
 	"github.com/pax-beehive/paxd/internal/localsessions"
+	"github.com/pax-beehive/paxd/internal/mobilecontrol"
 	"github.com/pax-beehive/paxd/internal/paxlinstall"
 	"github.com/pax-beehive/paxd/internal/secretchannel"
 	"github.com/pax-beehive/paxd/internal/sessionreporter"
@@ -52,6 +53,7 @@ func DefaultControlSocketPath() string {
 
 type Runtime struct {
 	harnessAuth      *harnessauth.Manager
+	harnessUsage     *harnessauth.UsageReader
 	Store            *daemonstore.Store
 	Control          control.Service
 	LocalHandler     http.Handler
@@ -205,6 +207,12 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		},
 	}
 	harnessAuth := harnessauth.New(ctx, harnessauth.Options{})
+	// Native usage reads run in an empty paxd-owned directory so no project
+	// configuration from an arbitrary working directory applies to them.
+	harnessUsage := harnessauth.NewUsageReader(ctx, harnessauth.UsageOptions{
+		WorkDir: filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "harness-usage"),
+		Label:   harnessregistry.DisplayName,
+	})
 	paxlOptions := paxdUpdaterOptions(store, "", filepath.Join(filepath.Dir(cfg.Daemon.DBPath), "paxl-updates"))
 	paxlOptions.ResolverURL = strings.TrimSpace(os.Getenv("PAXD_PAXL_UPDATE_RESOLVER_URL"))
 	resolvePaxd := paxlOptions.ResolverURLForRemote
@@ -216,6 +224,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		HarnessInstaller:    &harnessUpgradeCoordinator{store: store, supervisors: supervisors, maintenance: maintenance},
 		PaxlInstaller:       &paxlinstall.Installer{Options: paxlOptions},
 		HarnessAuth:         harnessAuth,
+		HarnessUsage:        harnessUsage,
 		Store:               store,
 		Supervisors:         supervisors,
 		Harnesses:           harnesses,
@@ -229,6 +238,7 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		PaxdLifecycle:       maintenance,
 		SecretChannel:       secretChannelRegistry,
 		BrowserControl:      &browsercontrol.Client{},
+		MobileControl:       &mobilecontrol.Client{},
 		ArtifactFetch:       artifactFetches,
 	})
 	if err := supervisors.Configure(store, service); err != nil {
@@ -237,11 +247,12 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 	var reports interface{ Start(context.Context) }
 	maintenance.Configure(supervisors.acpPoolRegistry, paxdUpdater, store)
 	if supervisors.agentRuntimeSource != nil {
+		routeResolver := sessionReportRouteResolver{store: store}
 		reports = sessionreporter.New(sessionreporter.Options{
 			RuntimeSource:   supervisors.agentRuntimeSource,
-			Scanner:         sessionreporter.DefaultScanner{},
+			Scanner:         sessionreporter.DefaultScanner{RouteResolver: routeResolver},
 			Reporter:        sessionreporter.CloudReporter{Headers: auth.NewProvider(store, nil)},
-			RouteResolver:   sessionReportRouteResolver{store: store},
+			RouteResolver:   routeResolver,
 			ManagedSessions: store,
 			BatchSize:       cfg.Daemon.SessionBatchSize,
 		})
@@ -257,9 +268,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	return &Runtime{
-		harnessAuth: harnessAuth,
-		Store:       store,
-		Control:     service,
+		harnessAuth:  harnessAuth,
+		harnessUsage: harnessUsage,
+		Store:        store,
+		Control:      service,
 		LocalHandler: localapi.NewHandlerWithCron(artifactControlService{
 			Service:      service,
 			publications: artifactPublications,

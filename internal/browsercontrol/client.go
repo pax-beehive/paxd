@@ -18,10 +18,11 @@ import (
 )
 
 type Client struct {
-	DataDir     string
-	mu          sync.Mutex
-	previewMu   sync.Mutex
-	vncSessions map[string]*vncSession
+	DataDir         string
+	mu              sync.Mutex
+	previewMu       sync.Mutex
+	vncSessions     map[string]*vncSession
+	dockerTextInput func(context.Context, string) error
 }
 
 func (c *Client) Request(ctx context.Context, source, operation string, payload json.RawMessage) (json.RawMessage, error) {
@@ -45,6 +46,9 @@ func (c *Client) Request(ctx context.Context, source, operation string, payload 
 			return nil, errors.New("invalid browser view")
 		}
 		if view.Source == "docker" {
+			if view.Action.Type == "text" {
+				return c.dockerText(ctx, source, payload)
+			}
 			if view.Action.Type != "screenshot" {
 				return nil, errors.New("unsupported Docker preview action")
 			}

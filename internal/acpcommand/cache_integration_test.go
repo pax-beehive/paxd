@@ -47,7 +47,7 @@ func TestNPMFallbackReusesInstalledVersionAfterNewRelease(t *testing.T) {
 			mode       int64
 		}{
 			{"package/package.json", string(manifest), 0644},
-			{"package/cli.js", "#!/usr/bin/env node\nconsole.log('" + version + "')\n", 0755},
+			{"package/cli.js", "#!/usr/bin/env node\nconsole.error('Fixture diagnostic on stderr.')\nconsole.log('" + version + "')\n", 0755},
 		} {
 			require.NoError(t, tw.WriteHeader(&tar.Header{Name: file.name, Mode: file.mode, Size: int64(len(file.body))}))
 			_, writeErr := tw.Write([]byte(file.body))
@@ -79,6 +79,19 @@ func TestNPMFallbackReusesInstalledVersionAfterNewRelease(t *testing.T) {
 	defer server.Close()
 	registryURL = server.URL
 	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	require.NoError(t, os.Mkdir(bin, 0755))
+	node, err := exec.LookPath("node")
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(node, filepath.Join(bin, "node")))
+	globalBin := filepath.Join(root, "host-bin")
+	require.NoError(t, os.Mkdir(globalBin, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalBin, "claude-agent-acp"),
+		[]byte("#!/bin/sh\nprintf 'Unexpected global adapter.\\n'\n"), 0755))
+	t.Setenv("PATH", globalBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// npm exec can reuse a global adapter from PATH before consulting the
+	// fixture registry, so isolate launchers as well as config and cache.
+	isolatedPath := strings.Join([]string{bin, "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	run := func(command []string) string {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
@@ -87,9 +100,12 @@ func TestNPMFallbackReusesInstalledVersionAfterNewRelease(t *testing.T) {
 		// Isolate npm config and cache; never touch the developer's installed packages.
 		cmd.Env = append(os.Environ(), "npm_config_cache="+filepath.Join(root, "cache"), "npm_config_registry="+server.URL,
 			"npm_config_userconfig="+filepath.Join(root, "npmrc"), "npm_config_globalconfig="+filepath.Join(root, "global-npmrc"),
-			"npm_config_audit=false", "npm_config_fund=false", "npm_config_update_notifier=false", "npm_config_offline=false")
-		output, runErr := cmd.CombinedOutput()
-		require.NoError(t, runErr, "%s", output)
+			"npm_config_audit=false", "npm_config_fund=false", "npm_config_update_notifier=false", "npm_config_offline=false",
+			"npm_config_prefix="+filepath.Join(root, "prefix"), "PATH="+isolatedPath)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		output, runErr := cmd.Output()
+		require.NoError(t, runErr, "stdout: %s\nstderr: %s", output, stderr.String())
 		return strings.TrimSpace(string(output))
 	}
 	command := PreferCached([]string{npm, "exec", "--yes", pkg})

@@ -24,18 +24,26 @@ type backgroundTurn struct {
 	processEpoch string
 }
 
+type subagentTurn struct {
+	turnID    string
+	completed bool
+}
+
 type sessionUpdateFacts struct {
-	kind            string
-	toolCallID      string
-	parentToolUseID string
-	autonomousEnd   bool
+	kind             string
+	toolCallID       string
+	parentToolUseID  string
+	autonomousEnd    bool
+	subagentThreadID string
+	subagentActivity string
 }
 
 func parseSessionUpdateFacts(params json.RawMessage) sessionUpdateFacts {
 	var envelope struct {
 		Update struct {
-			SessionUpdate string `json:"sessionUpdate"`
-			ToolCallID    string `json:"toolCallId"`
+			SessionUpdate string          `json:"sessionUpdate"`
+			ToolCallID    string          `json:"toolCallId"`
+			RawInput      json.RawMessage `json:"rawInput"`
 			Meta          struct {
 				ClaudeCode struct {
 					ParentToolUseID string `json:"parentToolUseId"`
@@ -51,10 +59,19 @@ func parseSessionUpdateFacts(params json.RawMessage) sessionUpdateFacts {
 	}
 	update := envelope.Update
 	origin := update.Meta.Origin
+	var activity struct {
+		Kind     string `json:"activityKind"`
+		ThreadID string `json:"agentThreadId"`
+	}
+	// Other tools may use a string or array as input. Invalid activity data
+	// must not discard their tool call identity or Claude attribution.
+	_ = json.Unmarshal(update.RawInput, &activity)
 	return sessionUpdateFacts{
-		kind:            update.SessionUpdate,
-		toolCallID:      strings.TrimSpace(update.ToolCallID),
-		parentToolUseID: strings.TrimSpace(update.Meta.ClaudeCode.ParentToolUseID),
+		kind:             update.SessionUpdate,
+		toolCallID:       strings.TrimSpace(update.ToolCallID),
+		parentToolUseID:  strings.TrimSpace(update.Meta.ClaudeCode.ParentToolUseID),
+		subagentThreadID: strings.TrimSpace(activity.ThreadID),
+		subagentActivity: strings.TrimSpace(activity.Kind),
 		// claude-agent-acp stamps the origin of a cycle it did not start for a
 		// prompt on the usage update it sends at that cycle's result.
 		autonomousEnd: update.SessionUpdate == "usage_update" &&
@@ -91,6 +108,9 @@ func (r *ACPRouter) sessionUpdateTurnContext(
 		return r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch), noop
 	}
 	facts := parseSessionUpdateFacts(params)
+	if facts.kind == "tool_call" && facts.subagentThreadID != "" && facts.subagentActivity != "" {
+		return r.subagentActivityTurnContext(ctx, nativeSessionID, slotID, processEpoch, facts), noop
+	}
 	if turnID, ok := r.attributedToolCallTurn(nativeSessionID, facts); ok {
 		return withACPTurnID(ctx, turnID), noop
 	}
@@ -105,6 +125,44 @@ func (r *ACPRouter) sessionUpdateTurnContext(
 		return ctx, func() { r.completeBackgroundTurn(nativeSessionID, slotID, processEpoch) }
 	}
 	return ctx, noop
+}
+
+// Codex announces lifecycle events with different tool call ids for the same
+// child thread. These notifications belong to its work, not a new main turn.
+func (r *ACPRouter) subagentActivityTurnContext(
+	ctx context.Context,
+	nativeSessionID string,
+	slotID string,
+	processEpoch string,
+	facts sessionUpdateFacts,
+) context.Context {
+	ctx = r.outputTurnContext(ctx, nativeSessionID, slotID, processEpoch)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Lifecycle event ids are stable across replays, including a replay of a
+	// start or interaction after the child has already moved to a new turn.
+	if turnID := r.toolCallTurns[toolCallTurnKey(nativeSessionID, facts.toolCallID)]; turnID != "" {
+		return withACPTurnID(ctx, turnID)
+	}
+	key := toolCallTurnKey(nativeSessionID, facts.subagentThreadID)
+	owner, exists := r.subagentTurns[key]
+	if !exists || facts.subagentActivity == "started" || (facts.subagentActivity == "interacted" && owner.completed) {
+		owner = subagentTurn{turnID: acpTurnID(ctx)}
+	}
+	owner.completed = facts.subagentActivity == "completed"
+	if owner.turnID != "" {
+		if _, exists := r.subagentTurns[key]; !exists {
+			r.subagentTurnKeys = append(r.subagentTurnKeys, key)
+		}
+		r.subagentTurns[key] = owner
+		if len(r.subagentTurnKeys) > toolCallTurnLimit {
+			delete(r.subagentTurns, r.subagentTurnKeys[0])
+			r.subagentTurnKeys = r.subagentTurnKeys[1:]
+		}
+	}
+	r.rememberToolCallTurnLocked(nativeSessionID, facts.toolCallID, owner.turnID)
+	return withACPTurnID(ctx, owner.turnID)
 }
 
 // attributedToolCallTurn keeps a tool call update on the turn that announced

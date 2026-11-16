@@ -26,21 +26,31 @@ type HarnessAuthStatusQuery struct {
 }
 
 type HarnessAuthView struct {
-	Harness          string `json:"harness"`
-	SessionID        string `json:"session_id,omitempty"`
-	State            string `json:"state"`
-	AuthorizationURL string `json:"authorization_url,omitempty"`
-	Method           string `json:"method,omitempty"`
-	UserCode         string `json:"user_code,omitempty"`
-	ExpiresAt        string `json:"expires_at,omitempty"`
-	LoggedIn         *bool  `json:"logged_in,omitempty"`
-	AuthMethod       string `json:"auth_method,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
+	Harness          string              `json:"harness"`
+	SessionID        string              `json:"session_id,omitempty"`
+	State            string              `json:"state"`
+	AuthorizationURL string              `json:"authorization_url,omitempty"`
+	Method           string              `json:"method,omitempty"`
+	UserCode         string              `json:"user_code,omitempty"`
+	ExpiresAt        string              `json:"expires_at,omitempty"`
+	LoggedIn         *bool               `json:"logged_in,omitempty"`
+	AuthMethod       string              `json:"auth_method,omitempty"`
+	ErrorCode        string              `json:"error_code,omitempty"`
+	Account          *HarnessAuthAccount `json:"account,omitempty"`
+}
+
+// HarnessAuthAccount contains only native-reported public account metadata.
+type HarnessAuthAccount struct {
+	Email        string `json:"email,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	Organization string `json:"organization,omitempty"`
+	Plan         string `json:"plan,omitempty"`
 }
 
 func (c HarnessAuthLoginCommand) Validate() error {
+	c.Harness = NativeHarness(c.Harness)
 	if c.Harness != "claude" && c.Harness != "codex" {
-		return invalid("harness", "authentication is supported for claude and codex")
+		return invalid("harness", "authentication is supported for claude-code and codex")
 	}
 	if len(c.SessionID) > 128 {
 		return invalid("session_id", "invalid login session id")
@@ -85,11 +95,19 @@ func (c HarnessAuthLoginCommand) Validate() error {
 	return nil
 }
 
+// Status accepts any harness id; ids without native login support report the
+// "unsupported" state instead of an error.
 func (q HarnessAuthStatusQuery) Validate() error {
-	if (q.Harness != "claude" && q.Harness != "codex") || len(q.SessionID) > 128 {
-		return invalid("harness_auth_status", "expected claude or codex and an optional login session id")
+	if !ValidHarnessID(q.Harness) || len(q.SessionID) > 128 {
+		return invalid("harness_auth_status", "expected a harness id and an optional login session id")
 	}
 	return nil
+}
+
+// NativeLoginSupported reports whether paxd can run the native login for id.
+func NativeLoginSupported(id string) bool {
+	native := NativeHarness(id)
+	return native == "claude" || native == "codex"
 }
 
 func validHarnessAuthSource(src Source) bool {

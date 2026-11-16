@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 )
@@ -401,7 +402,9 @@ func (query Query) Validate() error {
 		{QueryCommandGet, query.GetCommand != nil, validatePtr(query.GetCommand)},
 		{QueryAttachmentLocalStatus, query.GetAttachmentLocalStatus != nil, validatePtr(query.GetAttachmentLocalStatus)},
 		{QueryBrowserControl, query.BrowserControl != nil, validatePtr(query.BrowserControl)},
+		{QueryMobileControl, query.MobileControl != nil, validatePtr(query.MobileControl)},
 		{QueryHarnessAuthStatus, query.HarnessAuthStatus != nil, validatePtr(query.HarnessAuthStatus)},
+		{QueryHarnessUsageStatus, query.HarnessUsageStatus != nil, validatePtr(query.HarnessUsageStatus)},
 		{QuerySecretChannelOpen, query.OpenSecretChannel != nil, validatePtr(query.OpenSecretChannel)},
 		{QueryArtifactFetchCheck, query.CheckArtifactFetch != nil, validatePtr(query.CheckArtifactFetch)},
 	}
@@ -591,7 +594,7 @@ func knownCommandType(typ CommandType) bool {
 
 func knownQueryType(typ QueryType) bool {
 	switch typ {
-	case QueryDirectoriesList, QueryHarnessAuthStatus, QueryStatusGet,
+	case QueryDirectoriesList, QueryHarnessAuthStatus, QueryHarnessUsageStatus, QueryStatusGet,
 		QueryDiagnosticsGet,
 		QueryRemotesList,
 		QueryRemoteGet,
@@ -605,7 +608,7 @@ func knownQueryType(typ QueryType) bool {
 		QueryLocalSessionGet,
 		QueryCommandGet,
 		QueryAttachmentLocalStatus,
-		QuerySecretChannelOpen, QueryBrowserControl,
+		QuerySecretChannelOpen, QueryBrowserControl, QueryMobileControl,
 		QueryArtifactFetchCheck:
 		return true
 	default:
@@ -626,5 +629,17 @@ func (query BrowserControlQuery) Validate() error {
 		return nil
 	default:
 		return invalid("browser_control", "unsupported operation")
+	}
+}
+
+func (query MobileControlQuery) Validate() error {
+	if len(query.Payload) > 16384 || len(query.Payload) > 0 && !json.Valid(query.Payload) {
+		return invalid("mobile_control", "payload is invalid or too large")
+	}
+	switch query.Operation {
+	case "state", "templates", "create", "start", "stop", "destroy", "takeover", "release", "screenshot", "tap", "swipe", "text", "key", "recording_start", "recording_stop", "recording_list", "recording_read":
+		return nil
+	default:
+		return invalid("mobile_control", "unsupported operation")
 	}
 }

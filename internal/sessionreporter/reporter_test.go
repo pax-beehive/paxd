@@ -491,7 +491,8 @@ func TestRunOnceDoesNotFallbackWhenRouteResolutionFails(t *testing.T) {
 			SessionID: "codex:native_1",
 			NativeID:  "native_1",
 		}}},
-		Reporter: reporter,
+		Reporter:        reporter,
+		ManagedSessions: fakeManagedSessionSource{reportLocalSessions: true},
 		RouteResolver: &fakeRouteResolver{routes: map[string]routeResolution{
 			"conn_1/native_1": {err: errors.New("sqlite unavailable")},
 		}},
@@ -663,4 +664,43 @@ func (r *fakeCloudReporter) countForRemote(remoteID string) int {
 		}
 	}
 	return count
+}
+
+func TestRunOnceReportsUntrackedLocalSessionsOnlyAfterExplicitOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		enabled, shared bool
+		want            int
+	}{
+		{"enabled", true, false, 2}, {"disabled", false, false, 1}, {"shared cloud", true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := fakeRuntimeSource{runtimes: []supervisor.ObservedAgentRuntime{{Spec: runtimes.AgentConnectionSpec{
+				ConnectionID: "conn_1", RemoteID: "remote_1", CloudAPIURL: "https://one.example", CloudAgentID: "agent_1", AgentType: "codex",
+			}}}}
+			reporter := &fakeCloudReporter{}
+			service := New(Options{
+				RuntimeSource: source,
+				Scanner: &fakeScanner{sessions: []model.SessionInfo{
+					{SessionID: "codex:fork", NativeID: "fork", Name: "Local fork"},
+					{SessionID: "codex:pending", NativeID: "pending"},
+					{SessionID: "codex:bound", NativeID: "bound"},
+				}},
+				Reporter:        reporter,
+				ManagedSessions: fakeManagedSessionSource{reportLocalSessions: tc.enabled, sharedCloudTarget: tc.shared, ids: map[string]struct{}{"pending": {}, "bound": {}}},
+				RouteResolver: &fakeRouteResolver{routes: map[string]routeResolution{
+					"conn_1/pending": {found: true}, "conn_1/bound": {found: true, managerSessionID: "sess_bound"},
+				}},
+			})
+			require.NoError(t, service.RunOnce(context.Background()))
+			require.Len(t, reporter.calls, 1)
+			require.Len(t, reporter.calls[0].sessions, tc.want)
+			got := reporter.calls[0].sessions
+			assert.Equal(t, "sess_bound", got[len(got)-1].SessionID)
+			if tc.want == 2 {
+				assert.Equal(t, "codex:fork", got[0].SessionID)
+				assert.Equal(t, "fork", got[0].NativeID)
+			}
+		})
+	}
 }

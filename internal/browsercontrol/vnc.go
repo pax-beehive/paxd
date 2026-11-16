@@ -92,17 +92,6 @@ func (c *Client) vnc(ctx context.Context, source, operation string, payload json
 func (c *Client) openVNC(ctx context.Context, source string) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for id, s := range c.vncSessions {
-		s.mu.Lock()
-		closed := s.closed
-		s.mu.Unlock()
-		if closed {
-			delete(c.vncSessions, id)
-		}
-	}
-	if len(c.vncSessions) >= 2 {
-		return nil, errors.New("too many VNC viewers")
-	}
 	conn, err := dialDockerVNC(ctx)
 	if err != nil {
 		return nil, err
@@ -115,12 +104,24 @@ func (c *Client) openVNC(ctx context.Context, source string) (json.RawMessage, e
 	id := hex.EncodeToString(idBytes)
 	s := &vncSession{source: source, conn: conn, created: time.Now()}
 	s.timer = time.AfterFunc(30*time.Second, func() { s.mu.Lock(); defer s.mu.Unlock(); s.close() })
+	c.replaceVNCControllerLocked(id, s)
+	go s.read()
+	return json.Marshal(vncResult{ID: id, Data: base64.StdEncoding.EncodeToString([]byte("RFB 003.008\n"))})
+}
+
+// Called with c.mu held, only after the replacement authenticated successfully.
+// Preview captures use independent read-only connections and are not controllers.
+func (c *Client) replaceVNCControllerLocked(id string, next *vncSession) {
+	for previousID, previous := range c.vncSessions {
+		previous.mu.Lock()
+		previous.close()
+		previous.mu.Unlock()
+		delete(c.vncSessions, previousID)
+	}
 	if c.vncSessions == nil {
 		c.vncSessions = make(map[string]*vncSession)
 	}
-	c.vncSessions[id] = s
-	go s.read()
-	return json.Marshal(vncResult{ID: id, Data: base64.StdEncoding.EncodeToString([]byte("RFB 003.008\n"))})
+	c.vncSessions[id] = next
 }
 
 func dialDockerVNC(ctx context.Context) (net.Conn, error) {

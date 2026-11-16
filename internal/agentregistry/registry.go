@@ -133,9 +133,9 @@ func Default() Registry {
 			Name:            "dscode",
 			Kind:            "acp",
 			Command:         []string{"dscode", "acp"},
-			InstallCommands: [][]string{{"npm", "install", "-g", "@toddzheng024/dscode@latest"}},
+			InstallCommands: [][]string{{"paxl", "daemon", "harness", "install", "dscode"}},
 			Source:          "native",
-			InstallHint:     "Install a DSCODE build with native dscode acp support and configure credentials in the TUI.",
+			InstallHint:     "Install the official self-contained DSCODE release with paxl daemon harness install dscode; add ~/.local/bin to the daemon PATH and configure providers with /login. Legacy npm/Hub installations require explicit data migration.",
 		},
 	}}
 }

@@ -104,6 +104,7 @@ type ServiceOptions struct {
 	HarnessInstaller    HarnessInstaller
 	PaxlInstaller       PaxlInstaller
 	HarnessAuth         HarnessAuth
+	HarnessUsage        HarnessUsage
 	Store               Store
 	Supervisors         Supervisors
 	Harnesses           HarnessRegistry
@@ -116,6 +117,7 @@ type ServiceOptions struct {
 	SessionRuntimeReset SessionRuntimeResetService
 	PaxdLifecycle       PaxdLifecycle
 	BrowserControl      BrowserControl
+	MobileControl       MobileControl
 	SecretChannel       SecretChannel
 	ArtifactFetch       ArtifactFetchService
 }
@@ -126,6 +128,7 @@ type ControlService struct {
 	paxlInstaller        PaxlInstaller
 	paxlUpgradeActive    sync.Map
 	harnessAuth          HarnessAuth
+	harnessUsage         HarnessUsage
 	store                Store
 	supervisors          Supervisors
 	harnesses            HarnessRegistry
@@ -138,6 +141,7 @@ type ControlService struct {
 	sessionRuntimeReset  SessionRuntimeResetService
 	paxdLifecycle        PaxdLifecycle
 	browserControl       BrowserControl
+	mobileControl        MobileControl
 	secretChannel        SecretChannel
 	artifactFetch        ArtifactFetchService
 }
@@ -147,6 +151,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		paxlInstaller:       opts.PaxlInstaller,
 		harnessInstaller:    opts.HarnessInstaller,
 		harnessAuth:         opts.HarnessAuth,
+		harnessUsage:        opts.HarnessUsage,
 		store:               opts.Store,
 		supervisors:         opts.Supervisors,
 		harnesses:           opts.Harnesses,
@@ -160,6 +165,7 @@ func NewService(opts ServiceOptions) *ControlService {
 		paxdLifecycle:       opts.PaxdLifecycle,
 		secretChannel:       opts.SecretChannel,
 		browserControl:      opts.BrowserControl,
+		mobileControl:       opts.MobileControl,
 		artifactFetch:       opts.ArtifactFetch,
 	}
 }
@@ -487,6 +493,19 @@ func (s *ControlService) HandleQuery(ctx context.Context, src Source, query Quer
 	}
 	if query.Type == QueryHarnessAuthStatus {
 		return s.handleHarnessAuthStatus(ctx, src, *query.HarnessAuthStatus)
+	}
+	if query.Type == QueryHarnessUsageStatus {
+		return s.handleHarnessUsageStatus(ctx, src, *query.HarnessUsageStatus)
+	}
+	if query.Type == QueryMobileControl {
+		if s.mobileControl == nil || src.Kind != SourceLocal && (src.Kind != SourceRemote || src.RemoteID == "") {
+			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: "mobile control unavailable"})}, nil
+		}
+		body, err := s.mobileControl.Request(ctx, string(src.Kind)+":"+src.RemoteID, query.MobileControl.Operation, query.MobileControl.Payload)
+		if err != nil {
+			return QueryResult{Type: query.Type, Error: ptr(ControlError{Code: ErrCodeInternal, Message: err.Error()})}, nil
+		}
+		return QueryResult{Type: query.Type, MobileControl: body}, nil
 	}
 	if query.Type == QueryBrowserControl {
 		if s.browserControl == nil || src.Kind != SourceLocal && (src.Kind != SourceRemote || src.RemoteID == "") {
