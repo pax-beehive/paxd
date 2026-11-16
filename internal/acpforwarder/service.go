@@ -102,6 +102,9 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		connected, err := s.runOnce(ctx)
+		if errors.Is(err, reliablemq.ErrInboundHistoryInconsistent) {
+			return err
+		}
 		if connected {
 			backoff = s.cfg.ReconnectInterval
 		}
@@ -209,6 +212,14 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	if err := cmd.Start(); err != nil {
 		return true, fmt.Errorf("start acp command: %w", err)
 	}
+	waitStarted := false
+	defer func() {
+		cancel()
+		_ = stdin.Close()
+		if !waitStarted {
+			_ = cmd.Wait()
+		}
+	}()
 
 	log.Printf("[acp-forwarder] connected %s -> %s", tunnelURL.Redacted(), s.cfg.Command[0])
 
@@ -224,6 +235,15 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 			log.Printf("[acp-forwarder] producer write-behind close failed: %v", err)
 		}
 	}()
+	// Replay can generate enough responses to fill the worker's stdout pipe.
+	// Drain output while recovering; the producer journals it before binding.
+	errCh := make(chan error, 3)
+	go func() {
+		errCh <- s.copyStdoutToWSWithEngine(stdout, engine)
+		_ = stdin.Close()
+		_ = conn.Close()
+	}()
+	go logStderr(stderr)
 	response, err := s.reconcilePaxdProducer(runCtx, conn, producer, &wsWriteMu)
 	if err != nil {
 		return true, fmt.Errorf("reconcile producer: %w", err)
@@ -240,20 +260,22 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("producer recovery barrier: %w", err)
 	}
 
-	errCh := make(chan error, 3)
 	go func() { errCh <- s.copyWSToStdinWithEngine(conn, engine) }()
-	go func() { errCh <- s.copyStdoutToWSWithEngine(stdout, engine) }()
-	go logStderr(stderr)
 
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
+	processDone := make(chan struct{})
+	var processErr error
+	go func() {
+		processErr = cmd.Wait()
+		close(processDone)
+	}()
+	waitStarted = true
 
 	var result error
 	select {
 	case err := <-errCh:
 		result = err
-	case err := <-waitCh:
-		result = err
+	case <-processDone:
+		result = processErr
 	case <-ctx.Done():
 		result = ctx.Err()
 	}
@@ -263,9 +285,9 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 	_ = stdin.Close()
 
 	select {
-	case err := <-waitCh:
+	case <-processDone:
 		if result == nil {
-			result = err
+			result = processErr
 		}
 	case <-time.After(5 * time.Second):
 		if result == nil {

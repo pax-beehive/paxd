@@ -220,7 +220,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 			s.spec.TransportQueueID,
 			err,
 		)
-		return connectedExit(TransientExit("transport_recovery_failed", err.Error()))
+		return connectedExit(classifyAgentTransportFailure("transport_recovery_failed", err))
 	}
 	defer binding.Close()
 
@@ -265,7 +265,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
 	}
-	return connectedExit(TransientExit("session_error", result.Error()))
+	return connectedExit(classifyAgentTransportFailure("session_error", result))
 }
 
 func (s *AgentTunnelSession) runWithPersistentProcess(
@@ -312,7 +312,7 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 			s.spec.TransportQueueID,
 			err,
 		)
-		return connectedExit(TransientExit("transport_recovery_failed", err.Error()))
+		return connectedExit(classifyAgentTransportFailure("transport_recovery_failed", err))
 	}
 	defer binding.Close()
 
@@ -367,7 +367,7 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
 	}
-	return connectedExit(TransientExit("session_error", result.Error()))
+	return connectedExit(classifyAgentTransportFailure("session_error", result))
 }
 
 func (s *AgentTunnelSession) runWithACPPool(
@@ -385,7 +385,7 @@ func (s *AgentTunnelSession) runWithACPPool(
 	if err != nil {
 		return connectedExit(TransientExit("producer_unavailable", err.Error()))
 	}
-	boundary := newACPSessionBoundary(s.spec.ConnectionID, s.deps.ACPSessionBindings)
+	boundary := s.poolSessionBoundary(pool)
 	var bridge *e2eeTransportBridge
 	engine := s.deps.ReliableEngineFactory.NewReliableEngine(producer, reliablemq.DispatcherFunc(func(ctx context.Context, frame reliablemq.Frame) error {
 		if handled, err := bridge.handleCommand(ctx, frame, func(ctx context.Context, managerSessionID string, payload []byte) (string, error) {
@@ -442,7 +442,7 @@ func (s *AgentTunnelSession) runWithACPPool(
 			s.spec.TransportQueueID,
 			err,
 		)
-		return connectedExit(TransientExit("transport_recovery_failed", err.Error()))
+		return connectedExit(classifyAgentTransportFailure("transport_recovery_failed", err))
 	}
 	defer binding.Close()
 
@@ -483,7 +483,14 @@ func (s *AgentTunnelSession) runWithACPPool(
 	if result == nil {
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
 	}
-	return connectedExit(TransientExit("session_error", result.Error()))
+	return connectedExit(classifyAgentTransportFailure("session_error", result))
+}
+
+func classifyAgentTransportFailure(code string, err error) Exit {
+	if errors.Is(err, reliablemq.ErrInboundHistoryInconsistent) {
+		return ConfigExit("transport_history_inconsistent", err.Error())
+	}
+	return TransientExit(code, err.Error())
 }
 
 func (s *AgentTunnelSession) validate() Exit {
@@ -523,6 +530,15 @@ func (s *AgentTunnelSession) validate() Exit {
 
 func (s *AgentTunnelSession) replayInbound(ctx context.Context, engine ReliableEngine) error {
 	return engine.ReplayInbound(ctx, s.spec.TransportQueueID, reliablemq.StreamACP, replayLimit)
+}
+
+func (s *AgentTunnelSession) poolSessionBoundary(pool *ACPPool) *acpSessionBoundary {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.sessionBoundary == nil || pool.sessionBoundary.connectionID != s.spec.ConnectionID {
+		pool.sessionBoundary = newACPSessionBoundary(s.spec.ConnectionID, s.deps.ACPSessionBindings)
+	}
+	return pool.sessionBoundary
 }
 
 func (s *AgentTunnelSession) recoverReliableTransport(

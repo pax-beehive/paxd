@@ -59,8 +59,10 @@ func (b *acpSessionBoundary) inbound(
 	}
 	if !found && nativeSessionHint != "" {
 		nativeSessionID = nativeSessionHint
+		if err := b.bind(ctx, managerSessionID, nativeSessionID); err != nil {
+			return "", nil, err
+		}
 		found = true
-		_ = b.bind(ctx, managerSessionID, nativeSessionID)
 	}
 	if !found {
 		return "", nil, ErrACPSessionBindingMissing
@@ -79,12 +81,13 @@ func (b *acpSessionBoundary) outbound(
 		return "", payload, nil
 	}
 	requestKey := rpcIDKey(msg.ID)
-	b.mu.Lock()
-	managerSessionID := b.pendingNew[requestKey]
-	if managerSessionID != "" {
-		delete(b.pendingNew, requestKey)
+	managerSessionID := ""
+	if msg.Method == "" && len(msg.ID) > 0 && (len(msg.Result) > 0 || msg.Error != nil) {
+		b.mu.Lock()
+		managerSessionID = b.pendingNew[requestKey]
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
+	pendingManagerID := managerSessionID
 
 	if managerSessionID != "" && msg.Error == nil {
 		createdNativeID := nativeSessionID
@@ -113,6 +116,13 @@ func (b *acpSessionBoundary) outbound(
 		return "", payload, nil
 	}
 	rewritten, _, err := rewriteACPSessionID(payload, managerSessionID)
+	if err == nil && pendingManagerID != "" {
+		b.mu.Lock()
+		if b.pendingNew[requestKey] == pendingManagerID {
+			delete(b.pendingNew, requestKey)
+		}
+		b.mu.Unlock()
+	}
 	return managerSessionID, rewritten, err
 }
 
