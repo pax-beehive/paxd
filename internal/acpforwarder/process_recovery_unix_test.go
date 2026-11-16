@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +39,15 @@ func TestForwarderChildProcess(t *testing.T) {
 	}
 	if mode == "invalid" {
 		_, _ = fmt.Fprintln(os.Stdout, "not valid JSON")
+	}
+	if mode == "hold-output-child" {
+		child := exec.Command(os.Args[0], "-test.run=^TestForwarderChildProcess$")
+		child.Env = append(os.Environ(), "PAX_FORWARDER_CHILD_MODE=wait", "PAX_FORWARDER_CHILD_PID="+os.Getenv("PAX_FORWARDER_CHILD_PID")+".child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(4)
+		}
+		_ = child.Process.Release()
 	}
 	if mode == "echo" {
 		scanner := bufio.NewScanner(os.Stdin)
@@ -79,6 +89,75 @@ func TestForwarderGivenReconcileFailureThenReapsStartedWorker(t *testing.T) {
 	connected, err := svc.runOnce(ctx)
 	assert.True(t, connected)
 	require.ErrorContains(t, err, "reconcile producer")
+	assertForwarderChildReaped(t, pidPath)
+}
+
+func TestForwarderGivenCancellationDuringQuietReconcileThenInterruptsSocketRead(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("PAX_FORWARDER_CHILD_PID", pidPath)
+	t.Setenv("PAX_FORWARDER_CHILD_MODE", "hold-output-child")
+	// A launcher can exit while its worker keeps the inherited output pipe open.
+	// Cancelling recovery must therefore interrupt the socket independently of EOF.
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidPath + ".child")
+		if err == nil {
+			if pid, err := strconv.Atoi(string(raw)); err == nil {
+				if child, err := os.FindProcess(pid); err == nil {
+					_ = child.Kill()
+				}
+			}
+		}
+	})
+	reconciling := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		reconciling <- conn
+		// Remain silent instead of replying to the reconcile request.
+		_, _, _ = conn.ReadMessage()
+	}))
+	t.Cleanup(server.Close)
+	journal := openTestJournal(t)
+	t.Cleanup(func() { _ = journal.Close() })
+	svc := New(Config{
+		CloudURL: server.URL, APIKey: "test", ConnectionID: "conn_1", AgentID: "agent_1",
+		Command: []string{os.Args[0], "-test.run=^TestForwarderChildProcess$"}, Journal: journal,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := svc.runOnce(ctx); done <- err }()
+	var managerConn *websocket.Conn
+	select {
+	case managerConn = <-reconciling:
+	case <-time.After(5 * time.Second):
+		t.Fatal("forwarder did not begin reconciliation")
+	}
+	t.Cleanup(func() { _ = managerConn.Close() })
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(pidPath + ".child")
+		return err == nil
+	}, 5*time.Second, time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+	case <-time.After(2 * time.Second):
+		assert.Fail(t, "cancelled recovery remained blocked on a quiet manager")
+		_ = managerConn.Close()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("forwarder did not stop after test socket cleanup")
+		}
+	}
 	assertForwarderChildReaped(t, pidPath)
 }
 

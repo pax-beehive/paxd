@@ -192,6 +192,9 @@ func (s *Service) runOnce(ctx context.Context) (bool, error) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// A silent peer can leave reconciliation blocked before the reader loop starts.
+	stopClose := context.AfterFunc(runCtx, func() { _ = conn.Close() })
+	defer stopClose()
 
 	command := acpcommand.PreferCached(s.cfg.Command)
 	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
