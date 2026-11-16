@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -273,8 +274,35 @@ func TestStartUnixLocalAPIServesAndCloses(t *testing.T) {
 	require.NotNil(t, server)
 	assert.NotNil(t, server.Addr())
 
+	// Given Serve has accepted a request, Shutdown owns the listener and closes it.
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return new(net.Dialer).DialContext(ctx, "unix", socketPath)
+	}}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	response, err := client.Get("http://local/")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.NoError(t, server.server.Shutdown(ctx))
+
+	// When explicit cleanup follows HTTP shutdown, both closes must succeed.
 	require.NoError(t, server.Close())
+	assert.NoError(t, server.Close())
 }
+
+func TestLocalAPIServerGivenUnexpectedListenerCloseFailureThenPreservesError(t *testing.T) {
+	failure := errors.New("unexpected listener close failure")
+	server := &LocalAPIServer{listener: localAPICloseFailureListener{closeErr: failure}}
+
+	assert.ErrorIs(t, server.Close(), failure)
+}
+
+type localAPICloseFailureListener struct {
+	net.Listener
+	closeErr error
+}
+
+func (l localAPICloseFailureListener) Close() error { return l.closeErr }
 
 func TestStartDebugHTTPServesAndCloses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

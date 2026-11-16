@@ -18,6 +18,7 @@ import (
 	"github.com/pax-beehive/paxd/internal/store"
 	"github.com/pax-beehive/paxkit/reliablemq"
 	"github.com/pax-beehive/paxkit/reliablemq/sqlstore"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestTunnelURLFromHTTP(t *testing.T) {
@@ -358,12 +359,12 @@ func TestCopyWSToStdinWriteFailureLeavesInboundReceived(t *testing.T) {
 	if err := client.WriteMessage(websocket.TextMessage, frame); err != nil {
 		t.Fatalf("write frame: %v", err)
 	}
-	if _, _, err := client.ReadMessage(); err != nil {
-		t.Fatalf("read ack: %v", err)
-	}
+	// Receipt ACK may race the connection closing after a worker dispatch failure.
+	_, _, _ = client.ReadMessage()
 	_ = client.Close()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		assert.ErrorIs(t, err, errTestWriteFailure)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for copyWSToStdin to exit")
 	}

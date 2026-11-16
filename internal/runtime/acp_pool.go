@@ -149,6 +149,7 @@ type ACPPool struct {
 	outputSink      ACPRouterOutputSink
 	outputSinkToken uint64
 	e2eeBridge      *e2eeTransportBridge
+	sessionBoundary *acpSessionBoundary
 	localCalls      map[string]chan localCallResult
 	localObservers  map[string]func(context.Context, []byte) error
 }
