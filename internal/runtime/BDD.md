@@ -117,6 +117,14 @@ When `RemoteControlSession.Run` dials
 Then it returns exit class `transient`  
 And the supervisor slot decides backoff
 
+### Scenario: handshake timeout is retried, not treated as cancellation
+
+Given the WebSocket dialer's own handshake timeout expires  
+And the slot has not canceled the session context  
+When `RemoteControlSession.Run` or `AgentTunnelSession.Run` dials  
+Then it returns exit class `transient` with code `dial_timeout`  
+And it does not report the dialer's context deadline error as canceled, because the slot never restarts a canceled session
+
 ### Scenario: successful connection delegates frames to controlws
 
 Given the WebSocket connection succeeds  
@@ -191,6 +199,15 @@ And the local ACP process starts
 When traffic bridge runs  
 Then the session continues until WebSocket closes, process exits, or context cancels  
 And `Run` returns a classified exit
+
+### Scenario: context error inside a connected tunnel is retried
+
+Given the ACP tunnel is connected  
+And the slot has not canceled the session context  
+When a pump or the transport ends with a context deadline or cancellation error  
+Then `AgentTunnelSession.Run` returns exit class `transient`  
+And a persistent ACP process is kept for the next connection  
+And only cancellation by the slot returns the terminal canceled exit
 
 ### Scenario: connection id is the local journal identity
 

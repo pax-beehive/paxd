@@ -82,7 +82,7 @@ func (s *RemoteControlSession) Run(ctx context.Context) Exit {
 	respDiag := consumeResponseDiagnostics(resp)
 	if err != nil {
 		log.Printf("[paxd] remote session id=%s dial failed %s err=%v", s.cfg.Spec.RemoteID, respDiag.String(), err)
-		return classifyDialExit(err, resp)
+		return classifyDialExit(ctx, err, resp)
 	}
 	if conn == nil {
 		log.Printf("[paxd] remote session id=%s dialer returned nil connection", s.cfg.Spec.RemoteID)
@@ -206,7 +206,12 @@ func compactLogSnippet(value string, limit int) string {
 	return value[:limit] + "..."
 }
 
-func classifyDialExit(err error, resp *http.Response) Exit {
+// classifyDialExit turns a failed websocket handshake into an exit. Only the
+// owning runtime slot can stop a session permanently, and it does so by
+// canceling ctx. The dialer's handshake timeout also surfaces as
+// context.DeadlineExceeded while ctx is still live; that is a slow network, so
+// it must be retried rather than reported as a cancellation.
+func classifyDialExit(ctx context.Context, err error, resp *http.Response) Exit {
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
@@ -217,8 +222,11 @@ func classifyDialExit(err error, resp *http.Response) Exit {
 	case http.StatusForbidden:
 		return AuthExit("access_denied", "websocket handshake was forbidden")
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return CanceledExit(err)
+	if ctx.Err() != nil {
+		return CanceledExit(ctx.Err())
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return TransientExit("dial_timeout", fmt.Sprintf("websocket dial timed out: %v", err))
 	}
 	return TransientExit("dial_failed", fmt.Sprintf("websocket dial failed: %v", err))
 }

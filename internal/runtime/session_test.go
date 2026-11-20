@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -87,6 +88,7 @@ func TestRemoteControlSessionResetsBackoffOnlyAfterConnectedTransientExit(t *tes
 		{name: "config failure", exit: ConfigExit("invalid_config", "invalid config"), want: ConfigExit("invalid_config", "invalid config")},
 		{name: "terminal exit", exit: TerminalExit("stopped", "stopped"), want: TerminalExit("stopped", "stopped")},
 		{name: "dial failure", dialErr: errors.New("network failure"), want: TransientExit("dial_failed", "websocket dial failed: network failure")},
+		{name: "dial timeout", dialErr: context.DeadlineExceeded, want: TransientExit("dial_timeout", "websocket dial timed out: context deadline exceeded")},
 		{name: "slot cancellation", cancel: true, exit: TransientExit("read_failed", "connection closed"), want: CanceledExit(context.Canceled)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,18 +113,36 @@ func TestRemoteControlSessionResetsBackoffOnlyAfterConnectedTransientExit(t *tes
 }
 
 func TestRemoteControlSessionDialClassification(t *testing.T) {
-	forbidden := classifyDialExit(errors.New("bad handshake"), &http.Response{
+	live := context.Background()
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	// The dialer bounds the handshake itself and reports its timeout as a
+	// context error, although the session context is still live.
+	handshakeTimeout := fmt.Errorf("dial tcp 203.0.113.7:443: %w", context.DeadlineExceeded)
+
+	forbidden := classifyDialExit(live, errors.New("bad handshake"), &http.Response{
 		StatusCode: http.StatusForbidden,
 		Body:       io.NopCloser(strings.NewReader("")),
 	})
 	assert.Equal(t, ExitAuth, forbidden.Class)
 	assert.Equal(t, "access_denied", forbidden.Code)
 
-	canceled := classifyDialExit(context.Canceled, nil)
-	assert.Equal(t, ExitTerminal, canceled.Class)
-	assert.Equal(t, "canceled", canceled.Code)
+	canceled := classifyDialExit(stopped, context.Canceled, nil)
+	assert.Equal(t, CanceledExit(context.Canceled), canceled)
 
-	transient := classifyDialExit(errors.New("i/o timeout"), nil)
+	timedOut := classifyDialExit(live, handshakeTimeout, nil)
+	assert.Equal(t, ExitTransient, timedOut.Class)
+	assert.Equal(t, "dial_timeout", timedOut.Code)
+	assert.Contains(t, timedOut.Message, "context deadline exceeded")
+
+	stoppedWhileDialing := classifyDialExit(stopped, handshakeTimeout, nil)
+	assert.Equal(t, CanceledExit(context.Canceled), stoppedWhileDialing)
+
+	strayCancellation := classifyDialExit(live, context.Canceled, nil)
+	assert.Equal(t, ExitTransient, strayCancellation.Class)
+	assert.Equal(t, "dial_failed", strayCancellation.Code)
+
+	transient := classifyDialExit(live, errors.New("i/o timeout"), nil)
 	assert.Equal(t, ExitTransient, transient.Class)
 	assert.Equal(t, "dial_failed", transient.Code)
 }
