@@ -148,7 +148,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 	respDiag := consumeResponseDiagnostics(resp)
 	if err != nil {
 		log.Printf("[paxd] agent tunnel id=%s dial failed %s err=%v", s.spec.ConnectionID, respDiag.String(), err)
-		return classifyDialExit(err, resp)
+		return classifyDialExit(ctx, err, resp)
 	}
 	if conn == nil {
 		log.Printf("[paxd] agent tunnel id=%s dialer returned nil connection", s.spec.ConnectionID)
@@ -256,7 +256,7 @@ func (s *AgentTunnelSession) Run(ctx context.Context) Exit {
 		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
 		return connectedExit(TransientExit("heartbeat_timeout", "websocket heartbeat timed out"))
 	}
-	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+	if sessionCanceled(ctx) {
 		return CanceledExit(result)
 	}
 	if producerDisconnected {
@@ -349,7 +349,7 @@ func (s *AgentTunnelSession) runWithPersistentProcess(
 		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
 		return connectedExit(TransientExit("heartbeat_timeout", "websocket heartbeat timed out"))
 	}
-	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+	if sessionCanceled(ctx) {
 		s.deps.ACPProcessPool.Stop(s.spec)
 		return CanceledExit(result)
 	}
@@ -474,7 +474,7 @@ func (s *AgentTunnelSession) runWithACPPool(
 		log.Printf("[paxd] agent tunnel id=%s heartbeat timed out", s.spec.ConnectionID)
 		return connectedExit(TransientExit("heartbeat_timeout", "websocket heartbeat timed out"))
 	}
-	if errors.Is(result, context.Canceled) || errors.Is(result, context.DeadlineExceeded) || ctx.Err() != nil {
+	if sessionCanceled(ctx) {
 		return CanceledExit(result)
 	}
 	if producerDisconnected {
@@ -484,6 +484,13 @@ func (s *AgentTunnelSession) runWithACPPool(
 		return connectedExit(TransientExit("session_ended", "agent tunnel session ended"))
 	}
 	return connectedExit(classifyAgentTransportFailure("session_error", result))
+}
+
+// sessionCanceled reports whether the owning runtime slot stopped the session.
+// A context error from inside the session, such as a timed out transport
+// operation, says nothing about that and must stay retryable.
+func sessionCanceled(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 func classifyAgentTransportFailure(code string, err error) Exit {
