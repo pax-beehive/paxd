@@ -176,11 +176,11 @@ func TestACPRouterGivenReplayGuardWhenWorkerIsReplacedThenRemoveOnlyItsScope(t *
 			router.setResumeTranscriptSuppressed(unaffected, true)
 			switch teardown {
 			case "remove_epoch":
-				router.RemoveSlot("slot_a", "epoch_wrong")
+				router.RemoveSlot(t.Context(), "slot_a", "epoch_wrong")
 				require.Len(t, router.resumeTranscripts, 2)
-				router.RemoveSlot("slot_a", "epoch_a")
+				router.RemoveSlot(t.Context(), "slot_a", "epoch_a")
 			case "remove_all":
-				router.RemoveSlot("slot_a", "")
+				router.RemoveSlot(t.Context(), "slot_a", "")
 			case "replace":
 				router.UpsertSlot(newFakeRouterSlot("slot_a", "epoch_new", 0))
 			}

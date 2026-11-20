@@ -153,6 +153,8 @@ type pendingPrompt struct {
 	turnID          string
 	slotID          string
 	processEpoch    string
+	responding      bool
+	interrupted     bool
 }
 
 type pendingWorkerRequest struct {
@@ -237,7 +239,8 @@ func (r *ACPRouter) BeginSlotDrain(slotID string, processEpoch string) <-chan st
 	return drain.done
 }
 
-func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
+func (r *ACPRouter) RemoveSlot(ctx context.Context, slotID string, processEpoch string) error {
+	interrupted := make(map[string]pendingPrompt)
 	r.mu.Lock()
 	for scope := range r.resumeTranscripts {
 		if scope.slotID == slotID && (processEpoch == "" || scope.processEpoch == processEpoch) {
@@ -262,7 +265,9 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 		}
 	}
 	for id, prompt := range r.pendingPrompts {
-		if prompt.slotID == slotID && prompt.processEpoch == processEpoch {
+		if prompt.slotID == slotID && (processEpoch == "" || prompt.processEpoch == processEpoch) && !prompt.responding {
+			prompt.interrupted = true
+			interrupted[id] = prompt
 			r.rememberPromptLocked(id, prompt)
 			delete(r.pendingPrompts, id)
 			delete(r.activeSessionTurns, prompt.nativeSessionID)
@@ -280,6 +285,17 @@ func (r *ACPRouter) RemoveSlot(slotID string, processEpoch string) {
 		}
 	}
 	r.mu.Unlock()
+	var emitErr error
+	for id, prompt := range interrupted {
+		response, err := marshalACPRouterError(json.RawMessage(id), ACPRouterError{
+			Code: "agent_process_exited", Message: "Agent process exited before finishing this turn. Send again to retry.",
+		})
+		if err == nil {
+			err = r.output.EmitManagerFrame(withACPTurnID(ctx, prompt.turnID), prompt.nativeSessionID, response)
+		}
+		emitErr = errors.Join(emitErr, err)
+	}
+	return emitErr
 }
 
 func (r *ACPRouter) HandleManagerFrame(ctx context.Context, payload []byte) error {
@@ -404,13 +420,16 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		if err != nil {
 			return err
 		}
-		promptSessionID := r.promptSessionForResponse(msg.ID, slotID, processEpoch)
-		if nativeSessionID == "" {
-			nativeSessionID = promptSessionID
+		prompt, skip := r.promptForResponse(msg.ID, slotID, processEpoch)
+		if skip {
+			return nil
 		}
-		ctx = withACPTurnID(ctx, r.promptTurnForResponse(msg.ID, slotID, processEpoch))
+		if nativeSessionID == "" {
+			nativeSessionID = prompt.nativeSessionID
+		}
+		ctx = withACPTurnID(ctx, prompt.turnID)
 		emitErr := r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
-		if promptSessionID != "" {
+		if prompt.nativeSessionID != "" {
 			r.releasePromptForResponse(msg.ID, slotID, processEpoch)
 		}
 		return emitErr
@@ -951,18 +970,21 @@ func (r *ACPRouter) acquirePromptLease(nativeSessionID string, slot ACPRouterSlo
 	return nil
 }
 
-func (r *ACPRouter) promptSessionForResponse(requestID json.RawMessage, slotID string, processEpoch string) string {
+func (r *ACPRouter) promptForResponse(requestID json.RawMessage, slotID string, processEpoch string) (pendingPrompt, bool) {
 	key := rpcIDKey(requestID)
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	pending, ok := r.pendingPrompts[key]
-	if !ok {
-		pending, ok = r.completedPrompts[internalWaiterKey(slotID, processEpoch, requestID)]
+	if ok && pending.slotID == slotID && pending.processEpoch == processEpoch {
+		if pending.responding {
+			return pendingPrompt{}, true
+		}
+		pending.responding = true
+		r.pendingPrompts[key] = pending
+		return pending, false
 	}
-	r.mu.Unlock()
-	if !ok || pending.slotID != slotID || pending.processEpoch != processEpoch {
-		return ""
-	}
-	return pending.nativeSessionID
+	completed := r.completedPrompts[internalWaiterKey(slotID, processEpoch, requestID)]
+	return completed, completed.interrupted
 }
 
 func (r *ACPRouter) releasePromptForResponse(requestID json.RawMessage, slotID string, processEpoch string) string {

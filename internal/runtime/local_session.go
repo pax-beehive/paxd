@@ -141,21 +141,16 @@ func (c *LocalSessionClient) request(ctx context.Context, sessionID, method stri
 	}
 }
 
-func (p *ACPPool) failLocalSlot(ctx context.Context, slotID, epoch string) {
-	requests := map[string]string{}
+func (p *ACPPool) failLocalSessionCreation(ctx context.Context, slotID, epoch string) {
+	var requests []string
 	p.router.mu.Lock()
 	for key, pending := range p.router.pendingNew {
 		if pending.slotID == slotID && pending.processEpoch == epoch {
-			requests[key] = ""
-		}
-	}
-	for key, pending := range p.router.pendingPrompts {
-		if pending.slotID == slotID && pending.processEpoch == epoch {
-			requests[key] = pending.nativeSessionID
+			requests = append(requests, key)
 		}
 	}
 	p.router.mu.Unlock()
-	for key, sessionID := range requests {
+	for _, key := range requests {
 		p.mu.Lock()
 		call := p.localCalls[key]
 		p.mu.Unlock()
@@ -165,7 +160,7 @@ func (p *ACPPool) failLocalSlot(ctx context.Context, slotID, epoch string) {
 		// rpcIDKey preserves the JSON representation used for local string IDs.
 		payload, err := json.Marshal(acpRPCMessage{JSONRPC: "2.0", ID: json.RawMessage(key), Error: &acpRPCError{Code: -32000, Message: "Agent process exited during local execution"}})
 		if err == nil {
-			_, _ = p.deliverLocalFrame(ctx, sessionID, payload)
+			_, _ = p.deliverLocalFrame(ctx, "", payload)
 		}
 	}
 }

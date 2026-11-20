@@ -332,6 +332,6 @@ func TestRemovingSlotEndsBackgroundTurn(t *testing.T) {
 	h.update(t, `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Woke up"}}`)
 	require.Len(t, h.router.RuntimeSnapshot().ActiveTurns, 1)
 
-	h.router.RemoveSlot("slot_a", "epoch_a")
+	h.router.RemoveSlot(t.Context(), "slot_a", "epoch_a")
 	assert.Empty(t, h.router.RuntimeSnapshot().ActiveTurns)
 }

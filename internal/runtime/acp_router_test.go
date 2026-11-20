@@ -266,7 +266,7 @@ func TestACPRouterResumesOnlySessionsBoundToRestartedSlot(t *testing.T) {
 	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/work-b","mcpServers":[]}}`)))
 	require.NoError(t, router.HandleSlotFrame(ctx, "slot_b", "epoch_b", []byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session_b"}}`)))
 
-	router.RemoveSlot("slot_a", "epoch_a_old")
+	router.RemoveSlot(t.Context(), "slot_a", "epoch_a_old")
 	cleared, err := store.ClearACPSessionRoutesForProcess(ctx, "conn_1", "slot_a", "epoch_a_old")
 	require.NoError(t, err)
 	require.Equal(t, int64(1), cleared)
@@ -344,7 +344,7 @@ func TestACPRouterResumesCreatedSessionAfterSlotProcessEpochChanges(t *testing.T
 	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work","mcpServers":[{"name":"fs","command":"fs-mcp","args":[],"env":[]}],"additionalDirectories":["/shared"]}}`)))
 	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_old", []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session_1"}}`)))
 
-	router.RemoveSlot("slot_a", "epoch_old")
+	router.RemoveSlot(t.Context(), "slot_a", "epoch_old")
 	cleared, err := store.ClearACPSessionRoutesForProcess(ctx, "conn_1", "slot_a", "epoch_old")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), cleared)
@@ -454,7 +454,7 @@ func TestACPRouterCompletesProjectedTurnAfterTerminalOutputIsHandedOff(t *testin
 	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
 }
 
-func TestACPRouterSlotExitTerminatesProjectedTurn(t *testing.T) {
+func TestACPRouterSlotExitReportsInterruptedTurn(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeACPRouteStore("conn_1")
 	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
@@ -463,12 +463,56 @@ func TestACPRouterSlotExitTerminatesProjectedTurn(t *testing.T) {
 		BoundSlotID: "slot_a", BoundProcessEpoch: "epoch_a",
 		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
 	})
-	router := newTestACPRouter("conn_1", store)
+	var errorsSent int
+	router := newTestACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, session string, payload []byte) error {
+		errorsSent++
+		assert.Equal(t, "session_1", session)
+		assert.Equal(t, "turn_1", acpTurnID(ctx))
+		var reply acpRPCMessage
+		require.NoError(t, json.Unmarshal(payload, &reply))
+		assert.Equal(t, `"prompt_10"`, string(reply.ID))
+		require.NotNil(t, reply.Error)
+		assert.JSONEq(t, `{"kind":"agent_process_exited"}`, string(reply.Error.Data))
+		return nil
+	})))
+	router.UpsertSlot(slot)
+	require.NoError(t, router.HandleManagerFrame(withACPTurnID(ctx, "turn_1"), []byte(`{"jsonrpc":"2.0","id":"prompt_10","method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+
+	require.NoError(t, router.RemoveSlot(ctx, "slot_a", "epoch_other"))
+	assert.Zero(t, errorsSent)
+	require.NoError(t, router.RemoveSlot(ctx, "slot_a", "epoch_a"))
+	require.NoError(t, router.RemoveSlot(ctx, "slot_a", "epoch_a"))
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", []byte(`{"jsonrpc":"2.0","id":"prompt_10","result":{"stopReason":"end_turn"}}`)))
+
+	assert.Equal(t, 1, errorsSent)
+	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
+}
+
+func TestACPRouterDeliversNormalTerminalResponseWhenSlotExitsDuringDelivery(t *testing.T) {
+	ctx := t.Context()
+	store := newFakeACPRouteStore("conn_1")
+	slot := newFakeRouterSlot("slot_a", "epoch_a", 0)
+	store.seedRoute(ACPRoute{
+		ConnectionID: "conn_1", NativeSessionID: "session_1",
+		BoundSlotID: "slot_a", BoundProcessEpoch: "epoch_a",
+		ResumeParams: json.RawMessage(`{"cwd":"/work","mcpServers":[]}`), Version: 1,
+	})
+	var router *ACPRouter
+	var outcomes []json.RawMessage
+	router = newTestACPRouter("conn_1", store, WithACPRouterOutputSink(ACPRouterOutputSinkFunc(func(ctx context.Context, session string, payload []byte) error {
+		outcomes = append(outcomes, append(json.RawMessage(nil), payload...))
+		if len(outcomes) == 1 {
+			require.NoError(t, router.RemoveSlot(ctx, "slot_a", "epoch_a"))
+		}
+		return nil
+	})))
 	router.UpsertSlot(slot)
 	require.NoError(t, router.HandleManagerFrame(ctx, []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"session_1","prompt":[]}}`)))
+	terminal := []byte(`{"jsonrpc":"2.0","id":10,"result":{"stopReason":"end_turn"}}`)
+	require.NoError(t, router.HandleSlotFrame(ctx, "slot_a", "epoch_a", terminal))
 
-	router.RemoveSlot("slot_a", "epoch_a")
-
+	require.Len(t, outcomes, 1)
+	assert.JSONEq(t, string(terminal), string(outcomes[0]))
 	assert.Empty(t, router.RuntimeSnapshot().ActiveTurns)
 }
 
