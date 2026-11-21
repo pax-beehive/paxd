@@ -213,6 +213,10 @@ func (s *ACPSlot) ProcessEpoch() string {
 	return s.spec.ProcessEpoch
 }
 
+func (s *ACPSlot) codexSessionFailures() bool {
+	return isTrustedCodexACPCommand(s.spec.Command)
+}
+
 func (s *ACPSlot) Ordinal() int {
 	return s.spec.Ordinal
 }
@@ -257,7 +261,7 @@ func (s *ACPSlot) Terminate(ctx context.Context) {
 }
 
 func (s *ACPSlot) initialize(ctx context.Context) error {
-	profile, err := buildACPClientInitProfile(s.spec.PaxdVersion)
+	profile, err := buildACPClientInitProfile(s.spec.PaxdVersion, s.codexSessionFailures())
 	if err != nil {
 		return fmt.Errorf("build acp initialize profile: %w", err)
 	}

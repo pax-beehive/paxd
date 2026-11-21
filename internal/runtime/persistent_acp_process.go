@@ -320,7 +320,7 @@ func (p *persistentACPProcess) InitializeResult() json.RawMessage {
 }
 
 func (p *persistentACPProcess) initialize(ctx context.Context) error {
-	profile, err := buildACPClientInitProfile(p.paxdVersion)
+	profile, err := buildACPClientInitProfile(p.paxdVersion, false)
 	if err != nil {
 		return fmt.Errorf("build acp initialize profile: %w", err)
 	}

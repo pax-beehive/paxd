@@ -149,12 +149,13 @@ type pendingNewSession struct {
 }
 
 type pendingPrompt struct {
-	nativeSessionID string
-	turnID          string
-	slotID          string
-	processEpoch    string
-	responding      bool
-	interrupted     bool
+	nativeSessionID      string
+	turnID               string
+	slotID               string
+	processEpoch         string
+	responding           bool
+	interrupted          bool
+	codexSessionFailures bool
 }
 
 type pendingWorkerRequest struct {
@@ -426,6 +427,15 @@ func (r *ACPRouter) HandleSlotFrame(ctx context.Context, slotID string, processE
 		}
 		if nativeSessionID == "" {
 			nativeSessionID = prompt.nativeSessionID
+		}
+		if prompt.codexSessionFailures && codexTerminalFailure(msg) {
+			payload, err = marshalACPRouterError(msg.ID, ACPRouterError{
+				Code: codexTurnFailed, Message: "Codex could not complete this turn.",
+			})
+			if err != nil {
+				r.releasePromptForResponse(msg.ID, slotID, processEpoch)
+				return err
+			}
 		}
 		ctx = withACPTurnID(ctx, prompt.turnID)
 		emitErr := r.output.EmitManagerFrame(ctx, nativeSessionID, append([]byte(nil), payload...))
@@ -981,6 +991,11 @@ func (r *ACPRouter) promptForResponse(requestID json.RawMessage, slotID string, 
 		}
 		pending.responding = true
 		r.pendingPrompts[key] = pending
+		// Completed prompt lookups retain attribution only.
+		slot := r.slots[slotID]
+		if source, ok := slot.(interface{ codexSessionFailures() bool }); ok {
+			pending.codexSessionFailures = slot.ProcessEpoch() == processEpoch && source.codexSessionFailures()
+		}
 		return pending, false
 	}
 	completed := r.completedPrompts[internalWaiterKey(slotID, processEpoch, requestID)]

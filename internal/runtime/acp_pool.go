@@ -264,6 +264,8 @@ func marshalACPRouterError(id json.RawMessage, routerErr ACPRouterError) ([]byte
 	code := int64(-32000)
 	data := map[string]any{"kind": routerErr.Code}
 	switch routerErr.Code {
+	case codexTurnFailed:
+		code = -32603
 	case "slot_busy", "session_busy":
 		code = -32001
 		data["retryable"] = true

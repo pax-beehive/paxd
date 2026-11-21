@@ -42,16 +42,27 @@ type acpInitCapture struct {
 	err error
 }
 
-func buildACPClientInitProfile(paxdVersion string) (acpClientInitProfile, error) {
-	params, err := canonicalJSON(map[string]any{
-		"protocolVersion": 1,
-		"clientCapabilities": map[string]any{
-			"session": map[string]any{
-				"configOptions": map[string]any{
-					"boolean": map[string]any{},
-				},
+func buildACPClientInitProfile(paxdVersion string, codexSessionFailures bool) (acpClientInitProfile, error) {
+	capabilities := map[string]any{
+		"session": map[string]any{
+			"configOptions": map[string]any{
+				"boolean": map[string]any{},
 			},
 		},
+	}
+	if codexSessionFailures {
+		capabilities["_meta"] = map[string]any{
+			"jetbrains": map[string]any{
+				"air": map[string]any{
+					"version":      1,
+					"capabilities": []string{"sessionFailure"},
+				},
+			},
+		}
+	}
+	params, err := canonicalJSON(map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": capabilities,
 		"clientInfo": map[string]any{
 			"name":    "paxd",
 			"version": StaticPaxdVersionProvider(paxdVersion).PaxdVersion(),

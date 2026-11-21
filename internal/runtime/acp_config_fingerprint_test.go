@@ -9,9 +9,9 @@ import (
 )
 
 func TestClientCapabilitiesGivenPaxdUpgradeWhenHashedThenPreservesConfigurationIdentity(t *testing.T) {
-	before, err := buildACPClientInitProfile("0.1.40")
+	before, err := buildACPClientInitProfile("0.1.40", false)
 	require.NoError(t, err)
-	after, err := buildACPClientInitProfile("0.1.41")
+	after, err := buildACPClientInitProfile("0.1.41", false)
 	require.NoError(t, err)
 	assert.NotEqual(t, before.ProfileHash, after.ProfileHash)
 	require.NotEmpty(t, before.CapabilitiesHash)
