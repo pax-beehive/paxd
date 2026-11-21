@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildACPClientInitProfileAdvertisesBooleanSessionConfig(t *testing.T) {
-	profile, err := buildACPClientInitProfile("v1.2.3")
+	profile, err := buildACPClientInitProfile("v1.2.3", false)
 	require.NoError(t, err)
 
 	var params map[string]any
