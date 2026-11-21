@@ -1,9 +1,6 @@
 package runtime
 
-import (
-	"context"
-	"encoding/json"
-)
+import "context"
 
 type acpTurnContextKey struct{}
 
@@ -31,20 +28,6 @@ func (r *ACPRouter) outputTurnContext(ctx context.Context, sessionID, slotID, ep
 		return withACPTurnID(ctx, "")
 	}
 	return withACPTurnID(ctx, turn.TurnID)
-}
-
-// Capture the request's identity before releasing its lease, including late responses.
-func (r *ACPRouter) promptTurnForResponse(id json.RawMessage, slotID, epoch string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pending, ok := r.pendingPrompts[rpcIDKey(id)]
-	if !ok {
-		pending, ok = r.completedPrompts[internalWaiterKey(slotID, epoch, id)]
-	}
-	if !ok || pending.slotID != slotID || pending.processEpoch != epoch {
-		return ""
-	}
-	return pending.turnID
 }
 
 func (r *ACPRouter) rememberPromptLocked(requestKey string, prompt pendingPrompt) {

@@ -209,8 +209,10 @@ func (p *ACPPool) RemoveSlot(ctx context.Context, slotID string, processEpoch st
 	if p == nil {
 		return
 	}
-	p.failLocalSlot(ctx, slotID, processEpoch)
-	p.router.RemoveSlot(slotID, processEpoch)
+	p.failLocalSessionCreation(ctx, slotID, processEpoch)
+	if err := p.router.RemoveSlot(ctx, slotID, processEpoch); err != nil {
+		log.Printf("[paxd] acp pool connection_id=%s slot_id=%s process_epoch=%s could not deliver interrupted turn", p.connectionID, slotID, processEpoch)
+	}
 	if p.routeStore != nil && processEpoch != "" {
 		cleared, err := p.routeStore.ClearACPSessionRoutesForProcess(ctx, p.connectionID, slotID, processEpoch)
 		if err != nil {
@@ -254,6 +256,11 @@ func acpRouterErrorResponse(payload []byte, err error) ([]byte, bool) {
 	if !ok || request.Method == "" || len(request.ID) == 0 {
 		return nil, false
 	}
+	response, err := marshalACPRouterError(request.ID, routerErr)
+	return response, err == nil
+}
+
+func marshalACPRouterError(id json.RawMessage, routerErr ACPRouterError) ([]byte, error) {
 	code := int64(-32000)
 	data := map[string]any{"kind": routerErr.Code}
 	switch routerErr.Code {
@@ -269,18 +276,17 @@ func acpRouterErrorResponse(payload []byte, err error) ([]byte, bool) {
 	}
 	dataPayload, marshalErr := json.Marshal(data)
 	if marshalErr != nil {
-		return nil, false
+		return nil, marshalErr
 	}
-	response, marshalErr := json.Marshal(acpRPCMessage{
+	return json.Marshal(acpRPCMessage{
 		JSONRPC: "2.0",
-		ID:      append(json.RawMessage(nil), request.ID...),
+		ID:      id,
 		Error: &acpRPCError{
 			Code:    code,
 			Message: routerErr.Message,
 			Data:    dataPayload,
 		},
 	})
-	return response, marshalErr == nil
 }
 
 func (p *ACPPool) HandleSlotFrame(ctx context.Context, slotID string, processEpoch string, payload []byte) error {
